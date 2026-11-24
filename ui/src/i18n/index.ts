@@ -1,6 +1,6 @@
 /**
  * The interface's language (English, Romanian, Spanish, German, French,
- * Danish, Italian, Polish, Brazilian Portuguese, Lao or Simplified Chinese). The interface is
+ * Danish, Italian, Polish, Brazilian Portuguese, Lao, Simplified Chinese or Thai). The interface is
  * written in English; in another language a translator walks what it shows
  * (texts, titles, placeholders) and puts each phrase it knows into that
  * language, keeping the English to put back. Drawings (SVG) and what the user
@@ -36,6 +36,7 @@ const LOADERS = {
   pt: () => import('./pt').then((m) => ({ dict: m.PT, patterns: m.PT_PATTERNS })),
   lo: () => import('./lo').then((m) => ({ dict: m.LO, patterns: m.LO_PATTERNS })),
   zh: () => import('./zh').then((m) => ({ dict: m.ZH, patterns: m.ZH_PATTERNS })),
+  th: () => import('./th').then((m) => ({ dict: m.TH, patterns: m.TH_PATTERNS })),
 } satisfies Record<string, () => Promise<Language>>;
 
 export type Lang = 'en' | keyof typeof LOADERS;
@@ -57,6 +58,7 @@ export async function loadAllLanguages(): Promise<void> {
 /** The languages offered, each named in itself. */
 export const LANGUAGES: { id: Lang; name: string }[] = [
   { id: 'en', name: 'English' },
+  { id: 'th', name: 'ภาษาไทย' },
   { id: 'ro', name: 'Română' },
   { id: 'es', name: 'Español' },
   { id: 'de', name: 'Deutsch' },
@@ -72,7 +74,7 @@ export const LANGUAGES: { id: Lang; name: string }[] = [
 const isLang = (x: unknown): x is Lang => LANGUAGES.some((l) => l.id === x);
 
 function stored(): Lang {
-  try { const v = localStorage.getItem('lapin.lang'); return isLang(v) ? v : 'en'; } catch { return 'en'; }
+  try { const v = localStorage.getItem('lapin.lang'); return isLang(v) ? v : 'th'; } catch { return 'th'; }
 }
 
 export const useLang = create<{ lang: Lang }>(() => ({ lang: stored() }));

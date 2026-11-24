@@ -1,0 +1,38 @@
+{
+  "id": "onebim",
+  "name": "OneBIM",
+  "brand": {
+    "name": "OneBIM",
+    "short": "OneBIM",
+    "identifier": "com.aiarchlab.onebim",
+    "mark": "1",
+    "accent": {
+      "light": "#111111",
+      "dark": "#f2f2f2"
+    },
+    "tagline": "BIM ภาษาไทยบน IFC · by AI ARCH LAB",
+    "hint": "เริ่มโปรเจกต์ใหม่ หรือเปิดไฟล์ IFC ที่มีอยู่"
+  },
+  "modules": [
+    "architecture",
+    "furniture",
+    "transport",
+    "structure",
+    "analysis",
+    "rebar",
+    "wood",
+    "steel",
+    "drafting",
+    "studio",
+    "phases",
+    "planning",
+    "civil",
+    "sitework",
+    "cost",
+    "mep",
+    "clash",
+    "speckle",
+    "scripting",
+    "graphs"
+  ]
+}

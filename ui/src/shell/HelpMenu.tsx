@@ -22,6 +22,7 @@ import { LANGUAGES, setLang, useLang } from '../i18n';
 import { BunnyIcon } from '../icons';
 import { replacements } from '../platform/modules';
 import { lazyPart } from '../platform/lazyPart';
+import { brand } from '../platform/brand';
 
 // Ask Lapin and its answers (help/faq.ts), fetched the first time it is opened.
 const AskDialog = lazyPart(() => import('../help/AskDialog').then((m) => m.AskDialog), { title: 'Ask Lapin' });
@@ -204,7 +205,9 @@ function AboutDialog({ version, overrides, onClose }: { version?: string; overri
         </header>
         <div className="dialog-body">
           <p className="about-name"><BunnyIcon size={22} /><b>Lapin</b> <span className="muted" data-no-i18n>{version ?? ''}</span></p>
-          <p>A classic BIM modeller built natively on IFC, by Ciuntuc BIM Studio.</p>
+          {brand.short === 'Lapin'
+            ? <p>A classic BIM modeller built natively on IFC, by Ciuntuc BIM Studio.</p>
+            : <p data-no-i18n>{brand.name} by AI ARCH LAB: BIM ภาษาไทยบน IFC. พัฒนาต่อจาก Lapin ของ Ciuntuc BIM Studio (โอเพนซอร์ส, MIT licence) · Based on Lapin by Ciuntuc BIM Studio.</p>}
           <p>Lapin is free and open source, under the MIT licence. <button type="button" className="link" onClick={() => openLink('source')}>Source code on GitHub</button></p>
           <h4>Helpware</h4>
           <p>If Lapin helps you in any way, we encourage you, without obliging you, to help anyone who needs help, in any way you can: your time, your skills, a hand to someone nearby, a gift to people or a cause you trust.</p>

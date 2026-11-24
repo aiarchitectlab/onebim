@@ -137,7 +137,7 @@ function LocalStart({ cde }: { cde: boolean }) {
         ))}
       </section>
       <footer className="start-foot muted small">
-        <span>Lapin · Ciuntuc BIM Studio · <button type="button" className="link" onClick={() => openLink('forum')}>Forum</button> · <button type="button" className="link" onClick={() => openLink('community')}>Community on Skool</button> · <button type="button" className="link" onClick={() => openLink('site')}>lapinbim.com</button></span>
+        {brand.short !== 'Lapin' ? <span data-no-i18n>{brand.name} by AI ARCH LAB · based on Lapin by Ciuntuc BIM Studio (MIT)</span> : <span>Lapin · Ciuntuc BIM Studio · <button type="button" className="link" onClick={() => openLink('forum')}>Forum</button> · <button type="button" className="link" onClick={() => openLink('community')}>Community on Skool</button> · <button type="button" className="link" onClick={() => openLink('site')}>lapinbim.com</button></span>}
         <span>
           {LANGUAGES.filter((l) => l.id !== lang).map((l) => (
             <span key={l.id}><button type="button" className="link" data-no-i18n onClick={() => setLang(l.id)}>{l.name}</button>{' · '}</span>

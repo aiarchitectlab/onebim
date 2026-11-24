@@ -41,7 +41,10 @@ const id = product.id;
 const out = join(root, 'build', id);
 // Where the built app looks for updates. The public editions: lapinbim.com first, the company site second (Tauri tries
 // them in order; apps installed before the move only know the second, which stays served). Others: the company site.
-const updaterEndpoints = (edition) => [
+const updaterEndpoints = (edition) => edition === 'onebim'
+  // OneBIM (AI ARCH LAB's Thai edition) updates only from its own releases, never from Lapin's servers.
+  ? ['https://github.com/aiarchitectlab/onebim/releases/latest/download/{{target}}-{{arch}}-{{bundle_type}}.json']
+  : [
   ...(['lapin', 'lapin-architecture', 'lapin-architecture-structure'].includes(edition) ? [`https://lapinbim.com/updates/${edition}/{{target}}-{{arch}}-{{bundle_type}}.json`] : []),
   `https://ciuntucbimstudio.ro/downloads/${edition}-update/{{target}}-{{arch}}-{{bundle_type}}.json`,
 ];

@@ -9,7 +9,7 @@ import { PT, PT_PATTERNS } from './pt';
 import { LANGUAGES, translate, type Lang, type Language } from './index';
 import { LO, LO_PATTERNS } from './lo';
 import { RO, RO_PATTERNS } from './ro';
-import { loadAllLanguages } from './index';
+import { loadAllLanguages, loadLanguage } from './index';
 
 // The languages are loaded on demand in the app; the tests compare them all.
 await loadAllLanguages();
@@ -59,7 +59,7 @@ describe('the Spanish interface', () => {
 
 describe('the languages', () => {
   it('are offered each named in itself, English first', () => {
-    expect(LANGUAGES.map((l) => l.name)).toEqual(['English', 'Română', 'Español', 'Deutsch', 'Français', 'Dansk', 'Italiano', 'Polski', 'Português', 'ພາສາລາວ', '简体中文']);
+    expect(LANGUAGES.map((l) => l.name)).toEqual(['English', 'ภาษาไทย', 'Română', 'Español', 'Deutsch', 'Français', 'Dansk', 'Italiano', 'Polski', 'Português', 'ພາສາລາວ', '简体中文']);
   });
 
   it('English is the interface as written', () => {
@@ -356,7 +356,8 @@ describe('the analysis refusing a bar without E (report #189)', () => {
   it('says where to give E in every language, the old message still translated', () => {
     const msg = "its material „Mystery” has no E (Young's modulus): add Young's modulus E (MPa) to „Mystery” in Manage → Materials → Data, or name its class in the material's name (C25/30, S355, C24); E = \"30000 kg\": left out";
     expect(translate(msg, 'ro')).toBe("materialul lui „Mystery” nu are E: adaugă Modul de elasticitate E (MPa) în Gestionare → Materiale → Date, sau scrie clasa lui în numele materialului (C25/30, S355, C24); E = \"30000 kg\": left out");
-    for (const { id } of LANGUAGES.filter((l) => l.id !== 'en')) {
+    // Thai (OneBIM) is still being translated batch by batch: its long messages come later.
+    for (const { id } of LANGUAGES.filter((l) => l.id !== 'en' && l.id !== 'th')) {
       expect(translate(msg, id), id).toContain('Mystery');
       expect(translate(msg, id), id).toContain('(MPa)');
       expect(translate("its material „Mystery” has no E", id), id).not.toBeNull();
@@ -364,5 +365,19 @@ describe('the analysis refusing a bar without E (report #189)', () => {
       expect(translate("No fck: add Compressive strength (MPa) in Manage → Materials → Data, or name its class in the material's name (C25/30): not checked.", id), id).not.toBeNull();
       expect(translate('Yield strength fy', id), id).not.toBeNull();
     }
+  });
+});
+
+describe('Thai (OneBIM)', () => {
+  it('puts known phrases into Thai, keeping their spaces, and leaves the others', async () => {
+    await loadLanguage('th');
+    expect(translate('Wall', 'th')).toBe('ผนัง');
+    expect(translate(' Save ', 'th')).toBe(' บันทึก ');
+    expect(translate('12 elements', 'th')).toBe('12 องค์ประกอบ');
+    expect(translate('My own wall name', 'th')).toBeNull();
+  });
+  it('ends its phrases as the English does (an ellipsis, a colon)', async () => {
+    const { TH } = await import('./th');
+    for (const [en, th] of Object.entries(TH)) for (const end of ['…', ':']) if (en.endsWith(end)) expect(th.endsWith(end), en).toBe(true);
   });
 });

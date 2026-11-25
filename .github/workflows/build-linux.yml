@@ -10,7 +10,7 @@ on:
     inputs:
       product:
         description: Product (products/<id>.json)
-        default: lapin
+        default: onebim
       ref:
         description: Commit, tag or branch to build (the branch run from if empty)
         required: false
@@ -22,7 +22,7 @@ jobs:
     name: Linux x64
     runs-on: ubuntu-22.04
     env:
-      PRODUCT: ${{ inputs.product || 'lapin' }}
+      PRODUCT: ${{ inputs.product || 'onebim' }}
     steps:
       # The whole history: the version is 0.1.<commit count> (scripts/build-product.mjs).
       - uses: actions/checkout@v4

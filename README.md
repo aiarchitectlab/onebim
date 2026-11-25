@@ -1,79 +1,66 @@
-# Lapin
+# OneBIM by AI ARCH LAB
 
-BIM authoring for architects and engineers.
+**OneBIM คือโปรแกรม BIM ภาษาไทยที่ทำงานบนมาตรฐาน IFC**
 
-Lapin is a desktop application and a classic modeller on the IFC schema. Its interface
-(React, TypeScript, three.js) runs in a Tauri window and talks over a local WebSocket to
-Lapin's engine (C#, .NET 10, `engine/`), which holds the IFC model and derives its geometry
-with its own B-rep kernel (`engine/src/Geometry`) and manifold for the booleans.
+OneBIM เป็นโปรแกรมเขียนแบบและสร้างแบบจำลองอาคาร (BIM) สำหรับสถาปนิก วิศวกร และนักออกแบบ
+หน้าจอทั้งหมดเป็นภาษาไทย บันทึกและเปิดไฟล์ IFC ได้โดยตรง จึงส่งงานต่อให้โปรแกรม BIM อื่นได้
 
-> Open source under the MIT licence (see `LICENSE`), and helpware (below).
-> The geometry kernel was taken from BubbleBIM Pro (the author's own engine) on
-> 25.10.2026 and is Lapin's own code since, under the same licence. manifold
-> (Apache-2.0) and Clipper2 (BSL-1.0) are described in `engine/native/README.md`.
-> The LAZ decoder is a C# port of laz-rs (Apache-2.0): its notice is in
-> `engine/src/Platform/Lapin.PointClouds/Laz/NOTICE.md`.
+OneBIM พัฒนาต่อจาก [Lapin](https://github.com/Ciuntuc-BIM-Studio/lapin) ของ Ciuntuc BIM Studio
+ซึ่งเป็นโปรแกรมโอเพนซอร์สภายใต้สัญญาอนุญาต MIT
 
-## Layout
+## ทำอะไรได้บ้าง
 
-| Folder | What |
-|---|---|
-| `engine/` | Lapin's engine: the IFC model, the platform, the `.lapin` package, the modules, the host |
-| `ui/` | Lapin's interface: ribbon, 3D view, panels (React + three.js) |
-| `desktop/` | the Tauri shell: the window, native dialogs, starts the engine |
-| `products/*.json` | editions: the modules a package holds |
-| `ui/src/modules/` | the UI modules: core, architecture, structure, drafting, phases, cost |
-| `docs/plan.md` | the plan: decisions, milestones M0–M9 |
+- **สถาปัตยกรรม:** ผนัง พื้น หลังคา ประตู หน้าต่าง บันได ราว ห้อง เฟอร์นิเจอร์ ระเบียง ลิฟต์
+- **แบบก่อสร้าง:** แปลน รูปตัด รูปด้าน แบบขยาย แผ่นแบบพร้อมกรอบชื่อแบบ ป้าย ระยะ แฮทช์
+- **ตาราง:** ตารางประตูหน้าต่าง ตารางห้อง ตารางปริมาณวัสดุ ประมาณราคา
+- **โครงสร้าง:** เสา คาน ฐานราก เหล็กเสริม โครงเหล็ก และการวิเคราะห์โครงสร้างเบื้องต้น
+  (ผลเป็นค่าประมาณ ต้องให้วิศวกรตรวจทุกครั้ง)
+- **งานภายนอก:** ภูมิประเทศ ถนน ทางเดิน การปรับระดับดิน Point cloud
+- **ส่งออก:** IFC, PDF, DXF, รูปภาพ และไฟล์ .html ที่เปิดดูแบบ 3D ในเบราว์เซอร์ได้
 
-## Modules and editions
+## ดาวน์โหลดและติดตั้ง (Windows)
 
-A module has an engine half (`engine/src/Modules/…`: the IFC classes it authors,
-its commands, their geometry) and a UI half (`ui/src/modules/<id>`: its ribbon
-tabs, quick tools and property sections), or only one of them. A module's
-`module.json` lists the modules it `requires`.
+1. ไปที่หน้า [Releases](https://github.com/aiarchitectlab/onebim/releases) แล้วเลือกเวอร์ชันล่าสุด
+2. ดาวน์โหลดไฟล์ใดไฟล์หนึ่ง:
+   - `OneBIM_..._x64-setup.exe` ตัวติดตั้ง ไม่ต้องใช้สิทธิ์ผู้ดูแลระบบ
+   - `OneBIM_..._x64-portable.zip` แตกไฟล์แล้วเปิด `OneBIM.exe` ได้เลย ไม่ต้องติดตั้ง
+3. ไฟล์ยังไม่ได้ลงลายเซ็นดิจิทัล ตอนเปิดครั้งแรก Windows อาจขึ้นหน้าต่าง SmartScreen
+   ให้กด **More info → Run anyway**
 
-An edition is a list of modules (`products/<id>.json`), completed with what
-they require (`scripts/product.mjs`). A package holds only those: a module an
-edition does not have is not in its engine or in its interface. A project
-opened in an edition without one of its modules keeps that module's elements,
-read-only, and saves them back untouched.
+## ข้อจำกัดที่ควรรู้
 
-```sh
-pnpm products                                   # what every edition resolves to
-LAPIN_PRODUCT=lapin-architecture pnpm dev       # Core + Architecture + Drafting only
-pnpm build:product lapin-architecture           # → build/lapin-architecture/bundle
-```
+- ถ้าส่งออก PDF จากเมนูของโปรแกรม ตัวอักษรไทยอาจแสดงไม่ถูกต้อง
+  ระหว่างนี้ให้ใช้ **พิมพ์ → บันทึกเป็น PDF** แทน
+- คู่มือการใช้งานยังเป็นภาษาอังกฤษ (ของ Lapin)
+- ค่ามาตรฐานในเครื่องมือโครงสร้างอ้างอิง Eurocode ไม่ใช่มาตรฐานไทย ใช้เพื่อประมาณการเบื้องต้นเท่านั้น
 
-## Helpware
+## แจ้งปัญหาหรือเสนอแนะ
 
-Lapin is free, and it stays free. If it helps you in some way, we encourage you
-(we do not require it) to help someone else who needs help, in whatever way you
-can: your time, your skills, a hand to a neighbour, a gift to people or a cause
-you trust. Lapin asks nothing for itself and takes no donations.
+ในโปรแกรมไปที่เมนู **ช่วยเหลือ (?) → รายงานปัญหา** หรือเปิด
+[Issues](https://github.com/aiarchitectlab/onebim/issues) ได้โดยตรง
 
-This is a request, not a condition: the licence is MIT, and nothing here limits it.
+## สร้างโปรแกรมเอง (สำหรับนักพัฒนา)
 
-## Licences
-
-Lapin is MIT. `pnpm check:licenses` (run by `pnpm build` and `pnpm build:product`)
-fails when a production dependency, npm or NuGet, is not under a permissive
-licence (MIT, ISC, BSD, Apache-2.0…), so nothing copyleft gets in by accident.
-
-## Acknowledgements
-
-Lapin's clash detection, and parts of its realistic 3D view, follow the design, the numbers and the tests of
-[BimGo](https://github.com/aussieBIMguru/BimGo) by Aussie BIM Guru (MIT-0). Nothing is owed under its licence;
-we credit it anyway. What came from where is listed in [docs/acknowledgements.md](docs/acknowledgements.md).
-
-## Run
-
-Requires .NET 10, Node 22 + pnpm, Rust (for the desktop shell).
+ต้องติดตั้ง Node.js 22, pnpm, .NET 10 SDK และ Rust ก่อน แล้วรัน:
 
 ```sh
-pnpm setup        # packages, engine build
-pnpm dev          # engine on ws://127.0.0.1:47810/ws, UI on http://localhost:5180
-pnpm dev:desktop  # the same in the Lapin window
-pnpm test         # UI (vitest) and engine (xUnit)
+pnpm install
+pnpm build:product onebim
 ```
 
-Note: the engine's boolean library (manifold) is built for macOS arm64 only for now.
+ไฟล์ที่ได้จะอยู่ใน `build/onebim/bundle/`
+
+ถ้าไม่อยากสร้างเอง ให้ใช้ GitHub Actions ของ repo นี้ คือ **Build Windows** และ **Build Linux**
+ซึ่งจะทำงานเมื่อ push tag `v*` หรือกดสั่งเองจากแท็บ Actions
+
+รายละเอียดทางเทคนิคของโครงสร้างโค้ดดูได้ที่ [README.lapin.md](README.lapin.md) (ภาษาอังกฤษ จาก Lapin)
+
+## สัญญาอนุญาตและเครดิต
+
+- OneBIM by AI ARCH LAB · [aiarchlab.com](https://aiarchlab.com)
+- พัฒนาต่อจาก **Lapin** © 2026 Ciuntuc BIM Studio S.R.L. สัญญาอนุญาต MIT (ดู [LICENSE](LICENSE))
+- ส่วนประกอบอื่นที่ใช้ เช่น manifold (Apache-2.0), Clipper2 (BSL-1.0) และ laz-rs (Apache-2.0)
+  ดูรายละเอียดได้ใน `engine/native/README.md` และ `engine/src/Platform/Lapin.PointClouds/Laz/NOTICE.md`
+
+ส่วนที่ AI ARCH LAB เพิ่มเติม ได้แก่ คำแปลภาษาไทย แบรนด์ OneBIM และการตั้งค่าการเผยแพร่
+เผยแพร่ภายใต้สัญญาอนุญาต MIT เช่นเดียวกัน

@@ -1,0 +1,68 @@
+name: Build Windows
+
+# OneBIM's Windows desktop app (NSIS installer and a portable zip), built on
+# GitHub's Windows runner: run it by hand (Actions → Build Windows → Run
+# workflow) or push a tag v*. On a tag the installer and the zip are also
+# attached to that tag's GitHub release. Both are unsigned (Authenticode):
+# Windows SmartScreen asks "Run anyway" on first start.
+
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Product (products/<id>.json)
+        default: onebim
+      ref:
+        description: Commit, tag or branch to build (the branch run from if empty)
+        required: false
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows x64
+    runs-on: windows-latest
+    env:
+      PRODUCT: ${{ inputs.product || 'onebim' }}
+    steps:
+      # The whole history: the version is 0.1.<commit count> (scripts/build-product.mjs).
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+      # manifoldc.dll (the booleans) is kept in the repo: engine/native/win-x64.
+      - run: pnpm install --frozen-lockfile
+        env:
+          CI: 'true'
+      - run: pnpm --filter ui test
+      - run: pnpm build:product ${{ env.PRODUCT }}
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PRODUCT }}-windows-x64
+          path: |
+            build/${{ env.PRODUCT }}/bundle/nsis/*-setup.exe
+            build/${{ env.PRODUCT }}/bundle/nsis/*-portable.zip
+          if-no-files-found: error
+      - name: Attach to the release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            build/${{ env.PRODUCT }}/bundle/nsis/*-setup.exe
+            build/${{ env.PRODUCT }}/bundle/nsis/*-portable.zip

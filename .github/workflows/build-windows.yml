@@ -50,8 +50,9 @@ jobs:
         env:
           CI: 'true'
       # The tests run on Linux in CI (ci.yml); two of them read files with Unix line endings and fail on Windows.
+      # PowerShell, so the zips are unpacked by Windows' own tar (Git Bash's GNU tar reads C:\ as a host).
       - run: pnpm build:product ${{ env.PRODUCT }}
-        shell: bash
+        shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.PRODUCT }}-windows-x64

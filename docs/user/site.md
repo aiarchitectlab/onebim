@@ -1,0 +1,463 @@
+---
+title: The site and its data
+order: 52
+summary: Bring the survey, the parcel, the neighbours and an orthophoto in real coordinates, from DXF, CSV, GeoJSON, CityJSON and a georeferenced image.
+---
+
+<!-- video garden -->
+
+The **Site** tab holds the ground the building stands on: the terrain, the parcel, the neighbouring buildings and an aerial photo, each where it really is. The **Import** group brings them from the files surveyors and the cadastre hand over.
+
+![The Site tab](shots/ribbon-site.webp)
+
+## Real coordinates
+
+A survey comes in map coordinates: eastings and northings, hundreds of kilometres from zero. Lapin keeps the model near its origin and ties it to the map through the **survey point**. The first import into a project does this for you: the survey point goes to the plan's origin, on the file's first coordinates rounded to the metre, and every later import lands in the same place.
+
+**Manage → Location** shows the **coordinate system** the eastings and northings are in, and the base and survey points. Lapin knows Stereo 70 (EPSG:3844, Romania's national grid), UTM zones 34 and 35 (EPSG:32634, 32635), Web Mercator (EPSG:3857) and longitude and latitude (WGS 84, EPSG:4326). A file in another of these systems is converted when it comes in: a GeoJSON in longitude and latitude lands on the Stereo 70 plan where it belongs. Lambert-93 (EPSG:2154, France's national grid) is known too.
+
+**Latitude and longitude.** The base point can also take its **Latitude** and **Longitude** (WGS 84, in degrees). With a projected coordinate system and no survey point, they tie the project to the map by themselves: Lapin works out the base point's eastings and northings in that system, and the plans, the spot coordinates, the DXF in map coordinates and the exports use them as they would a survey point's. A survey point you set comes first.
+
+**On the map in other programs.** The IFC export writes the project's tie to the map as buildingSMART's guide to georeferencing asks: an **IfcProjectedCRS** named by its EPSG code (EPSG:3844…) with its datum, projection, zone and the metre, and an **IfcMapConversion** with the eastings, northings and height of the internal origin, the turn to true north and a scale of 1, so a GIS program, Bonsai or a viewer places the model where it is. IfcSite carries the base point's latitude, longitude and elevation. A project with a latitude and longitude but no projected system is written in the UTM zone of its place, and the export says so; a project with none of these writes nothing of the map. An IFC with a map conversion (IFC4 and IFC4X3, or IFC2X3's ePSet_MapConversion and ePSet_ProjectedCRS) ties a project that is not yet tied when it comes in, and a site's latitude and longitude alone become the base point's.
+
+![Manage → Location: the coordinate system and the survey point](shots/site-location.webp)
+
+**The project's points**, as in Revit. **View → Coordinate points** (or **Show the internal origin, the base point and the survey point in plans and 3D** in Manage → Location) draws three points in plans and in the 3D view:
+
+- the **internal origin**, the plan's 0,0, which never moves: its X axis in red and its Y axis in green (and Z in blue in 3D);
+- the **project base point**, a circle with a cross: its elevation (where ±0.00 stands), its map coordinates when the project is tied to the map, and an arrow to **true north** with its angle when the project is turned from it (**True north** in Manage → Location);
+- the **survey point**, a triangle, with its eastings, northings and elevation.
+
+A plan snaps to all three. The 3D view draws them at their places at any zoom, over the model.
+
+![The internal origin, the base point turned 12.5° from true north and the survey point in 3D](shots/location-3d.webp)
+
+**Coordinates at the cursor.** While the cursor is in a plan, the status line reads where it is. A click on the coordinates chooses what they are read from: the **internal origin**, the **project base point**, the **survey point (map)** (eastings and northings, turned to true north, as the IFC export writes them) or the **UCS** (see [Snaps and helpers](drafting.md#snaps-and-helpers)). The choice is kept in **File → Preferences… → Coordinates**.
+
+**Plans of a georeferenced project.** The model is drawn in its own coordinates, near the internal origin; the map's are worked out from the survey point, so a plan stays as precise and as quick as any other. Three things put it on the map:
+
+- **Spot coordinates.** **Annotate → Dimension**, set to **Spot coordinate** in its bar (DIMCOORD): click a point, then where its leader ends. It writes the point's **E** and **N** in metres, through the survey point and turned to true north; without a survey point, its **X** and **Y** from the project base point. Type **M**, **P** or **I** first to choose the map, the base point or the plan's origin. The values are worked out on every drawing: move the survey point and every spot coordinate is written again.
+- **A plan in map coordinates.** The plan's **DXF** button exports it **in the plan's coordinates** (millimetres from the internal origin), **from the project base point** (millimetres) or **in map coordinates** (E and N in metres, turned to true north), so the drawing lands on the cadastral plan or the surveyor's DXF.
+- **True north up.** When the project is turned from true north, the compass button in the plan's bar turns the plan on screen so true north points up, and back. Drawing, snaps, the grid and the UCS turn with it; the choice is kept for each plan on this computer. Sheets and the PDF keep project north up. To print a plan turned, use **Rotate view → True north up** instead (see [Rotating a plan](views.md#rotating-a-plan)): the orientation is the view's, kept with the project, and its sheets print it as it shows.
+
+![A spot coordinate on a plan of a georeferenced project, true north up](shots/spot-coordinate.webp)
+
+## Importing
+
+- **Terrain from points** reads a CSV or text file from a survey: x y z, or number northing easting elevation, one point a line.
+- **Terrain from LandXML** brings each surface of the file as a terrain made of the file's own triangles (its faces), so its holes and its concave edge stay as the file has them; faces marked invisible are left out. A surface without faces is triangulated from its points.
+- **Points from DXF** reads a survey drawing: POINT entities with their heights, blocks inserted at a height or carrying it as an attribute, heights written beside points ("245.37" next to its cross), and contour lines at their elevation. When the drawing has points on several layers, Lapin lists them with how many points each holds, and you choose which to take. The points make a terrain. A DXF names no system, so Lapin takes numbers the size of a map's by their range (Stereo 70, Lambert-93, UTM). Numbers of a system it does not know are kept as they are, and Lapin says so: name the system in **Manage → Location**, or convert the drawing first.
+- **GeoJSON** brings parcels, lines and points. A file with one polygon gives the **parcel**; one with several gives areas. The parcel also outlines the terrain's parcel, with its area. Files from the cadastre in Stereo 70 say so in the file, and Lapin reads it; a file that says nothing is longitude and latitude, as the GeoJSON standard requires.
+- **CityJSON** brings the neighbouring buildings with their surfaces, at their place and height. They are read-only references; they will cast shadows in the sun study.
+- **Orthophoto** lays an aerial photo under the site. Pick the image (JPEG or PNG, up to 8 MB) together with its world file (`.jgw`, `.pgw` or `.wld`): the world file says where the image lies. The photo is drawn under the plan and wears the terrain in 3D.
+
+![The site plan: the orthophoto, the survey terrain's contours, the parcel and the neighbour's footprint](shots/site-plan.webp)
+
+![The same site in 3D: the photo on the ground, the neighbour at its height](shots/site-3d.webp)
+
+Everything imported is kept in the project file. A feature takes its name from the file (a parcel's cadastral number, when the file has one) and keeps the file's other properties with it; select it to see its area or length.
+
+## Roads, curves and linework
+
+A **road** or a **path** follows its axis. In **Corridor…** (CR), the **Curves** tab gives each vertex of the axis a radius with a clothoid in and out, as a road designer lays a curve; a vertex left at 0 stays a corner, and curves that do not fit between their neighbours are refused with the reason. The stations, the long section and the cross-sections follow the curved axis, and IFC 4.3 writes it as an alignment.
+
+A path or a road, a retaining wall or a ditch is split, trimmed, extended and offset with the walls' tools (**Modify → Split element**, **Modify → Trim/Extend elements**, **Offset**). Its stations go on: the second part starts at the station where the cut was, so the designed profile, the cross-sections and the joints asked at stations stay where they were. A cut must fall on a straight stretch of the axis, not in a curve, and each vertex keeps its curve. An axis imported as IFC 4.3 alignment segments is not cut here.
+
+CAD linework becomes site elements: **Road from linework** (LR) and **Breakline from linework** (BL) take a line or polyline drafted or brought in by a DXF, follow every line on its layer that meets it end to end, and make a road along it or a breakline of the terrain. Each opens **Draft → Convert to…** on its target with the line picked ([Converting drafting to elements](drafting.md#converting-drafting-to-elements)), where you see the chain before converting; there the site's other targets are too: a **Terrain** through contours, a **Platform** on a closed outline, a **Path**. When the lines carry heights (a DXF's 3D lines), they give the road's profile or the breakline's levels. Such lines are kept with their heights and can be shown in 3D (the *linework* category).
+
+In 3D, **Visibility / Graphics** hides a view's paths, roads, kerbs and pavements with the **Topography** category, and the axis grids hide with their Visibility / Graphics entry too; in plans, object styles and saved graphics sets, those site elements now follow the Topography category too.
+
+## Platforms and the parcel
+
+**Site → Platform** (<kbd>PD</kbd>) levels the ground inside an outline at one height, cutting and filling the terrain; **Site → Parcel** (<kbd>PC</kbd>) draws the property's boundary, dash-dotted with its area. Both draw their outline with the same bar as a floor: a **Polygon** whose edges may be arcs (<kbd>Space</kbd>), a **Rectangle** or a **Circle**. Selected, their corners and edges have grips (a parcel's on its terrain), and the right-click offers **Make arc**, **Make straight**, **Fillet corner…** and **Chamfer corner…**, each one undo step. The platform levels the ground along its true arcs; the parcel's area and perimeter are measured on them, and the coordinate inventory lists its corners.
+
+**Modify → Split element** cuts a platform in two along a line of two points (each part levelled at the same height, its holes on the part they lie in, a hole the line crosses refuses), and **Modify → Trim/Extend elements** trims a platform or the parcel by a straight boundary, keeping the side you click. A terrain keeps one parcel: it is trimmed, not split.
+
+**Slopes round a platform.** A platform's properties take a **Cut slope** and a **Fill slope** as 1 : N (horizontal over vertical; 0, the default, keeps its sides vertical). With a slope the cut widens upwards and the fill spreads downwards at that batter until they meet the ground, so the platform runs out into the terrain instead of standing in a vertical pit or on a vertical bank; its cut and fill are measured on the sloped volumes. The slopes reach as high and as low as the ground round the platform does, not the whole terrain's. A slope that would run so far out that it crosses itself (a long slope round a narrow notch of the outline) is refused: the platform is not levelled, nothing is measured for it, and the terrain says why; give it a steeper slope (a smaller N) or a simpler outline. A platform with holes keeps vertical sides. An outline that crosses itself, a platform's, a parcel's, a terrain boundary's, a subregion's or a planting zone's, is refused. **Convert slopes to grading** in a platform's properties (when it has a cut or a fill slope) turns its slopes into a **Slope to ground** grading from its outline, outwards, at the same 1 : N, daylighted exactly on the ground and kept live as the platform changes (see *Grading between edges and slopes*); the platform itself is then cut plumb, and the new grading is selected. One undo step undoes it. A platform not converted keeps its slopes as they were.
+
+## Tunnel portals and bridge abutments
+
+![The configurator on its warped-wings preset, the engine's preview beside its numbers](shots/portal-configurator.webp)
+
+**Portal or abutment…** (<kbd>PO</kbd>, in the **Landscape** group) lays out a face wall across a road with a wing at each end, as one retaining wall whose corners, batters and quantities are the retaining wall's own. Pick a preset: **Straight wings** (a tunnel portal, its wings in line with the face wall), **U wings** (along the road), **Flared wings** (at an angle to the road), **Warped wings** (their face turning from the face wall's batter to the embankment's slope) or **Abutment with wings** (a bridge abutment, the embankment held between its wings). Then set its numbers by group: the face wall's length, crown and footing level; the wings' length, their angle to the road and the crown at their free end; the section (crown thickness, front and back batters n:1, footing, toe, heel); the warp; the free end; the output. The preview beside them is the engine's (plan, a section across the left wing, 3D), built by the same code as the element.
+
+**Formulas.** Every number may be a formula: type `= embankment + 0.5` (or `{= embankment + 0.5}`) and the value it gives shows beside it. A formula reads the configurator's other numbers by their key (`crown`, `footingLevel`, `faceLength`, `wingLength`, `wingAngle`, `endCrown`, `embankment`, `slope`, `thickness`, `frontBatter`…, and `height`, the face wall's crown over its footing's underside) and the project's own parameters by their key. By default the crown at the free end is `{= embankment + 0.5}` and the wing is as long as the embankment's slope reaches: `{= (crown - embankment) * slope}`, with the slope given as 1:m (1.5 for a 2:3 slope). A formula that reads itself, or a name that is not there, is listed under the numbers and its default stands.
+
+**The wings.** The right wing mirrors the left unless **Right wing mirrors the left** is cleared; then the right one takes its own length, angle and crown. Left and right are as seen from the face wall looking along the wings. Over each corner the crown stays level, and the wing's slope starts just past it. With **Warped wings**, the face turns from the face wall's batter at the corner to **Batter at the free end** (by default the embankment's, `1 / slope`), along the wing's slope or, with **Twist along** *segment*, along the whole wing. The warped face is exact: one B-spline face in IFC (IfcAdvancedBrep) and STEP, its area and volume measured on the true surface.
+
+**The free end** is **square** (upright, square to the wing), **battered** (leaning with the embankment, by **End batter n:1**, the footing reaching past its foot) or **parallel** (turned about the vertical so it runs along the road; **End turned by** gives another angle, up to 60°). A U wing is parallel to the road already, so its end stays square.
+
+**Placing it.** **Place…** asks for two points: the face wall's middle on the road's axis, then a point the way the wings go. **On a road…** asks for a road or a path: the portal stands across it where you click, the wings along its way. **Draw the path** takes a polyline you draw instead of the numbers' layout: its first and last segments are the wings, the rest the face wall. Under **Section**, a profile you drew and saved ([Profiles](profiles.md)) can be the stem's section instead of the coded one: it is stretched at each station between the footing's top and the crown, its width kept.
+
+![A tunnel portal with straight wings, their crowns dropping to the free ends](shots/portal-3d.webp)
+
+**Editing.** Selected, the wall shows **Portal configurator…** in its properties: it opens on the wall's preset and numbers (formulas as you wrote them), and **Apply** rebuilds the same element in place, one undo step, its GlobalIds kept.
+
+**IFC and quantities.** **IFC** *assembly* (the default) writes the portal as an IfcElementAssembly (a tunnel portal user-defined; an abutment ABUTMENT, in IFC 4.3 standing in an IfcBridgePart ABUTMENT of the project's IfcBridge) over one IfcWall RETAININGWALL per wing and the face wall, so each part is dimensioned, formworked and reinforced on its own. A wing meets the face wall at a joint square to it, just past where its slope starts. *wall* writes it as one IfcWall RETAININGWALL. Each part has its own quantities (concrete, formwork on its front, back, ends and footing, its crown), where two parts meet is no formwork, and the wall's own add **Concrete, face wall**, **Concrete, wings**, **Formwork, face wall** and **Formwork, wings** for the schedules.
+
+![A bridge abutment with warped wings](shots/abutment-3d.webp)
+
+![A section across a warped wing: its face leaning on its footing](shots/portal-section.webp)
+
+## Tunnel lining
+
+![The configurator on its horseshoe preset, the engine's preview beside its numbers](shots/tunnel-configurator.webp)
+
+**Tunnel lining…** (<kbd>TU</kbd>, in the **Landscape** group) sweeps a tunnel's cross-section along an axis. Pick a preset: **Horseshoe (NATM)** (a mined tunnel: crown, side, corner and invert arcs, all tangent, with an outer shell of shotcrete), **Circular (TBM ring)** (a bored tunnel's ring of one thickness), **Cut-and-cover box** (haunches under its roof) or **Vault on walls** (a vault on upright walls over a flat floor). Then set its numbers by group: the section (the clear width, the clear height over the road, the radii, the invert under the road), the lining (its thickness at the crown, at the walls and at the invert, and the outer shell; 0 leaves it out), the blocks (a casting block's length, or a ring's width) and the output. Every number may be a formula, as in the portal configurator: the wall and invert thicknesses are `{= thickness}` by default. Under **Section**, a profile you drew and saved ([Profiles](profiles.md)) can be the section instead: its outside and the clear opening inside it, the opening's floor under the road by **Invert under the road**. The preview is the engine's (plan, section, 3D), built by the same code as the lining.
+
+**Placing it.** **On an axis…** asks for a road, a path, a retaining wall, a track or a drafted line: click where the lining starts, then where it ends. The lining takes that axis between the two stations, with its curves and clothoids, and its red line (a designed one as it is; one that follows the ground fitted to points), and keeps its stations. **Draw the axis…** takes a polyline you draw instead; round its corners in the corridor configurator (**Configurator…** in its properties: radii and clothoids at each vertex, the red line's PVIs, the stations, the sections at stations), as for a road. The red line is the road's level on the axis; the section stays plumb and square to the axis in plan (no superelevation: the road's crossfall inside it is its own).
+
+**Linked to its axis.** A lining placed **On an axis…** follows that element: move the road's points, round its corners or change its red line, and the lining is rebuilt along it in the same undo step, each block and ring keeping its GlobalId. Its properties say so on the **Axis** row (**follows it**). When the road gets shorter than the lining's stations, the lining stops at its end and a note under the row says so; it runs to its stations again when the road grows back. **Unlink** keeps the axis as it is now, a copy that no longer follows: the road can change without it. **Link again** follows the same element between the same stations; **Link to an axis…** picks another (click where the lining starts, then where it ends). A lining whose road is deleted stays where it was, unlinked, with a note; so does one whose own axis you edit (its red line in the corridor configurator, its points dragged). Changing its section, blocks or ends keeps the link. Linings made before linings could follow stay the copies they were.
+
+![The road bent anew, the lining following it between the same stations](shots/tunnel-linked-plan.webp)
+
+![The lining's properties: its axis follows the road, with Unlink and Link to an axis…](shots/tunnel-linked-properties.webp)
+
+![A horseshoe lining round a curve, in its casting blocks, with a portal at its mouth](shots/tunnel-3d.webp)
+
+**Blocks and rings.** The lining is cut into casting blocks (12.5 m by default) from its start, or into rings for a TBM, the last one what is left. Each is a part of its own, with its own GlobalId, kept when you change the lining's numbers (more blocks add new ones after). In plan the lining's outside and its clear opening are drawn hidden, its axis as a centre line, its ends and its joints across it, its stations along it.
+
+**Portals.** In the lining's properties, **Portal** **At the start** or **At the end** stands a portal (the portal configurator's flared preset) across the axis at that end: its face wall wider than the lining and its crown a metre over it, the wings going out of the tunnel. The lining passes through the face wall: the wall is cut by the lining's outside behind the end and by its clear opening in front, and follows the lining when it changes. **End skewed by** and **Start skewed by** turn an end's plane about the vertical (the portal made then turns with it); a skewed end needs a straight axis at a constant grade at that end.
+
+![A section across the lining at a station: the lining and its shotcrete shell](shots/tunnel-section.webp)
+
+**Sections.** A section across the lining (from the corridor configurator, or drawn) shows its layers with their materials; a section that follows the lining's axis is its long section, the crown and the invert along it.
+
+![The long section along the lining's axis](shots/tunnel-long-section.webp)
+
+**Exact geometry, IFC and quantities.** Along a straight at a constant grade every face is a plane, a cylinder or a ruled surface; over a vertical curve a translational B-spline surface (the parabola exactly); round a circular arc on a level grade a surface of revolution (tori, cones). A clothoid, or an arc on a grade, is skinned through sections close enough that it stays within the chord rule (1 mm). With **Exact surfaces** ticked ([Import and export](import-export.md)) the IFC export writes each block, and the STEP export always does, as an IfcAdvancedBrep on those surfaces. **IFC** *assembly* (the default) writes the lining as an IfcElementAssembly (user-defined, "Tunnel lining") over one IfcBuildingElementProxy per block or ring ("Lining block", "Lining ring") and per piece of the outer shell; IFC 4.3 has no tunnel lining element, and a wall or a slab would say the vault and the invert are what they are not. *body* writes one proxy. Each block has its quantities: concrete, the inner face's formwork, the outer face, the ends' formwork, and **Formwork** (with the outer face when **Outer face formworked**, the default of the box and the vault); the lining adds the section's area, the clear opening and the outer shell's volume.
+
+## The terrain: boundary, slopes and grading
+
+![A survey clipped to an L-shaped boundary, a slope tag, a gravel subregion and the cut/fill grid over a raised stroke](shots/terrain-tools-plan.webp)
+
+**Boundary.** A terrain from a survey covers its points' outer outline (their convex hull). **Terrain boundary** (in the **Terrain** group) draws the outline the ground really has, a polygon whose edges may be arcs (<kbd>Space</kbd>), a rectangle or a circle, as a platform: the ground outside it goes, concave corners and all, and its contours, solid, sections and quantities follow. Its corners have grips. In the terrain's properties, **Boundary** says **clipped** or **convex hull**; **from parcel** takes the parcel's outline as the boundary, and **remove** goes back to the hull.
+
+**A terrain on an outline.** **Terrain on outline** (<kbd>TO</kbd>, in the **Terrain** group) makes the terrain straight from the outline it has, with no rectangle to clip afterwards: a polygon whose edges may be arcs (<kbd>Space</kbd>), a rectangle, a circle, or, from the same bar, the inside of walls, a closed drafted shape or a room. The bar's last choice says how high: **At a height** asks the ground's elevation (±0.00 = 0), **On the ground** lays each vertex on the terrain under it. **Terrain on picked outline** takes the outline of what you click: a room, a parcel or an area from a GIS file (with the heights it brought), a terrain's parcel, a platform (at its level), or a closed drafted shape (through **Convert to… → Terrain inside**, which converts many at once). Every vertex of the outline, the points along an arc too, is a point of the terrain, and the ground ends exactly on the outline; the inside gets points on a grid so the brush and the grips have something to work on. The outline's corners (a circle's four quarter points) have grips; the points along an arc have none and follow their corners: change a corner's height and the arc between it and the next corner runs evenly from one to the other, in the same undo step. A point of an arc given its own height (with **all outline points** on) keeps it, and the arc runs through it. Its corners' grips in plan move the outline, and its points follow: a corner dragged keeps its height, a corner added takes the ground's height there.
+
+![A terrain drawn on an outline with an arc, grips on its corners in 3D](shots/terrain-outline-3d.webp)
+
+A terrain clipped by a **Terrain boundary** keeps its outline's heights as the ground gives them; **outline as points** beside its **Boundary** makes each vertex of the outline a point of its own, at the ground's height there, so it gets a grip and an elevation to type. The ground does not move (only on a terrain worked with the brush, whose strokes now work on these points too, may it move a little along the outline, and a message says so). Old projects stay as they are until you ask.
+
+**Split and merge.** **Split terrain** cuts a terrain in two along a line of two points drawn across it. The larger half stays the terrain (it keeps its identity, its GlobalId in IFC); the other becomes a new terrain beside it. Platforms, ditches and paths go with the half they lie in (by their outline's middle, a path by its midpoint), as do spot levels, slope tags and subregions, so nothing on the ground is lost. **Merge terrains** joins the terrains selected into the first one selected: their points, breaklines, brush strokes, spot levels, tags, subregions, platforms, ditches and paths all come over, and their heights stay where they are even when the terrains were read from different datums. Each half of a split keeps the boundary on its side, and a merge joins the terrains' boundaries into one (a terrain with none counts as its points' outline): two halves merged again have the outline they were cut from, terrains that overlap have the outline round both. When their boundaries do not make one outline (they lie apart, or leave a gap between them), the merged terrain covers all its points and a message says so; draw its boundary again to clip it. A terrain keeps one parcel: the merged terrain takes the parcel there is, and when several of them have one it keeps the first one's and a message says so. Each is one undo step.
+
+**Slope tags and contour labels.** **Slope tag** writes the fall between two points you click on the terrain, in per cent and as 1 : N (5.0 %, 1:20.0), with an arrow downhill. Each major contour carries its level at its middle, along the line, on a clear background so the line stops under the text. In the terrain's properties, **Slope tags** counts them and **clear** takes them all away.
+
+**Cut and fill.** The brush (**Raise**, **Lower**, **Flatten**, **Smooth**) grades the ground, and its cut and fill are measured against the ground as surveyed: the terrain's **Cut** and **Fill** quantities (*CutVolume*, *FillVolume*) count the brush's grading together with its platforms, ditches and paths, and **Grading cut** and **Grading fill** (*SculptCut*, *SculptFill*) give the brush's part alone. The terrain's **Quantities** in its properties show its **Cut** and **Fill** beside **Net cut − fill**, then each platform's own cut and fill under its name (*Lapin_EarthworkQuantities*), as the IFC file has them. **Cut/fill grid** in its properties (2, 5 or 10 m; **off** by default) writes the difference at every grid point in plan, blue where the ground was raised (+0.45), red where it was cut (−0.30), grey where it is as it was. A grid too fine for the terrain (more than 2500 values) is written at a coarser step, a whole multiple of the one asked, and contours that would be more than 2000 lines over the terrain's height are drawn at a coarser interval; the terrain says so in both cases. The analysis maps, the spot levels, the slope tags and the cut/fill grid read the ground as designed, as the 3D terrain has it: a platform flat at its level with its slopes round it, a ditch's channel with its bottom on its designed profile. **Graded region → snapshot existing** takes the ground as it now is as the existing ground, so the next strokes are measured from there; **reset to survey** goes back to the survey.
+
+![The terrain's properties: its points, boundary, slope tags, subregions, cut/fill grid and graded region](shots/terrain-properties.webp)
+
+**Editing points in 3D.** **edit in 3D** beside the terrain's **Points** puts a grip on each survey point in the 3D view: drag it up or down, or type the distance, and the point moves by that much, one undo step each. A point the boundary cut away gets no grip. A large survey (a LandXML surface of thousands of points) shows grips on the 400 points nearest the middle of the 3D view; move the view to reach the others. **done editing 3D** takes the grips away.
+
+**An elevation typed.** While editing, a click on a point's grip (without dragging it) picks it, drawn filled; click more to pick several, again to let one go. Under **Points** the terrain's properties show how many are **picked** and a field for their elevation (absolute, ±0.00 = 0; the present one when they share it): type it and **set elevation** (or <kbd>Enter</kbd>) puts every point picked at that height, one undo step. **pick the outline's** picks the outline's corners at once, to set a whole perimeter (every point of it with **all outline points** on, which also puts grips on every point along the arcs); **let go** picks none. In plan the same points have grips too, while editing: a right-click on one offers **Set elevation…** (for the points picked with it, if it is one of them) and **Pick point**; a corner of the outline standing on a point offers them beside its own corner commands.
+
+![The terrain's properties with two points picked and their elevation typed](shots/terrain-picked-properties.webp)
+
+![The arc's two corners at their new elevation, the arc following them](shots/terrain-outline-raised.webp)
+
+**A control cage.** On a dense survey, moving points one by one is slow. A few points can be made **controls** that shape the rest, like a low-poly cage: under **Control cage**, **every** *10* **m** takes the point nearest each node of a 10 m grid (its corners too), **along the boundary** takes the points on the terrain's outline, and **clear** takes them all off. While editing in 3D, **Grips on** chooses what gets a grip: **all points** (as before), **controls only**, or **choose controls**, where every point shows and the controls are filled; click a point's grip to make it a control, or a free point again. With **controls only**, drag a control up or down (or type the distance): it goes exactly there, and the free points around it follow smoothly, by a part of its move that fades with distance and comes to nothing at the other controls, which stay where they are. The free points keep their own shape (bumps, slopes) and move with it, and dragging the control back puts every point back; the whole move is one undo step. A point moved on its own (with **all points**) keeps its own move. A terrain without controls works as before. Splitting a terrain leaves each half the controls inside it; merging gathers them.
+
+**Subregions.** **Subregion** (in the **Earthworks** group) draws an area of the terrain with a material of its own (gravel by default): a courtyard, a lawn, a gravel bed. The ground keeps its levels; the area wears its material in 3D, as a thin skin that follows the terrain's own triangles, breaklines included, and is outlined in plan. Each gives its plan area to schedules (*Lapin_SubregionQuantities*). **Subregions** in the terrain's properties counts and lists them, **clear** removes them, and **to hardscape** beside one makes it a hardscape (below).
+
+![A gravel subregion on the terrain in 3D](shots/terrain-subregion-3d.webp)
+
+## Feature lines and contours
+
+A **feature line** is a polyline in space that belongs to a terrain: a kerb, a ditch, a ridge, a swale, the foot of a slope. It has corners (straight or arcs), and each corner a height. The terrain is built to pass **exactly** through it: the surface is triangulated along the line, so a cut, a bank or a crease shows exactly where you drew it, and the survey points lying within its **tolerance** of the line (5 cm by default) are left out of the surface, so a survey point never spoils it. Feature lines are in the **Grading** group of the **Site** tab.
+
+**Draw a feature line.** **Feature line** (<kbd>FL</kbd>) takes clicks along the line, as the outline tools do: **Arcs** (or <kbd>Space</kbd>) makes the next edges arcs going on tangent from the edge before, **Closed line** closes it back to its first corner, <kbd>Enter</kbd> (or a second click on the last corner) finishes. The bar chooses how its corners take their heights:
+
+- **At heights**: after the last click a question asks for the corners' heights in order, separated by `;` (`0.30; ; ; 1.80`), in the project's level unit with ±0.00 = 0. A corner left empty takes the ground's height there.
+- **On the ground**: every corner is laid on the ground of the terrain under it, and the line keeps following it.
+
+The line goes on the terrain under its corners. A corner with no height of its own and no terrain under it is refused, with a message naming it: nothing is put at zero in silence.
+
+![A feature line drawn with an arc, its corners' heights typed, the terrain passing through it](shots/feature-line-3d.webp)
+
+In plan a feature line has its own line style (dash-dot-dot, in a rust colour), so it reads against the terrain's contours, which bend round it.
+
+![The plan with a feature line and the contours bent round it](shots/feature-line-plan.webp)
+
+**Edit it in plan.** Select it for its grips: drag a corner to move it (<kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click takes it out); drag the diamond in the middle of a segment, or <kbd>Ctrl</kbd>/<kbd>⌘</kbd>-click it, to put a corner there (the line keeps its shape: the new corner takes the line's height at that place); drag the round grip in the middle of an arc to bend it. A right-click offers **Make arc** and **Make straight** on a segment, and **Set elevation…** and **On the ground** on a corner. Every edit is one undo step.
+
+**Edit it in 3D.** Each corner has a height grip: drag it up or down (or type the distance), or click it without dragging and type the corner's elevation (absolute, ±0.00 = 0).
+
+**Elevations and grades.** The properties of a feature line list its corners with their elevations. A height the corner has of its own is shown plainly; one taken from the ground or from a grade is grey. Type an elevation in a field to give the corner one of its own; **to ground** puts the corner back on the ground. Between two corners the **grade** is shown, and it takes a typed grade: `2 %`, `1:50` or `-1,5 %`; the other end of the segment follows. **A typed grade keeps** says which end stays where it is: **its start** (the end follows) or **its end**. A grade cannot be typed on a contour (all its corners are level) nor on the closing segment of a closed line. The properties also hold **Tolerance**, **On the ground**, **Closed line**, and **Contour elevation**.
+
+![A feature line's properties: its terrain, tolerance and corners with their elevations and grades](shots/feature-line-properties.webp)
+
+A feature line moves, rotates and mirrors like any element (a move in space also raises the heights of its own); *Lapin_FeatureLineQuantities* gives its length in plan, its length along the slope and its lowest and highest elevation to schedules. If two feature lines of a terrain cross at different heights, the one drawn first holds there and the other bends to it: the plan marks each such crossing with a red cross and both heights (the one that holds / the other's), the properties of both lines list it under **Crossings**, and the terrain's geometry diagnostics name it too, as they count the survey points left out. **Splitting a terrain** sends each feature line to the half it lies in; a line across the cut is cut there, each part going to its half with its corners' heights (the cut at the line's height there; its arcs as laid, in chords). **Merging terrains** gives the merged terrain all their lines.
+
+**A contour drawn at an elevation.** **Contour at elevation** (<kbd>CV</kbd>) draws a feature line all at one height: type the elevation in its bar (empty: it is asked when you finish), click the points, <kbd>Enter</kbd>. The terrain is triangulated along it, so the contour passes exactly where you drew it, and the ground between this contour and its neighbours is interpolated again. It is named *Contour 1.50*; the same options, **Arcs** and **Closed line**, are in the bar. Typing an elevation in the properties of any feature line makes it a contour; emptying it gives the corners back their own heights.
+
+![The 1.50 contour drawn again a metre to the west on the north side](shots/feature-line-contour.webp)
+
+**Dragging a contour.** **Drag contour** (<kbd>DG</kbd>) moves a contour of the terrain with the mouse: as the cursor comes near one (within 2 m) it lights up; press on it, drag, and let go. The part of the contour within the **Reach** of the point you pressed becomes a contour feature line, moved by the drag; the move fades with the distance from the grab (all of it at the grab point, half at half the reach, nothing at the reach; a contour you drew gets corners along it so it bends smoothly), and the survey points within the reach follow it, so the neighbouring contours bend smoothly and nothing beyond the reach moves. Type the reach in the bar with its unit (`9 m`); plain numbers are in the project's length unit; empty, it is the larger of 2 m and three times the drag. It must be twice the drag at least: a shorter reach would fold the ground over itself, and the drag is refused. While the button is down the dragged contour is previewed; <kbd>Esc</kbd> drops the drag. A contour you drew yourself with **Contour at elevation** is moved as it is, as one line. One undo step.
+
+![A contour lit up under the cursor before the drag](shots/feature-line-drag-before.webp)
+
+![The contour dragged: the neighbouring contours follow with it, fading with the distance](shots/feature-line-drag-after.webp)
+
+Two things follow from how a terrain keeps its points. **Replacing a terrain's survey points wholesale** (**Replace the points…**, or *Change terrain* with new points) drops the rule that the outline is its points, and the heights its arcs' vertices had of their own: the new points are the terrain's points as they come. And **an arc vertex moved in plan through the API** (not by the outline's grips) becomes an ordinary point of the terrain with a height of its own. Feature lines are not touched by either: they stay on the terrain and keep shaping it.
+
+## Hardscape
+
+A **hardscape** is a paved area with a build-up of its own: a plaza, a sidewalk, a terrace, a car park, a platform of gravel. Draw it with **Hardscape** (<kbd>HS</kbd>, in the **Landscape** group of the **Site** tab) on an outline, as a platform: clicks (**Arcs** or <kbd>Space</kbd> for curved edges), a rectangle or a circle. The bar chooses its **type**, whether it is **Cut into the terrain** or **Standalone**, and whether it gets a **Kerb** all round. It starts level at the ground's height in its middle (at 0 with no terrain under it); everything is changed afterwards in its properties, without drawing it again.
+
+![A plaza with a kerb, cut into a sloping survey, in 3D](shots/hardscape-plaza-3d.webp)
+
+**Its type.** A hardscape type is a build-up of layers from the top down, each a material and a thickness, as a floor type is. Lapin comes with a few ready-made ones, marked indicative: **Concrete pavers** (6 cm pavers, 4 cm sand bedding, 20 cm crushed stone), **Asphalt**, **Gravel**, **Grass pavers** and **Stone slabs**; check them against your own build-up. **Edit types…** in the properties (or the type picker) opens **Hardscape types**: change a type's layers, their order and materials, its pavement kind (**Rigid** or **Flexible**, what IFC 4.3 calls it), make a new one, or bring in a ready-made one. Every hardscape of the type follows when it is saved, and an edited type is your own, no longer marked indicative.
+
+![The Hardscape types dialog with the pavers' layers](shots/hardscape-types.webp)
+
+**Its top.** **Top surface** in the properties is one of three:
+
+- **Flat and level**: the whole top at its **Elevation** (±0.00 = 0).
+- **Sloped plane**: a plane falling at a **Slope** (`2 %`, `1:50`, `0.02`) towards a direction (**Falls towards**, in degrees from +x, anticlockwise), its elevation holding at its origin. **Slope arrow** (in the **Landscape** group) sets it by drawing: click the high end, then the low end, over the hardscape, and type the grade.
+- **By its corners**: a height for each corner, typed in the corner table or set with the corners' height grips in 3D. When the corners lie in one plane the top is that plane; when they do not, the top is triangulated between them, and the properties say so.
+
+An edge that is an arc takes the heights of its two corners along its length. The plan writes its level in its middle, or an arrow the way it falls with its grade, or its corners' levels.
+
+![A hardscape's properties: its type, build-up, top, terrain and kerb with its edges](shots/hardscape-properties.webp)
+
+![A sidewalk at a 2 % fall in section: its pavers, bedding and sub-base, its kerb, the ground meeting its edge](shots/hardscape-sidewalk-section.webp)
+
+**On the terrain or standalone.** Cut into a terrain, a hardscape's top edges are the terrain's breaklines, as feature lines are: the ground meets its edges exactly, the survey points under it are left out of the terrain (the terrain says how many), the terrain is cut by its layers and its kerb, and its cut is measured for it in *Lapin_EarthworkQuantities*. Change its top or its outline and the ground follows. The terrain's contours stop at its outline, and so do the other feature lines, contours drawn at an elevation and section lines over it: inside it the ground is its top, whatever was drawn there before it. **Standalone** in the properties takes it out of the terrain (the ground is the survey again); **cut into the terrain** puts it back. A standalone hardscape needs no terrain at all: a sidewalk round a building, a terrace on a slab. A copy of a hardscape that was cut into a terrain cuts the same terrain.
+
+**Its kerb.** Tick **Kerb** in its properties (or in the tool's bar) for a kerb along its edges, outside its outline. It has a shape (**Upright**, **Bevelled**, **Rounded**, or a profile of your own drawn in **Manage → Profiles** with the use **Kerb**: its inner side is laid on the paving's edge, its top the kerb's height above the paving), its height **Above the paving**, a **Width**, its depth **Below the paving** and a material. The **Kerb edges** table switches it on or off edge by edge and drops it: type a reveal in **Dropped to** (`0` at a crossing) and the kerb comes down to that height above the paving along that edge. Kerbs meet mitred where two edges have one and stop square where an edge has none; on a sloped hardscape the kerb follows the top. The kerb is an element of its own (select it to reach its hardscape); it goes with its hardscape when that is deleted.
+
+![The plaza in plan: its paving hatched, its level and its kerb](shots/hardscape-plaza-plan.webp)
+
+**A subregion made a hardscape.** In a terrain's properties, **to hardscape** beside a subregion makes it a hardscape with the same outline and area: a type of the subregion's material over the pavers' bedding and sub-base, its corners on the ground where the subregion lay, cut into the terrain. The subregion goes, in the same undo step. Subregions you do not convert stay what they were.
+
+![A gravel subregion converted to a hardscape](shots/hardscape-converted.webp)
+
+**A path of a hardscape type.** A path or a road keeps its own surface and base courses, unless you tick **Use a hardscape type** in its properties: then its carriageway is built of the type's layers, top down, in their materials (each layer cut out of the terrain, its area and volume in *Lapin_PavementLayerQuantities*), and its IFC pavement kind is the type's. Choose the type beside it, or **Edit types…**: a type edited changes every path and hardscape of it at once. Its kerbs, gutters and sidewalks stay the path's own. Untick it and the path is built of its own courses again, exactly as before; a path you never ticked is as it always was.
+
+![A path's properties with Use a hardscape type: the pavers' build-up in place of its own courses](shots/path-hardscape-type.webp)
+
+**Editing, quantities and IFC.** In plan its outline has the outline grips (corners, edges, arcs, fillet and chamfer); in 3D its top has height grips. It moves, rotates and mirrors like any element; each change is one undo step. *Lapin_HardscapeQuantities* gives its paved area, top surface area, perimeter, build-up depth and volume, and each layer its area and volume (less what a drainage channel or a standalone kerb running through it takes out, as its drawn layers show); *Lapin_KerbQuantities* the kerb's length, its dropped length and its volume; the **Hardscape schedule** lists them all. In plan its paving is hatched as its top layer's material looks (its surface graphics, Manage → Materials), and sections cut its layers. To IFC it goes as an *IfcPavement* (IFC 4.3) or an *IfcSlab* named *Pavement* (IFC4) with its layers as an *IfcMaterialLayerSetUsage*, its kerb as an *IfcKerb* (IFC 4.3) or a proxy named *Kerb* (IFC4); a file Lapin wrote comes back as the same hardscape and kerb.
+
+## Profiles
+
+A **profile** is a line's heights along it, drawn as a graph you can edit: station along the bottom, elevation up the side. It works on any line that has heights: a feature line, the edge of a hardscape, the axis of a path, road, retaining wall or ditch, and a **section line** drawn over the terrain. Open it from **Profile…** in the line's properties, or from the **Grading** group of the **Site** tab: **Profile on a line** (<kbd>LP</kbd>, then click the line in plan) and **Section line** (<kbd>SQ</kbd>, a polyline drawn like a feature line; its profile opens when you finish). The profile is a panel under the plan, so the plan stays in view.
+
+![A section line across a hill, its profile under the plan, the station hovered in the graph marked in the plan](shots/profile-plan-graph-linked.webp)
+
+**The graph.** The **existing ground** (the survey, read exactly on the terrain's triangles) is dashed grey, the **design ground** (with feature lines and hardscapes) thin green, and the line's own **profile** heavy red, with its points: a filled point has a height of its own (it is designed), a hollow one lies on the ground, a small padlock marks a locked one, and an arc under a point marks a vertical curve. **Heights** exaggerates the vertical scale: 1× is true, 2×, 5× and 10× make slopes easier to read. Between designed points the grade is written in %.
+
+**Plan and graph are linked.** Move the cursor along the graph and the plan marks that station on the line; move it along the line in plan and the graph marks it; click either to pick the station (a solid vertical line in the graph, a dot in the plan).
+
+**A section line over the terrain.** A section line only reads the ground, until you edit one of its points: then the ground on each side follows, within its **influence width**, and fades to nothing at the edge of it (the same smooth fall-off as dragging a contour). Type the width in the panel; it must be at least **twice the largest change**, or the edit is refused with a message saying so, and nothing changes. One edit is one undo step.
+
+![The point on the hill dragged down: the contours in the plan follow the section line](shots/profile-section-line.webp)
+
+**Editing the profile.**
+
+- **Drag a point** up or down; a point on a straight run may also slide along the line, between its neighbours (the ends and the points where the line bends in plan stay at their station). The red line follows the mouse while you drag, and one command is sent when you let go.
+- **Click a point** to type its **elevation**, its **vertical curve** (a parabolic curve of that length at the point; refused at the ends, or when it does not fit between the neighbours), to **lock** it (a locked point keeps its height and station, and an edit that would move it is refused) or to **delete** it. **To ground** takes its height from the ground again.
+- **Double-click the line**, or press **Point** at the picked station, to add a point.
+- **Click a segment** to type its **grade**: `2 %`, `1:50`, `-0,5 %` (a decimal comma is fine). **A typed grade keeps** its start or its end; the other end takes the height the grade gives.
+
+![A grade of 2 % typed on a segment: the point at its end follows](shots/profile-grade-typed.webp)
+
+A hardscape's profile is its top edge: its corners' heights can be changed (the top becomes "by corners") but not added, deleted, curved or locked, as the plan keeps its shape. A path, wall or ditch uses the corridor's red line: when its profile follows the ground, **Design the profile** makes it a designed one first.
+
+**Cross sections.** The **Cross sections** tab shows the ground **across** the line at stations: type an **interval** (every 10 m), or pick a station and press **Section here**; **Width each way** sets how far each side reaches. Each section is a small graph with the existing ground, the design ground and the line's point marked, and it is drawn across the line in plan. Drag a point of a section, or drag the ground curve where you want a new one: the first edit at a station makes a short section line square to the line there, and the ground beside it follows within its influence width; later edits move its points like the long profile's. The sections' heights use the same exaggeration.
+
+![Cross sections every 10 m under the plan](shots/profile-cross-sections.webp)
+
+**On a sheet.** **Place on a sheet…** makes the **long profile** (and the cross sections, when shown) a drawing of its own, at the scale you choose (its horizontal 1:500 and heights exaggerated as in the panel) and puts it on a new sheet, or on one you pick. The drawing has the level grid with its datum, both grounds, the points and curves named, and under it a table of the stations, both grounds and the cut or fill; the sheet's PDF and DXF print what the sheet shows. The drawings are listed under **Profile drawings** in the project browser, and they stay in step with the line: change the line and the sheet changes.
+
+![The long profile on a sheet](shots/profile-sheet.webp)
+
+## Grading between edges and slopes
+
+Two tools in the **Grading** group of the **Site** tab shape the ground from edges you already have, and keep following them.
+
+**Grade between edges** (<kbd>GB</kbd>) makes a green patch between two plazas, terraces or lines at different heights: a lower plaza at −2.00 and an upper one at −1.00, say, with curved edges, and a slope of grass bridging them. Click the first edge (a hardscape, a feature line, a platform, or a path, wall or ditch), then the second: the patch is made at once. Of a hardscape or a platform only the stretch of its edge that faces the other is taken, so the patch runs along the two facing edges and is closed by straight joins at their ends. Tick **More edges** in the bar to pick three or more, then press **Make the grading**; picking an edge again lets it go.
+
+![Two plazas at −2.00 and −1.00 with curved edges, bridged by a green slope](shots/grading-plazas-3d.webp)
+
+Its surface is made from those edges only, so their heights hold exactly: the patch's edge is the plaza's edge, at the plaza's height, with no gap. Between two edges it is a **ruled** surface (straight lines from each point of one edge to the point as far along the other); from three or more edges, or with **Triangulated (TIN)** chosen, it is triangulated from the edges. The patch **follows** what it was made from: raise a plaza, move it, change a feature line, and the patch and the ground change with it, in the same undo step.
+
+![The grading's properties: what it is, its surface, its material and its edges](shots/grading-properties.webp)
+
+**Typing heights.** An edge that follows a plaza takes the plaza's heights. To give the patch's edge heights of its own, press **detach** beside it in the properties: its points become the grading's own, as they are now, and each one's elevation can be typed in the table (empty: the ground's). An edge can also be a line of its own from the start (through the API: `civil.addGrading` with `{points}`), its heights typed, the rest from the ground.
+
+**Slope to ground** (<kbd>SG</kbd>) runs a slope from an edge until it meets the ground: from a terrace or a platform outwards all round, from an open line (a feature line, a path) on the side you click. Type its **Cut** and **Fill** slopes in the bar as `1:2`, `2` or `50 %` (1:2 means 2 m across for 1 m up): where the ground is above the edge the slope climbs at the cut slope, where it is below it falls at the fill slope. Where it meets the ground is the **daylight line**, worked out exactly on the terrain's triangles. At an outside corner the slope turns round it as a cone, at an inside corner the two slopes meet on the corner's bisector. Where it does not reach the ground within **At most** (20 m unless you change it), or runs off the terrain, it stops there and says so. In its properties a slope can instead go **Down to** a width (it meets the ground that far out, at whatever slope that takes) or a level.
+
+![A terrace with its slopes to the ground in plan: the daylight line dashed, the hachures from the top of each slope](shots/grading-plan.webp)
+
+![The terrace's slopes in 3D](shots/grading-slope-3d.webp)
+
+**On the terrain.** A grading is part of its terrain: its edges, its rulings and its daylight line are the terrain's breaklines, and the survey points inside it are left out (the terrain says how many), so the ground there is the grading's surface; the contours run on across it. Sections cut the ground with it; the terrain's cut/fill analysis and grid include it. Without a terrain, a patch between edges is a surface of its own (a slope needs a ground to meet).
+
+![A section across the two plazas and the green slope between them](shots/grading-section.webp)
+
+**Plan, quantities and IFC.** In plan a grading is hatched with its material's surface graphics (**Grass** unless you choose another), and a slope has its daylight line dashed and its **hachures**: lines across the slope from its top down, long and short in turn, so the plan shows which way it falls. *Lapin_GradingQuantities* gives its plan and surface areas, its lowest and highest points and, for a slope, the daylight line's length and its widest; *Lapin_EarthworkQuantities* its cut and fill against the existing ground. To IFC 4.3 it goes as an *IfcEarthworksFill* (a slope *SLOPEFILL*) or, when it mostly cuts, an *IfcEarthworksCut*; to IFC4 as a proxy. The terrain's geometry includes it, and a file Lapin wrote comes back as the same grading. Each change is one undo step; a grading deleted leaves the ground as it was.
+
+## Channels
+
+A **drainage channel** (Romanian *rigolă*) runs along a line, takes the rain off a plaza or a road and delivers it to a gully. The **Drainage** group of the **Site** tab has two tools for it: **Drainage channel** (<kbd>RG</kbd>) draws one on a polyline (clicks; **Arcs** or <kbd>Space</kbd> for curved stretches; Enter finishes), and **Drainage channel along a line** (<kbd>RJ</kbd>) takes a line you pick: click near the edge of a hardscape you want it to run along, a path (the side you click is the edge of its carriageway), a feature line, a platform's outline, a kerb or another channel. A channel drawn this way follows its line: change the line and the channel changes with it. The bar chooses its **section**, how its bottom runs, and its width and depth.
+
+![A plaza with a grated drain across it at 0.5 %, a gully at its low end, in 3D](shots/drainage-plaza-3d.webp)
+
+**Its section.** A **U channel** and a **V channel** are open; a **Slot drain** is a body with a narrow slot to the top; a **Grated drain** is a U body with a cast iron grating level with the surface; a **Cobble swale** is a shallow dish paved in cobbles. A section drawn in **Manage → Profiles** with the use **Drainage channel** is offered under **Profiles**: its outline is laid across the channel, to the left and right of the axis, up from the bottom. Each section has its sizes in the properties (width, depth, wall, base, and for a drain the grating's thickness, the slot's width and its neck), and its material.
+
+![A drain's properties: its section, invert, top, gullies and numbers](shots/drainage-channel-properties.webp)
+
+**Its bottom.** **At a grade** gives the invert (its bottom) a constant fall from its start: type `0.5 %`, `1:200` or `0.005`, positive falling from the start, negative rising; the **Start level** is the level of the bottom at the start, or empty to take the channel's top there less its depth. **At a depth under its top** keeps the bottom the same depth under the top all along, so it follows the ground. A channel whose bottom would come up to its top says where, and is cut down to 2 cm deep there; lower its start or its grade. **Top** says what its top is flush with: the ground, or a hardscape's top where it runs through one (found where it lies, so the plaza's paving is cut for it), or the heights of the line it follows.
+
+**Gullies.** A channel with a fall has a **gully** (a pot) at its lowest point. In the properties **Gullies** lists them by their distance along the channel: type another, **Add a gully** for one at the end, **remove** takes one away (a channel can have none: it is then said to have no gully at its low points), **At its lowest point** goes back to the one it was made with. Where the invert has a low point of its own (a channel that rises and falls) the properties and the plan mark it.
+
+![The channel's long section in the Profile panel: its top on the plaza, its bottom falling to the gully](shots/drainage-channel-profile.webp)
+
+**Profile…** in its properties opens the long section under the plan: the top and the invert along it, read-only (change the grade or the start level in the properties). In plan the channel is drawn with its walls, its grating hatched, the gullies as a square with its cross, and its fall and the inverts written beside it (*IL*, the invert level, and *Low point* are written in the drawing language of **Manage → Drafting standards**: English unless you choose another).
+
+![The gully at the low end of the drain](shots/drainage-gully-3d.webp)
+
+**On the terrain.** A channel cuts the terrain under it (its excavation measured for it), unless you choose **standalone** in its properties; **cut into the terrain** picks a terrain again, and a copy of it cuts the same one. It has plan grips (move a corner, add one at an edge's middle, bend an edge) and moves, rotates and mirrors like any element, each change one undo step. *Lapin_ChannelQuantities* gives its length, volume, excavation, grating length, the inverts at both ends, its fall, its least and greatest depth and the number of gullies; the **Drainage channel schedule** lists them. It is called a **drainage channel** wherever Lapin shows it (its properties, the project browser, schedules, a new one's name). To IFC it goes as an *IfcEarthworksCut* (*TRENCH*), a slot or grated drain as an *IfcDistributionChamberElement* (*TRENCH*), with its body; a file Lapin wrote comes back as the same channel.
+
+## Standalone kerbs
+
+A kerb need not belong to a hardscape. **Kerb** (<kbd>BK</kbd>, in the **Drainage** group) draws one along a polyline on the ground; **Kerb along a line** (<kbd>BJ</kbd>) takes a hardscape's edge, a path's side, a feature line or a platform's outline you pick, and follows it. The bar chooses its **shape** (**Upright**, **Bevelled**, **Rounded**, or a profile of the project's), which side of its line it **stands on**, looking along it (the right by default: round an outline drawn anticlockwise that is outside it, away from the paving), its **height**, and its **heights**: those of its line, or the ground (a hardscape's top where one lies under it). A kerb drawn takes the ground, a kerb along a line the line's heights, unless you say otherwise.
+
+![The kerb along the plaza's south edge, dropped where a path crosses it](shots/drainage-kerb-3d.webp)
+
+![A standalone kerb's properties: its shape, side, heights, material and its drops](shots/drainage-kerb-properties.webp)
+
+**Drops.** **Add a drop** in its properties puts a stretch in (from, to, as distances along the kerb, and its **Reveal**: its height over the paving there, `0` at a crossing); change the numbers in the table, or **remove** it. Each dropped stretch is its own run of kerb, mitred where the line turns and square where it stops. A kerb cuts the terrain it is given, as a channel does, and the layers of any hardscape it runs through (found where it lies; their volumes in the quantities lose it too), and has the same plan grips for its own points. *Lapin_KerbQuantities* gives its length, its dropped length and its volume; to IFC it goes as an *IfcKerb* (IFC 4.3) or a proxy named *Kerb* (IFC4). A hardscape's own kerb is changed with its hardscape (**Kerb edges**, above): only one without a hardscape has these properties.
+
+## Accessories along a line
+
+Posts, lamps, bollards, gullies, benches or trees every few metres along a line are an **array along a path**, as before, and now they can stand on the ground. **Along a line** (<kbd>AX</kbd>, in the **Drainage** group) is the Array dialog already set to **Along a path** with **Height: On the ground**: select what to lay out (the first of the row), press it, set the **Spacing** (or the number of copies), then click the line in a plan and the point of the selection that goes onto it. The line can be a path or a road, a feature line, a hardscape (its whole perimeter), a kerb, a channel, a platform, or any line you draw.
+
+![Lamp posts every 6 m along a path, each on the sloping ground](shots/drainage-posts-3d.webp)
+
+The **Height** of an array along a path is **As the original** (each copy at the original's height, as always), **On the ground** (each copy's bottom on the terrain's designed ground, or a hardscape's top, where it stands), or **On the line** (on the line's own height: a feature line's, a hardscape's top edge, a road's red line; the ground where the line has none), with a **Rise above it** in metres for a lamp mounted on a wall. Both are in the array's properties as well. The copies stand again when the ground or the line changes under them.
+
+![An array's properties: along a path, with its height on the ground](shots/drainage-array-properties.webp)
+
+![The plaza in plan: its drain with the gully, the kerb, the path and the posts](shots/drainage-plan.webp)
+
+## Site plans and location plans
+
+The project browser has a **Site** under the levels: the site's own drawings, which belong to no storey. A new project starts with two:
+
+- the **Site plan** (Romanian *plan de situație*), at 1:500: the whole model seen from above, every storey at once, roofs and all, with the terrain, the paths, the plants, the parcel and the neighbours. What lies wholly under ±0.00 (the foundations) is left out, nothing is cut and nothing hidden is drawn. The parcel's corners are numbered;
+- the **Location plan** (*plan de încadrare în zonă*), at 1:2000: the same drawing for the site in its area, over the orthophoto, without the corners' numbers; the project's buildings are filled in red and the parcel is outlined in red, so the site stands out from its neighbours.
+
+**+** beside Site makes another of either; the copy buttons duplicate one. Both carry a **north arrow** pointing to true north (Manage → Location: the angle to true north), a **scale bar** and, when the project is tied to the map, the **coordinate grid**: crosses where round eastings and northings meet, every tenth of the scale (50 m at 1:500, 200 m at 1:2000), with their values. The arrow and the bar are annotations of the view: select one to move it by its grip, size it (**Size**, in mm), change its **Marker symbol**, or delete it. Until it is moved, **Position** says *by itself*: the arrow stands right of the drawing's top and the bar under its bottom left, following the drawing as it grows; **Put it back by itself** returns it there. The bar's **Look** is *Lapin's* or *site plan's*, with its **Length**, **Divisions** and **Scale**. Select the view in the browser and set them in its properties, under **View settings**: what it is (site plan or location plan), the grid's step (0: none), the arrow and the bar (ticking or clearing them adds or removes the annotations), and **Highlight the project** (the red fill and outline, on by default in a location plan, for a site plan too when you want it).
+
+**The map under them.** The orthophoto is drawn under every site plan and location plan, whatever storey it was imported on, and prints with them on sheets and in the PDF. For the cadastral plan or the surveyor's drawing, open the site plan and use **Import DXF…** with **Placed: by the map's coordinates**. Lapin offers this itself when the file's coordinates look like a map's, for example Stereo 70: the drawing's lower-left corner tens of kilometres from zero, in the file's own unit or in metres. A plan of your own in millimetres is placed by its origin even on a site plan, in the unit the file says. The drawing then lands where its eastings and northings say, through the project's survey point and its angle to true north. If the project is not yet tied to the map, the drawing ties it. Tick **As a link** to keep it read-only and reload it when the surveyor sends a new one. Import it once into each drawing that needs it.
+
+![A location plan: the house filled in red, the parcel outlined in red, among its neighbours](shots/site-location-plan.webp)
+
+![A site plan: the house from above on its parcel, the corners numbered, the map's grid, the north arrow and the scale bar](shots/site-drawings.webp)
+
+![A north arrow selected on a site plan: its properties](shots/view-north-arrow.webp)
+
+![The north arrow moved by its grip and made larger](shots/view-north-arrow-moved.webp)
+
+![The Site in the project browser](shots/site-browser.webp)
+
+The **Parcel coordinates** schedule (Schedules → + → Parcel coordinates) is the parcel's coordinate inventory: each corner as the site plan numbers it, its northing and easting in the project's system, the side to the next corner, and the area. Like any schedule it goes on a sheet beside the site plan, and out as CSV or XLSX.
+
+## Trees and shrubs
+
+**Plant** (PN) sets one plant at a click, **Planting zone** (PZ) sows an outline with a mix of species at a density; select either and choose its species in the properties. The species list is a library of plants native or traditional in Romania, in groups: **fruit trees** (apple, pear, plum, sweet and sour cherry, apricot, quince), **conifers** (silver fir, Norway spruce, Scots and black pine), **deciduous trees** (walnut, lime, birch, maple), **shrubs** (hazel, cornelian cherry, elder, dog rose, lilac, sea buckthorn, redcurrant, thuja, boxwood) and **ground cover**. Each comes with its Latin name, its usual height and crown, and is shown by its Romanian name when the interface is in Romanian. The planting schedule lists the Latin and Romanian names beside each species.
+
+In plan each plant is drawn from above with a thin line, as wide as its crown, by its outline alone: a walnut or a lime a softly lobed crown, a fruit tree a circle, a fir or a spruce a star, a pine a ragged ring, a shrub a small cloud, a clipped hedge plant a circle, with a small cross at a tree's trunk. Elevations and sections draw each plant as one outline: a tree's crown on its trunk, a conifer's cone in tiers, a shrub's dome. A few lines each, so a site plan of hundreds of trees stays light. In 3D conifers are cones, the other trees have a rounded crown on their trunk and shrubs a low dome.
+
+![A small orchard in plan: fruit trees, a walnut, conifers and shrubs](shots/planting-symbols.webp)
+
+Set the view style's **Entourage in 2D** to **detailed** for the landscape drawing's symbols, in black: a fruit tree as a lobed crown with forked branches, a walnut or a lime as a scalloped crown round a dark core, a fir or a spruce as a star of needle sprays, a pine as a round tuft of needles, a shrub as a small cloud. Lapin draws each symbol itself, so neighbouring trees differ a little and a zone never looks stamped; at 1:1000 and smaller (a location plan) only the crowns' outlines are drawn.
+
+![The same orchard drawn detailed](shots/planting-symbols-detailed.webp)
+
+### Coloured or maquette
+
+How plants look in 3D is a setting of the view, **Vegetation** (in the view's properties or **View → View settings**; for a whole style, **Manage → View styles**): **coloured**, the default, draws each species in its colour as above; **maquette** draws them as an architectural model's trees, neutral and faceted, so a site reads as a massing model. In the maquette a broadleaf is a rounded cluster of four to seven faceted blobs on its trunk, a fruit tree the same, wider and lower, a fir or a spruce three or four stacked cones, a pine a flat clump high on a tall bare trunk, a shrub a low cluster with no trunk, a hedge plant a bevelled eight-sided block and grass a thin mat. The crowns are an off-white and the trunks a little darker, flat shaded, so they read in the light and the dark theme alike. Lapin makes each body itself from the plant's seed: neighbours differ, and a zone grows the same way every time.
+
+![A garden in 3D, coloured](shots/planting-coloured-3d.webp)
+
+![The same garden as a maquette](shots/planting-maquette-3d.webp)
+
+Select a plant and its properties offer **Vegetation in 3D**, a quick switch of the 3D view's setting; every other view (a saved 3D view, a section) keeps its own. The glTF, USD and COLLADA exports of a 3D view take its plants as it shows them; a section or an elevation whose **Entourage in 2D** is **detailed** draws the lines of the bodies its view's vegetation gives. The quantities, the planting schedule and the IFC export never change: they always count and write the plants as they are. Projects made before draw their plants coloured.
+
+![Vegetation in 3D in a plant's properties](shots/planting-vegetation-toggle.webp)
+
+## People and cars
+
+**Entourage** (EN) puts a person or a car at a click; choose which in the command line's bar while the tool is on: a **man standing**, a **woman walking**, a **child**, a **person on the phone**, a **car** or an **SUV / van**. **Entourage row** (ER) puts a row of them along a line you draw: cars every 2.5 m, parked side by side across it with their fronts to its left, people every 1.2 m, walking along it. Each stands on the terrain under it, or on its storey's floor where there is no terrain.
+
+![People at the door and cars parked beside the house](shots/entourage-3d.webp)
+
+Select one to change it in the properties: its kind, its **rotation**, its **height** (its kind's usual size by default), how far **above the ground** it stands (on a deck or a balcony) and the **colour** of its clothes or body. Move, rotate, mirror and copy it as any element.
+
+In 3D they are simple figures: people with their limbs, clothes, hair and shoes, cars with their glass, wheels and lights. Drawings keep them simple, as an architect draws entourage, with a thin line: plans and site plans from above, a person's shoulders and head, a car's outline with its corners rounded and its windscreen; elevations and sections as silhouettes, one outline each, a person's figure, a car's side or its front as the view sees it, never the lines of their bodies.
+
+![In plan](shots/entourage-plan.webp)
+
+![In the south elevation](shots/entourage-elevation.webp)
+
+![A car's properties](shots/entourage-properties.webp)
+
+How people, cars and plants draw in 2D is a setting of the view style, **Entourage in 2D** (in the view's properties or **View → View settings**; for a whole style, **Manage → View styles**): **outlines** (the default), **abstract** (a person a circle in plan and a head over a body in an elevation, a car a rounded box, a tree a circle with its trunk), **detailed** (the plants' landscape symbols and every line of the bodies, with the view's sun shadows, as Lapin drew them before) or **not drawn**. **Silhouette fill** fills the silhouettes of elevations and sections light grey or pale green. They draw with pen 2 (0.13 mm at 1:100) unless **Manage → Object styles** gives the **Entourage** category another, and **Visibility / Graphics** hides that category in a view. Sheets, the PDF and DXF print them as the view draws them; this setting never changes their 3D bodies (the plants' are the view's **Vegetation**, above). Projects made before draw them as outlines too.
+
+They give drawings and pictures their scale but are no part of the building. An IFC or Fragments export (File → Export…) leaves them out unless you tick **Entourage** in its list of kinds; IFC writes them as IfcBuildingElementProxy "Entourage". The 3D exports (glTF, USD, COLLADA) take them. Clash tests leave them out.
+
+### Your own pictures
+
+**Entourage kinds…** (in the **Entourage** group) makes kinds of the project's own from pictures: **Add picture…** takes a PNG or a JPEG (at most 8 MB; one larger than 2048 pixels is scaled down) and makes a kind of it, named after the file, 1.75 m tall and as wide as the picture's proportion says. Change its name, **height**, **width** and **group** in the list (in the project's units): a kind in the **Cars** group stands in an entourage row every 2.5 m, as cars do. The kinds then appear under **Pictures** in the command line's bar and in a figure's properties.
+
+![The project's own kinds, each with its height, width and group](shots/entourage-kinds.webp)
+
+A figure of a picture kind stands as a thin card with the picture on both faces in 3D; a PNG's see-through pixels are cut out, its shadow too, so a cut-out person or tree stands on its own. Drawings show it as the built-in kinds: the card's outline in plan, a flat rectangle as wide and as tall as the picture in elevations and sections, nothing when **Entourage in 2D** is **not drawn**. A figure of a picture kind takes its kind's height unless you give it its own; the colour does not apply to it.
+
+The pictures and kinds are kept in the project (saved, undone, versioned) and never written into an IFC; the figures are exported as the other entourage. A kind some figures use is not deleted: Lapin says how many use it, so give them another kind first. A kind deleted takes its picture with it, unless a material or another kind uses it too.
+
+The figures follow the people and cars of [BimGo](https://github.com/aussieBIMguru/BimGo) by Aussie BIM Guru (MIT-0): their proportions, stances and profiles.
+
+## Gates
+
+The **Gates** group on the Site tab places gates with their piers: a **Swing gate**, a **Double swing gate** (<kbd>GT</kbd>), a **Sliding gate**, a **Cantilever sliding gate**, a **Pedestrian gate**, a **Gate with side pedestrian door** and a **Folding gate**. Lapin has no fence of its own: draw the fence as a wall (a low one, of the type you want), or let the gate's piers stand on the parcel's line.
+
+Click the gate's two ends. With **On lines** on in the bar (the default), the gate's middle goes onto the nearest wall's axis or drawn line within 1.5 m (a wall, the parcel's edge, a drafted line), along it; off, it stands between the two points. The bar also chooses the type it puts down, from the project's styles or Lapin's built-in ones.
+
+A gate set on a wall cuts it from the outer faces of its piers, all the way up, so the fence wall stops at the piers.
+
+![A sliding gate and a pedestrian gate in a fence wall, a double gate on the parcel's edge](shots/gates-plan.webp)
+
+Plans draw the piers as cut, the leaves open by their opening angle with their swing, a folding gate's panels folded; a sliding gate closed, with an arrow the way it opens, its track, and the zone it parks in dashed, as long as its leaf (a cantilever gate's leaf is longer than the opening by its counterweight tail, about 45%). Elevations, sections and 3D draw the bodies.
+
+![The gates in 3D](shots/gates-3d.webp)
+
+### The configurator
+
+**Gate types** opens the configurator: the project's styles, and Lapin's built-in ones to add with a click (a wrought iron double gate, a horizontal slat sliding gate, a steel bi-fold gate, an arched pedestrian gate, a timber driveway gate, a security mesh gate, an automatic cantilever gate, a double gate with a pedestrian door, a farm gate, a perforated sheet sliding gate, a timber garden gate). A type sets, by groups, only what its kind takes:
+
+- **Gate:** the clear width and height, the gap to the ground, a pedestrian door's width, a folding gate's panels on each side, the opening angle;
+- **Leaves:** the frame's size, the infill (vertical bars, horizontal slats, a solid panel, mesh or perforated sheet), the bars' or slats' spacing, spear tips on the bars, the top (flat, arched or pointed) and its rise;
+- **Piers:** masonry, steel posts or none, their size and height, a masonry pier's cap (flat or pyramid);
+- **Hardware:** a motor (an arm on a swing gate's leaves, a box beside a sliding gate's track) and a handle and lock;
+- **Materials** by role: frame, infill, piers, caps, hardware and motor. A material named here that the project has not is made.
+
+The preview is the engine's: the plan with its swing or its parking zone above, the elevation below. Every gate of a type follows a change.
+
+![The gate configurator with a wrought iron double gate](shots/gates-types.webp)
+
+Select a gate to change its type, its turn, how far above the ground it stands, which side its leaves **open to**, on which hand its hinges are (or a sliding gate parks), and how far it is drawn open (0: closed). **Other side** and **Other hand** in its properties, or the arrows by it in plan, flip them. **Modify → Mirror** gives it its other hand.
+
+![A gate's properties](shots/gates-properties.webp)
+
+### Schedule, cost and IFC
+
+The **Gate schedule** lists the gates by type: kind, clear size, leaves, infill, top, piers, motor and how many. A new type has the cost articles `LAP-GATE` and, with a motor, `LAP-GATEMOT`, counted per gate.
+
+IFC writes a gate as an **IfcDoor** of PredefinedType **GATE**, of an **IfcDoorType** with its operation (DOUBLE_DOOR_SINGLE_SWING, SLIDING_TO_LEFT, DOUBLE_DOOR_FOLDING…; a gate with a pedestrian door USERDEFINED), its clear width and height as OverallWidth and OverallHeight and Pset_DoorCommon. The piers are part of the gate's body, so one element carries the gate as it was configured, and Lapin reads it back as its own gate.
+
+## Planning rules and the sun (Lapin Urban)
+
+The **Lapin Urban** edition adds a **Planning** group to this tab: the parcel's planning rules (POT, CUT, the maximum heights, the setbacks from the street, the sides, the rear and the road's axis), the **buildable volume** they leave, the indicators the model reaches against them, and the **sun study**: the sun and its shadows in 3D for any day and hour at the project's place, and shadow plans for the equinox and the solstices.

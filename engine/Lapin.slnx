@@ -1,0 +1,85 @@
+<Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/Geometry/">
+    <Project Path="src/Geometry/Lapin.Alignments/Lapin.Alignments.csproj" />
+    <Project Path="src/Geometry/Lapin.Booleans/Lapin.Booleans.csproj" />
+    <Project Path="src/Geometry/Lapin.Geometry/Lapin.Geometry.csproj" />
+  </Folder>
+  <Folder Name="/src/Host/">
+    <Project Path="src/Host/Lapin.Host/Lapin.Host.csproj" />
+  </Folder>
+  <Folder Name="/src/Relay/">
+    <Project Path="src/Relay/Lapin.Relay/Lapin.Relay.csproj" />
+  </Folder>
+  <Folder Name="/src/Model/">
+    <Project Path="src/Model/Lapin.Model/Lapin.Model.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/" />
+  <Folder Name="/src/Modules/Architecture/">
+    <Project Path="src/Modules/Architecture/Lapin.Architecture/Lapin.Architecture.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Civil/">
+    <Project Path="src/Modules/Civil/Lapin.Civil/Lapin.Civil.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Construction/">
+    <Project Path="src/Modules/Construction/Lapin.Cost/Lapin.Cost.csproj" />
+    <Project Path="src/Modules/Construction/Lapin.Planning/Lapin.Planning.csproj" />
+    <Project Path="src/Modules/Construction/Lapin.SiteWorks/Lapin.SiteWorks.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Drafting/">
+    <Project Path="src/Modules/Drafting/Lapin.Drafting/Lapin.Drafting.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Exchange/">
+    <Project Path="src/Modules/Exchange/Lapin.Speckle/Lapin.Speckle.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Interior/">
+    <Project Path="src/Modules/Interior/Lapin.Furniture/Lapin.Furniture.csproj" />
+    <Project Path="src/Modules/Interior/Lapin.Furniture.Models/Lapin.Furniture.Models.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Mep/">
+    <Project Path="src/Modules/Mep/Lapin.Mep/Lapin.Mep.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Coordination/">
+    <Project Path="src/Modules/Coordination/Lapin.Clash/Lapin.Clash.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Phases/">
+    <Project Path="src/Modules/Phases/Lapin.Phases/Lapin.Phases.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Steel/">
+    <Project Path="src/Modules/Steel/Lapin.Steel/Lapin.Steel.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Studio/">
+    <Project Path="src/Modules/Studio/Lapin.Studio/Lapin.Studio.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Automation/">
+    <Project Path="src/Modules/Automation/Lapin.Graphs/Lapin.Graphs.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Scripting/">
+    <Project Path="src/Modules/Scripting/Lapin.Scripting/Lapin.Scripting.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Structure/">
+    <Project Path="src/Modules/Structure/Lapin.Structure/Lapin.Structure.csproj" />
+    <Project Path="src/Modules/Structure/Lapin.Rebar/Lapin.Rebar.csproj" />
+    <Project Path="src/Modules/Structure/Lapin.Analysis/Lapin.Analysis.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Transport/">
+    <Project Path="src/Modules/Transport/Lapin.Transport/Lapin.Transport.csproj" />
+  </Folder>
+  <Folder Name="/src/Modules/Wood/">
+    <Project Path="src/Modules/Wood/Lapin.Wood/Lapin.Wood.csproj" />
+  </Folder>
+  <Folder Name="/src/Platform/">
+    <Project Path="src/Platform/Lapin.Drawing/Lapin.Drawing.csproj" />
+    <Project Path="src/Platform/Lapin.Ids/Lapin.Ids.csproj" />
+    <Project Path="src/Platform/Lapin.Ifc/Lapin.Ifc.csproj" />
+    <Project Path="src/Platform/Lapin.Mesh/Lapin.Mesh.csproj" />
+    <Project Path="src/Platform/Lapin.Package/Lapin.Package.csproj" />
+    <Project Path="src/Platform/Lapin.Package.Http/Lapin.Package.Http.csproj" />
+    <Project Path="src/Platform/Lapin.Platform/Lapin.Platform.csproj" />
+    <Project Path="src/Platform/Lapin.PointClouds/Lapin.PointClouds.csproj" />
+    <Project Path="src/Platform/Lapin.Protocol/Lapin.Protocol.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Lapin.Engine.Tests/Lapin.Engine.Tests.csproj" />
+  </Folder>
+</Solution>

@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: UI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Reads the pnpm version from "packageManager" in package.json.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          CI: 'true'
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm --filter ui test
+
+  engine:
+    name: Engine
+    # 22.04 like the Linux build, so both share the cached libmanifoldc.so (built against glibc 2.35).
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      # The booleans: manifold's C API as libmanifoldc.so (engine/native/linux-x64),
+      # built from source once and kept in the cache while the script is unchanged.
+      - uses: actions/cache@v4
+        with:
+          path: engine/native/linux-x64
+          key: manifold-linux-x64-${{ hashFiles('scripts/build-manifold.mjs') }}
+      - run: test -f engine/native/linux-x64/libmanifoldc.so || node scripts/build-manifold.mjs
+      # The whole solution: the tests load the built modules from engine/artifacts/modules.
+      - run: dotnet build engine/Lapin.slnx -v q -nologo
+      - run: dotnet test engine/tests/Lapin.Engine.Tests -v q -nologo
+      # The licence check covers the UI's npm packages and the engine's NuGet
+      # packages (dotnet list package, after the restore above), so it runs
+      # here, where both pnpm and the restored engine are available.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          CI: 'true'
+      - run: pnpm check:licenses
+
+  web:
+    name: Web
+    # The engine in the browser (docs/plan-browser-engine.md): built for lapin and
+    # checked in headless Chrome. The desktop jobs above never depend on it.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      # An SDK of its own in a folder the job can write, so the wasm-tools workload installs without root.
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+        env:
+          DOTNET_INSTALL_DIR: ${{ runner.temp }}/dotnet
+      - run: dotnet workload install wasm-tools
+      # manifold for the browser (engine/native/browser-wasm), kept while its script is unchanged.
+      - uses: actions/cache@v4
+        with:
+          path: engine/native/browser-wasm
+          key: manifold-browser-wasm-${{ hashFiles('scripts/build-manifold.mjs') }}
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+        env:
+          CI: 'true'
+      - run: node scripts/build-web.mjs lapin
+      # A runner is slower than a laptop: the start budget is looser here.
+      - run: node scripts/check-web.mjs lapin
+        env:
+          LAPIN_WEB_START_BUDGET_MS: '10000'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lapin-web
+          path: build/lapin/web
+          retention-days: 14

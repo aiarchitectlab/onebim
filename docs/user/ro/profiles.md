@@ -1,0 +1,90 @@
+---
+title: Biblioteci de profile
+order: 57
+summary: Profilele de care ai nevoie, oricare ar fi standardul lor — setul EN mic al lui Lapin, tabelele și fișierele tale IFC, folderele firmei; desenate, cu proprietățile calculate și valorile din fișier verificate, copiate în proiect pe măsură ce le folosești.
+---
+
+Lapin nu poate livra toate profilele metalice folosite în lume, așa că vine cu un set european mic și citește restul din ce ai deja: un catalog ca foaie de calcul (AISC Shapes Database, tabelul unui producător, al firmei tale), o bibliotecă IFC de profile (a lui Bonsai, de exemplu) sau orice model IFC, un contur închis desenat în Lapin sau într-un DXF. **Gestionare → Biblioteci de profile** le ține pe toate.
+
+![Biblioteci de profile](shots/profile-libraries.webp)
+
+## Bibliotecile
+
+- **Încorporată**: *EN steel (Lapin)*: IPE, HEA, HEB, HEM, UPN, UPE, corniere egale și inegale, SHS, RHS și CHS formate la cald în mărimi uzuale, C, Z și Σ generice formate la rece. Doar dimensiuni standard; toate proprietățile le calculează Lapin.
+- **Pe acest calculator**: bibliotecile importate, pentru orice proiect. Și varianta din browser le păstrează, în acel browser.
+- **Folderele firmei**: în aplicația desktop, oricâte foldere locale, din rețea sau sincronizate cu fișiere `.lapinprofiles` (**Adaugă un folder…**; aceeași listă e **Preferințe → Biblioteci**, unde și celelalte biblioteci își citesc fișierele din folderele firmei). Un folder e doar de citit până bifezi **de scris**; atunci butonul de salvare de lângă el scrie acolo biblioteca aleasă, pentru colegi.
+- **În proiect**: doar profilele folosite se copiază în proiect, cu numele bibliotecii lor, ca fișierul să se deschidă oriunde.
+
+Scrie în căutare ca să cauți în toate bibliotecile după nume, familie, standard sau fel; alege un profil ca să-l vezi desenat, cu dimensiunile și proprietățile lui.
+
+## Standardele
+
+Fiecare profil apare sub standardul lui: **EN** pentru setul lui Lapin și orice profil al cărui standard e o normă europeană (EN 10365, DIN EN, SR EN…), **AISC / ASTM** pentru tabelele americane (o coloană *Standard* care spune ASTM A6, de exemplu), BS, DIN, JIS, AS/NZS și celelalte după numele lor, iar o bibliotecă ale cărei profile nu spun niciunul — a firmei — sub propriul nume. Unei biblioteci de pe acest calculator i se poate spune sub care apare (**Arătată la**, deasupra listei ei).
+
+Alegătoarele arată întâi profilele proiectului, apoi fiecare standard sub titlul lui. Butoanele din capul listei ascund sau arată un standard; alegerea ta se ține minte pe acest calculator, pentru toate proiectele (și în **Fișier → Preferințe → Profile**).
+
+![Alegătorul grupat pe standarde, cu butoanele lui](shots/profile-picker-standards.webp)
+
+Un proiect păstrează doar profilele folosite de tipurile lui, niciodată o bibliotecă întreagă, deci o bibliotecă pe care o ai nu cântărește nimic în fișierul lui. Ce oferă un proiect e alegerea lui: **Standardele acestui proiect**, sub biblioteci, bifează standardele arătate de alegătoarele lui; profilele deja în el rămân. **Fișier → Preferințe → Profile** alege standardele cu care pornește un proiect nou (toate, dacă nu alegi).
+
+![Standardele oferite de un proiect](shots/profile-project-standards.webp)
+
+![Standardele oferite de un proiect nou](shots/prefs-profiles.webp)
+
+Lapin nu vine cu AISC Shapes Database: AISC permite includerea ei doar printr-un contract de licență propriu, pe care un program MIT nu-l poate transmite mai departe. Descarc-o de la AISC și importă-o cu **Tabel…**: coloanele ei sunt recunoscute.
+
+## Proprietățile
+
+Din dimensiunile unui profil, Lapin calculează aria, Iy, Iz, modulele elastice și plastice, razele de girație, axele principale și unghiul lor (corniere, Z, orice contur nesimetric), constanta de torsiune It și cea de deplanare Iw unde există o formulă, masa pe metru din densitatea materialului și suprafața de vopsit pe metru. Se potrivesc cu tabelele publicate cam la 1 % (It și Iw ale profilelor I laminate la 3 %; Iw al unui U cu tălpi înclinate doar la 20 %). Un contur arbitrar n-are It sau Iw decât dacă le dă fișierul lui.
+
+Valorile date de un fișier se păstrează și se arată lângă ale lui Lapin. O diferență de peste 2 % (arie, masă), 3 % (inerții, module) sau 10 % (It, Iw) e marcată și intră în lista de verificare a importului; despre o coloană întreagă decalată cu o putere a lui 10 se spune că e în altă unitate.
+
+![O valoare din fișier care diferă de a lui Lapin](shots/profile-check.webp)
+
+## Importul unui tabel
+
+**Tabel…** citește un CSV sau XLSX, un rând un profil. Sensul și unitatea fiecărei coloane sunt ghicite din titlu, în engleză, română, germană sau franceză (h, d, Höhe, hauteur, înălțime; tw, s, Stegdicke; A, Iy, Wel, Wpl, It, Iw, G, kg/m…), cu unități cu tot (mm, cm, in, cm², cm⁴, in⁴, ×10³ cm⁶, lb/ft). Un tabel cu Ix și fără Iz e citit american: x axa tare, în țoli. Corectează în dialog ce e greșit; Lapin ține minte alegerea pentru următorul fișier așezat la fel.
+
+![Coloanele unui tabel potrivite](shots/profile-table.webp)
+
+Felul unui rând vine din coloana lui de tip (W, HP, UPN, HSS, PIPE…) sau din nume; pentru celelalte alege felul în dialog.
+
+## IFC
+
+**IFC…** citește toate definițiile de profil dintr-un fișier IFC oarecare: o bibliotecă sau un model din Tekla, Revit ori ArchiCAD, unde profilele folosite de elemente iau numele tipurilor lor. I, I nesimetric, U, T, L, C, Z, țevile, dreptunghiul, cercul și elipsa își păstrează felul și dimensiunile; profilele arbitrare, compuse și derivate devin contururi. Vin și proprietățile mecanice din `Pset_ProfileMechanical` (și din proprietățile de profil IFC2x3); exportatoarele nu se înțeleg asupra unităților și asupra axei Y, așa că Lapin le hotărăște pe amândouă după geometrie. Profilele centre-line și trapez se lasă deoparte și se spune asta.
+
+![Profile citite dintr-un fișier IFC](shots/profile-ifc.webp)
+
+**IFC** și **CSV** de sub listă scriu biblioteca aleasă (sau profilele proiectului) ca bibliotecă IFC4 de profile ori ca tabel pe care Lapin îl citește înapoi.
+
+Și în IFC-ul modelului grinzile, stâlpii și barele metalice se scriu prin profilul lor parametric (`IfcIShapeProfileDef`, `IfcLShapeProfileDef`, …, dreptunghiuri și cercuri), cu numele profilului și `Pset_ProfileMechanical`, deci alte programe văd un IPE 300, nu o polilinie. Contururile, Σ și Z cu buze rămân profile arbitrare; o bară tăiată de alta rămâne corpul care este.
+
+## Un contur ca profil
+
+Desenează secțiunea cu Desen, din polilinii închise și cercuri (cele din interiorul altuia sunt goluri), selectează-le și apasă **Din selecție**, sau citește desenul unui producător cu **DXF…**. Dă-i un nume, alege-i materialul și biblioteca și păstrează-l. Așa intră profilele de aluminiu și PVC, secțiunile prefabricate și formele de lemn: același depozit, cu materialul și densitatea lor.
+
+![Un contur desenat făcut profil](shots/profile-outline.webp)
+
+**Desenează-i conturul** face invers: conturul profilului ales ca polilinii închise în vederea din față, ca Studio să-l extrudeze sau să-l deruleze.
+
+**Desenează un profil…** deschide secțiunea pe pânza de schiță: o planșă proprie, în milimetri, cu axele secțiunii desenate ca linii de construcție. Desenează exteriorul și camerele lui ca forme închise cu uneltele din **Desen** de pe bară (**Dreptunghi**, **Polilinie**, **Cerc**, **Linie** și **Arc** cap la cap, **Paralelă**, **Racordare**, **Taie**…), mută punctele de mânere și cotează-le și constrânge-le ca orice schiță; curbele sunt așezate din bucăți drepte scurte. Formularul lateral de lângă ea ține numele profilului, materialul și biblioteca, formele de pornit (un dreptunghi, o cutie goală, un T, un corniere sau un U) cu mărimile pe care le dai, o cameră adăugată la mijloc, mărimea și aria ei, și punctele exteriorului sau ale unei camere în milimetri, de rescris. **Termină schița** face profilul (un contur care se intersectează pe el însuși sau cu altul, ori rămas deschis, e refuzat cu motivul, iar schița rămâne deschisă) și te duce înapoi la biblioteci, ca să-l numești și să-l păstrezi ca orice contur; **Renunță** te duce înapoi fără el. Un produs fără Studio păstrează editorul de secțiuni în dialog. **Editează conturul…** deschide pe aceeași schiță un profil pe care îl ai (terminat nemodificat, rămâne exact cum era): păstrat din nou sub numele lui, copia din proiect e marcată ca mai nouă, iar **Actualizează din bibliotecă** îl aduce la fiecare tip și la fiecare bară de perete cortină făcută din el. Montanții și traversele alese iau un profil propriu, întors, aliniat și decalat: vezi [Pereți](walls.md).
+
+![O secțiune pe pânza de schiță: un dreptunghi cu o cameră, cu formularul lateral alături](shots/profile-editor.webp)
+
+## Folosirea unui profil
+
+În **Oțel → Tipuri metalice**, **Structură → Tipuri structurale** (stâlpi și grinzi) și la profilele halei cu cadre, alege **Dintr-o bibliotecă de profile…** și scrie ca să cauți.
+
+![Alegătorul caută în toate bibliotecile](shots/profile-picker.webp)
+
+Profilul se copiază în proiect, iar tipul îl păstrează. Corpurile sunt ușoare, cu colțuri drepte, la toate nivelurile în afară de unul: o vedere la **LOD 400** (plan, secțiune, elevație, planșă sau 3D) desenează secțiunea reală, racordări, raze la vârfuri, tălpi înclinate. Exporturile și alegerea rămân pe corpul cu colțuri drepte, dar cantitățile, greutățile, extrasele, Lista barelor metalice și devizele folosesc aria reală a secțiunii (un IPE 300 are 53,81 cm², nu 51,88 cât conturul cu colțuri drepte); o secțiune fără raze nu se schimbă.
+
+![O grindă și un stâlp metalic într-o vedere 3D la LOD 400: racordările desenate](shots/profile-real-section.webp)
+
+În altă parte profilul dă ce poate folosi unealta: baghetele, șanțurile și fundațiile continue iau exteriorul lui ca profil 2D (**Dintr-o bibliotecă de profile…** în lista lor), iar montanții și traversele pereților cortină și tocurile și cercevelele ușilor și ferestrelor iau conturul lui real, cu goluri cu tot, de-a lungul fiecărei bare, cu lățimea și adâncimea lui; x-ul profilului merge de-a curmezișul barei (spre geam la toc și cercevea), y-ul lui spre exteriorul clădirii. **Simplu** ia conturul înapoi și păstrează mărimea.
+
+![Montanți și traverse de perete cortină dintr-o secțiune de aluminiu](shots/profile-real-mullions.webp)
+
+![Tocul și cerceveaua unei ferestre din aceeași secțiune](shots/profile-real-frame.webp)
+
+O bibliotecă se poate schimba după ce ai folosit-o. Un profil al proiectului diferit de cel cu același nume din biblioteca lui e marcat **mai nou în bibliotecă**; **Actualizează din bibliotecă** îl înlocuiește, iar toate tipurile făcute din el urmează, ca un singur pas de anulare. Nimic nu se schimbă până nu ceri. Proiectele făcute înainte își păstrează tipurile cum sunt.

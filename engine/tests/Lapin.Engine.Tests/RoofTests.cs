@@ -1,0 +1,983 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Architecture;
+using Lapin.Architecture.Roofs;
+using Lapin.Drafting;
+using Lapin.Model;
+using Lapin.Platform;
+using Lapin.Studio;
+
+namespace Lapin.Engine.Tests;
+
+/// <summary>
+/// Roofs, ported from BubbleBIM Pro's RoofTests.cs (same cases and numbers):
+/// rules per edge solved as a weighted straight skeleton, one IfcRoof with
+/// everything else derived; walls rising to gables and stopping under it.
+/// </summary>
+public class RoofTests
+{
+    static readonly Vec2[] Rect = [new(0, 0), new(10, 0), new(10, 6), new(0, 6)];
+    static EdgeRule Eave(double pitch = 30, double overhang = 0) => new(EdgeKind.Eave, pitch, overhang);
+    static EdgeRule Gable(double rake = 0) => new(EdgeKind.Gable, 0, rake);
+    static double Tan(double deg) => Math.Tan(deg * Math.PI / 180);
+    static double Len(RoofShape s, LineKind k) => s.Lines.Where(l => l.Kind == k).Sum(l => l.Length);
+
+    static void Planar(RoofShape s)
+    {
+        foreach (var p in s.Planes)
+        {
+            var z = RoofSolver.PlaneZ(p.Points);
+            Assert.All(p.Points, q => Assert.Equal(q.Z, z(q.Xy), 9));
+        }
+    }
+
+    // ------------------------------------------------------------ the solver
+
+    [Fact]
+    public void A_hip_roof_on_a_rectangle()
+    {
+        var s = RoofSolver.Solve(Rect, [Eave(), Eave(), Eave(), Eave()]);
+        Assert.Equal(4, s.Planes.Count);
+        Assert.Equal(4, Len(s, LineKind.Ridge), 9);                     // 10 − 6
+        Assert.Equal(4, s.Lines.Count(l => l.Kind == LineKind.Hip));
+        Assert.Equal(3 * Tan(30), s.Height, 9);
+        Assert.Equal(60 / Math.Cos(Math.PI / 6), s.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length), 9);
+        Planar(s);
+    }
+
+    [Fact]
+    public void A_gable_roof_has_two_planes_and_two_vertical_ends()
+    {
+        var s = RoofSolver.Solve(Rect, [Eave(), Gable(), Eave(), Gable()]);
+        Assert.Equal(2, s.Planes.Count);
+        Assert.Equal(2, s.Gables.Count);
+        Assert.Equal(10, Len(s, LineKind.Ridge), 9);
+        Assert.Equal(0, s.Lines.Count(l => l.Kind is LineKind.Hip or LineKind.Valley));
+        Assert.All(s.Gables, g => Assert.Equal(3 * Tan(30), g.Points.Max(p => p.Z), 9));
+    }
+
+    [Fact]
+    public void Overhangs_drop_the_eaves_and_rakes_lengthen_the_ridge()
+    {
+        var s = RoofSolver.Solve(Rect, [Eave(30, 0.5), Gable(0.3), Eave(30, 0.5), Gable(0.3)]);
+        Assert.Equal(10.6, Len(s, LineKind.Ridge), 9);
+        Assert.Equal(-0.5 * Tan(30), s.Planes.Min(p => p.Points.Min(q => q.Z)), 9);
+        Assert.Equal(3 * Tan(30), s.Height, 9);
+        Assert.Equal(10.6 * 7, s.Planes.Sum(p => Math.Abs(Polygon2.SignedArea(p.Points.Select(q => q.Xy).ToList()))), 9);
+    }
+
+    [Fact]
+    public void Different_pitches_meet_on_true_plane_intersections()
+    {
+        var s = RoofSolver.Solve(Rect, [Eave(45, 0.4), Eave(30, 0.6), Eave(45, 0.4), Eave(30, 0.6)]);
+        Assert.Equal(4, s.Planes.Count);
+        Planar(s);
+        foreach (var hip in s.Lines.Where(l => l.Kind == LineKind.Hip))
+        {
+            var owners = s.Planes.Where(p => p.Points.Any(q => (q - hip.A).Length < 1e-6) && p.Points.Any(q => (q - hip.B).Length < 1e-6)).ToList();
+            Assert.Equal(2, owners.Count);
+        }
+        Assert.Equal(5 * Tan(30), s.Height, 9);
+    }
+
+    [Fact]
+    public void A_shed_roof_rises_from_its_low_edge()
+    {
+        var kinds = Roof.Kinds("shed", Rect);
+        Assert.Equal([EdgeKind.Eave, EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Gable], kinds);
+        var s = RoofSolver.Solve(Rect, kinds.Select(k => k == EdgeKind.Eave ? Eave(10) : Gable()).ToList());
+        Assert.Single(s.Planes);
+        Assert.Equal(6 * Tan(10), s.Height, 9);
+    }
+
+    [Fact]
+    public void A_shed_roof_takes_the_ridge_direction_and_flips()
+    {
+        // Ridge along y: the low edge is a side running up y, the one at −x of the two; flipped, the one across.
+        Assert.Equal([EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Eave], Roof.Kinds("shed", Rect, "y"));
+        Assert.Equal([EdgeKind.Gable, EdgeKind.Eave, EdgeKind.Gable, EdgeKind.Gable], Roof.Kinds("shed", Rect, "y", flip: true));
+        // Ridge along x: the long side at −y; flipped, the one at +y.
+        Assert.Equal([EdgeKind.Eave, EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Gable], Roof.Kinds("shed", Rect, "x"));
+        Assert.Equal([EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Eave, EdgeKind.Gable], Roof.Kinds("shed", Rect, "x", flip: true));
+        // Auto flipped: across from the longest.
+        Assert.Equal([EdgeKind.Gable, EdgeKind.Gable, EdgeKind.Eave, EdgeKind.Gable], Roof.Kinds("shed", Rect, flip: true));
+        // Built along y, the single plane rises over the 10 m run.
+        var kinds = Roof.Kinds("shed", Rect, "y");
+        var s = RoofSolver.Solve(Rect, kinds.Select(k => k == EdgeKind.Eave ? Eave(10) : Gable()).ToList());
+        Assert.Single(s.Planes);
+        Assert.Equal(10 * Tan(10), s.Height, 9);
+    }
+
+    [Fact]
+    public void An_L_gets_gables_at_its_arm_ends_and_a_valley_inside()
+    {
+        Vec2[] l = [new(0, 0), new(12, 0), new(12, 4), new(4, 4), new(4, 10), new(0, 10)];
+        var kinds = Roof.Kinds("gable", l);
+        Assert.Equal([EdgeKind.Eave, EdgeKind.Gable, EdgeKind.Eave, EdgeKind.Eave, EdgeKind.Gable, EdgeKind.Eave], kinds);
+        var s = RoofSolver.Solve(l, kinds.Select(k => k == EdgeKind.Eave ? Eave(35, 0.5) : Gable(0.3)).ToList());
+        Assert.Single(s.Lines, x => x.Kind == LineKind.Valley);
+        Assert.Single(s.Lines, x => x.Kind == LineKind.Hip);
+        Planar(s);
+        var hip = RoofSolver.Solve(l, l.Select(_ => Eave(35)).ToList());
+        Assert.Single(hip.Lines, x => x.Kind == LineKind.Valley);
+        Assert.Equal(6, hip.Planes.Count);
+    }
+
+    [Fact]
+    public void A_mansard_is_a_steep_roof_to_the_break_and_a_low_one_over_it()
+    {
+        Vec2[] rect = [new(0, 0), new(10, 0), new(10, 8), new(0, 8)];
+        var hb = 1.0 * Tan(70);
+        var s = RoofSolver.Solve(rect, rect.Select(_ => Eave(70)).ToList(), new Mansard(25, hb));
+        Assert.Equal(8, s.Planes.Count);
+        Assert.Equal(2 * (8 + 6), Len(s, LineKind.Break), 6);
+        Assert.Equal(2, Len(s, LineKind.Ridge), 6);
+        Assert.Equal(hb + 3 * Tan(25), s.Height, 6);
+        Planar(s);
+        var g = RoofSolver.Solve(rect, [Eave(60), Gable(), Eave(60), Gable()], new Mansard(30, 1.2 * Tan(60)));
+        Assert.Equal(4, g.Planes.Count);
+        Assert.Equal(20, Len(g, LineKind.Break), 6);
+        Assert.Equal(10, Len(g, LineKind.Ridge), 6);
+        Assert.Equal(4, g.Gables.Count);
+        Assert.Throws<ArgumentException>(() => RoofSolver.Solve(rect, rect.Select(_ => Eave(70)).ToList(), new Mansard(25, 5 * Tan(70))));
+    }
+
+    // ------------------------------------------------------------ the IfcRoof
+
+    static JsonArray Corners(params (double X, double Y)[] p) => new(p.Select(q => (JsonNode)new JsonArray(q.X, q.Y)).ToArray());
+    static JsonArray House10x6 => Corners((0, 0), (10, 0), (10, 6), (0, 6));
+
+    static string AddRoof(Fixture f, string style) =>
+        (string)f.Run("architecture.addRoof", new JsonObject { ["storeyId"] = f.Storey, ["points"] = House10x6, ["style"] = style })!["id"]!;
+
+    static double Q(Fixture f, string id, string name, string? part = null) =>
+        f.Session.Quantities(id).Where(s => s.Part == part).SelectMany(s => s.Quantities).Where(q => q.Name == name).Sum(q => q.Value);
+
+    [Fact]
+    public void Another_style_keeps_the_roof_windows_and_dormers()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "modern_barn");
+        f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 3, ["y"] = 1.5 });
+        var dormer = (string)f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 7, ["y"] = 0.6, ["kind"] = "dormer", ["width"] = 1.4, ["wallHeight"] = 0.9 })!["id"]!;
+        // The dormer would not sit on the hip roof's slope: refused by name, nothing changed.
+        var refused = Assert.Throws<CommandException>(() => f.Run("architecture.roofStyle", new JsonObject { ["id"] = roof, ["style"] = "traditional_campie" }));
+        Assert.Contains("Dormer 1", refused.Message);
+        Assert.Equal("gable", f.Model.Get(roof)!.Str("shape"));
+        Assert.Equal(2, (f.Model.Get(roof)!.Attrs["openings"] as JsonArray)?.Count);
+        // Without it, the new style keeps the roof window.
+        f.Run("architecture.removeRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = dormer });
+        f.Run("architecture.roofStyle", new JsonObject { ["id"] = roof, ["style"] = "traditional_campie" });
+        Assert.Equal("hip", f.Model.Get(roof)!.Str("shape"));
+        Assert.Equal(1, (f.Model.Get(roof)!.Attrs["openings"] as JsonArray)?.Count);
+        Assert.Equal(1, Q(f, roof, "RoofWindows", "openings"));
+    }
+
+    [Fact]
+    public void A_roof_is_one_IfcRoof_over_its_outline_and_its_style_decides_the_rest()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "modern_barn");
+        Assert.Single(f.Model.OfClass(IfcClass.Roof));
+        Assert.Equal(f.Storey, Spatial.StoreyOf(f.Model, roof)!.Id);
+        Assert.Equal("gable", f.Model.Get(roof)!.Str("shape"));
+        // Barn house: 42°, no overhangs, a ridge the length of the house.
+        Assert.Equal(10, Q(f, roof, "RidgeLength"), 9);
+        Assert.Equal(60 / Math.Cos(42 * Math.PI / 180), Q(f, roof, "GrossArea"), 6);
+        Assert.Equal(20, Q(f, roof, "EaveLength"), 9);
+        // Another style: the same roof, other rules — hip, clay tile, 600 mm eaves, snow guards.
+        f.Run("architecture.roofStyle", new JsonObject { ["id"] = roof, ["style"] = "traditional_campie" });
+        Assert.Equal(4, Q(f, roof, "RidgeLength"), 9);
+        Assert.Equal("True", f.Model.Get(roof)!.Str("snowGuards"));
+        // One edge overridden: a gable on the east side.
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["edges"] = new JsonArray(null, new JsonObject { ["kind"] = "gable" }) });
+        Assert.Null(f.Model.Get(roof)!.Str("style"));
+        Assert.Throws<CommandException>(() => f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roof, ["edges"] = new JsonArray(Enumerable.Range(0, 4).Select(_ => (JsonNode)new JsonObject { ["kind"] = "gable" }).ToArray()),
+        }));
+        var shape = Roof.Solve(Roof.Resolve(f.Model.Get(roof)!, f.Model)!).Shape!;
+        Assert.Equal(Len(shape, LineKind.Ridge), Q(f, roof, "RidgeLength"), 9);
+        Assert.Single(shape.Gables);
+        // The plan shows where it stops (overhead) and its ridges and hips.
+        var plan = f.Session.Geometry(roof)!.Plan!;
+        Assert.Contains(plan, p => p.Kind == "overhead");
+        Assert.Contains(plan, p => p.Kind == "ridge");
+    }
+
+    [Fact]
+    public void A_roof_carries_its_structure_gutters_downpipes_and_snow_guards_as_parts()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "traditional_campie");                      // hip 28°, 600 mm eaves, clay tile
+        var entities = f.Model.Entities.Count();
+        Assert.Equal(32, Q(f, roof, "WallPlateLength", "timber"), 6);
+        Assert.Equal(4, Q(f, roof, "RidgeBeamLength", "timber"), 6);
+        Assert.True(Q(f, roof, "RafterCount", "timber") >= 40);
+        Assert.True(Q(f, roof, "TimberVolume", "timber") > 1);
+        // Gutters round the eave outline (11.2 × 7.2 m); a downpipe per 10 m of gutter.
+        Assert.Equal(2 * (11.2 + 7.2), Q(f, roof, "GutterLength", "drainage"), 6);
+        Assert.Equal(6, Q(f, roof, "DownpipeCount", "drainage"), 9);
+        Assert.True(Q(f, roof, "Length", "snow") > 20);
+        // The covering first, every timber member a part of its own (decision 229), the drainage and the snow guards last.
+        var parts = f.Session.Geometry(roof)!.Parts;
+        Assert.Equal("Covering", parts[0].Name);
+        // Each gutter and each automatic downpipe a part of its own (decision 235).
+        Assert.Equal("Snow guards", parts[^1].Name);
+        Assert.Equal(4, parts.Count(p => p.Key!.StartsWith("gutter:")));
+        Assert.Equal(6, parts.Count(p => p.Key!.StartsWith("downpipe:")));
+        Assert.All(parts.Where(p => p.Key!.StartsWith("timber")), p => Assert.Contains("mm", p.Name));
+        Assert.Contains(parts, p => p.Name == "Rafter 80x160 mm");
+        Assert.Equal(entities, f.Model.Entities.Count());
+
+        // A gable roof: plates only under its eaves; no snow guards, no gutters asked.
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["shape"] = "gable", ["snowGuards"] = "False", ["gutterProfile"] = "none" } });
+        Assert.Equal(20, Q(f, roof, "WallPlateLength", "timber"), 6);
+        Assert.Equal(0, Q(f, roof, "GutterLength", "drainage"), 9);
+        Assert.Equal(0, Q(f, roof, "Length", "snow"), 9);
+        // No structure: a deck under the covering, nothing to count.
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["structure"] = "none" } });
+        Assert.Equal(0, Q(f, roof, "TimberVolume", "timber"), 9);
+    }
+
+    [Fact]
+    public void The_french_mansard_style_builds_one()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "classic_mansard");
+        Assert.Equal("mansard", f.Model.Get(roof)!.Str("shape"));
+        Assert.True(Q(f, roof, "BreakLength") > 20);
+    }
+
+    [Fact]
+    public void An_outline_that_cannot_build_is_refused_and_undo_takes_the_roof_away()
+    {
+        var f = new Fixture();
+        Assert.Throws<CommandException>(() => f.Run("architecture.addRoof", new JsonObject { ["points"] = Corners((0, 0), (1, 0)) }));
+        var roof = AddRoof(f, "fr_provence");
+        f.Session.Undo();
+        Assert.Null(f.Model.Get(roof));
+    }
+
+    // ------------------------------------------------------------ walls under the roof
+
+    /// <summary>A 10 × 6 m house: four walls on the axes, south, east, north, west, and a roof over the same corners.</summary>
+    static (Fixture F, string Roof, string[] Walls) House(string style)
+    {
+        var f = new Fixture();
+        string[] walls = [f.Wall(0, 0, 10, 0), f.Wall(10, 0, 10, 6), f.Wall(10, 6, 0, 6), f.Wall(0, 6, 0, 0)];
+        return (f, AddRoof(f, style), walls);
+    }
+
+    [Fact]
+    public void Gable_walls_rise_to_the_roof_and_eave_walls_stop_under_the_wall_plate()
+    {
+        var (f, roof, walls) = House("fr_provence");                     // gable, 24°
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["ridgeDirection"] = "x" } });
+        var tops = walls.Select(w => f.Bounds(w).Max.Z).ToArray();
+        Assert.Equal(3, tops[0], 9);
+        Assert.Equal(3, tops[2], 9);
+        // On the wall plates (0.14 m) the rafters' underside rises 3 · tan 24° to the ridge.
+        Assert.Equal(3 + 0.14 + 3 * Tan(24), tops[1], 6);
+        Assert.Equal(3 + 0.14 + 3 * Tan(24), tops[3], 6);
+        // The gable is the wall's own masonry over the storey: the wall grows by about the triangle.
+        var east = f.Session.Geometry(walls[1])!;
+        var width = f.Bounds(walls[1]).Max.X - f.Bounds(walls[1]).Min.X;
+        var volume = east.Parts.Sum(p => Measure.Volume(p.Solid));
+        Assert.True(volume > 6 * width * 3 + 0.5 * 6 * 3 * Tan(24) * width * 0.9);
+        // The roof goes: the walls are back to their height.
+        f.Run("element.delete", new JsonObject { ["id"] = roof });
+        Assert.Equal(3, f.Bounds(walls[1]).Max.Z, 9);
+    }
+
+    [Fact]
+    public void A_roof_seated_low_cuts_the_walls_under_its_slopes()
+    {
+        var (f, roof, walls) = House("traditional_campie");              // hip, 28°
+        var inner = f.Wall(5, 0, 5, 6);
+        Assert.Equal(3, f.Bounds(inner).Max.Z, 9);
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["eaveOffset"] = -0.5 } });
+        // An eave wall on the roof's outline: it stops under its wall plate, 0.5 m lower.
+        Assert.Equal(2.5, f.Bounds(walls[0]).Max.Z, 6);
+        // The inner wall: cut under both slopes near the eaves, its full height where the roof is above it.
+        Assert.Equal(3, f.Bounds(inner).Max.Z, 6);
+        var section = f.Session.Geometry(inner)!.Parts.Select(p => p.Solid).ToList();
+        var nearEnd = section.SelectMany(s => s.Vertices).Where(v => v.Y < 0.3).Max(v => v.Z);
+        Assert.True(nearEnd < 2.8, $"near the eave the wall stops under the roof, not at {nearEnd}");
+    }
+
+    [Fact]
+    public void A_wall_attached_to_the_roof_rises_to_the_slopes_underside_and_a_detached_one_ignores_it()
+    {
+        var (f, roof, walls) = House("traditional_campie");              // hip, 28°
+        // An inner wall across the house, 2.4 m (joined to the south and north walls, so it runs face to face): left alone it keeps its height under the high roof.
+        var inner = f.Wall(5, 0.5, 5, 5.5);
+        f.Run("architecture.updateWall", new JsonObject { ["id"] = inner, ["height"] = 2.4 });
+        Assert.Equal(2.4, f.Bounds(inner).Max.Z, 6);
+        // Attached, it rises to the underside of the slopes: higher in the middle, cut along them.
+        f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(inner) });
+        var top = f.Bounds(inner).Max.Z;
+        Assert.True(top > 3.5, $"attached, the wall reaches the slopes, not {top}");
+        // Near the south eave it follows the slope down: above its own 2.4 m, well under the middle.
+        var near = f.Session.Geometry(inner)!.Parts.SelectMany(p => p.Solid.Vertices).Where(v => v.Y < 0.3).Max(v => v.Z);
+        Assert.InRange(near, 2.4, top - 1);
+        // Along the wall the top rises by tan 28° a metre, as the slope does.
+        var at1 = f.Session.Geometry(inner)!.Parts.SelectMany(p => p.Solid.Vertices).Where(v => Math.Abs(v.Y - 1.5) < 1e-6).Select(v => v.Z).DefaultIfEmpty(double.NaN).Max();
+        if (!double.IsNaN(at1)) Assert.Equal(near + Tan(28), at1, 2);
+        // The roof raised 0.5 m: the attached wall follows (it read the roof).
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["eaveOffset"] = 0.5 } });
+        Assert.Equal(top + 0.5, f.Bounds(inner).Max.Z, 6);
+        // Detached: its own 2.4 m, whatever the roof; back to auto: the storey's rule again.
+        f.Run("architecture.detachFromRoof", new JsonObject { ["ids"] = new JsonArray(inner) });
+        Assert.Equal("none", f.Model.Get(inner)!.Str("roofTop"));
+        Assert.Equal(2.4, f.Bounds(inner).Max.Z, 6);
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["eaveOffset"] = -1.0 } });
+        Assert.Equal(2.4, f.Bounds(inner).Max.Z, 6);
+        Assert.True(f.Bounds(walls[0]).Max.Z < 2.4, "an eave wall in auto still stops under its lowered plate");
+        f.Run("architecture.detachFromRoof", new JsonObject { ["ids"] = new JsonArray(inner), ["mode"] = "auto" });
+        var cut = f.Session.Geometry(inner)!.Parts.SelectMany(p => p.Solid.Vertices).Where(v => v.Y < 0.3).Max(v => v.Z);
+        Assert.True(cut < 2.4, $"auto again: cut under the lowered slope near the eave, not {cut}");
+    }
+
+    [Fact]
+    public void A_wall_on_the_storey_below_attaches_to_the_roof_above()
+    {
+        var f = new Fixture();
+        var attic = (string)f.Run("storey.create", new JsonObject { ["name"] = "Attic" })!["id"]!;   // +3.00
+        var roof = (string)f.Run("architecture.addRoof", new JsonObject { ["storeyId"] = attic, ["points"] = House10x6, ["style"] = "traditional_campie" })!["id"]!;
+        // A ground-floor wall, 3 m: the attic's roof is not its storey's, so in auto it is left alone.
+        var wall = f.Wall(5, 0.5, 5, 5.5);
+        Assert.Equal(3, f.Bounds(wall).Max.Z, 6);
+        // Attached to that roof by name: it rises through the attic to the slopes.
+        f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(wall), ["roofIds"] = new JsonArray(roof) });
+        Assert.True(f.Bounds(wall).Max.Z > 6.2);
+        Assert.Throws<CommandException>(() => f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(wall), ["roofIds"] = new JsonArray(wall) }));
+    }
+
+    [Fact]
+    public void Every_wall_attached_to_a_roof_follows_what_only_the_roof_reads()
+    {
+        // Two walls take the attic roof's solved shape, cached for the revision: the second gets the reads of the first.
+        var f = new Fixture();
+        var attic = (string)f.Run("storey.create", new JsonObject { ["name"] = "Attic" })!["id"]!;   // +3.00
+        var roof = (string)f.Run("architecture.addRoof", new JsonObject { ["storeyId"] = attic, ["points"] = House10x6, ["style"] = "traditional_campie" })!["id"]!;
+        var walls = new[] { f.Wall(4, 0.5, 4, 5.5), f.Wall(6, 0.5, 6, 5.5) };
+        f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(walls[0], walls[1]), ["roofIds"] = new JsonArray(roof) });
+        var tops = walls.Select(w => f.Bounds(w).Max.Z).ToArray();
+        // The attic goes up a metre: only its storey changed, which neither wall reads itself.
+        f.Run("storey.update", new JsonObject { ["id"] = attic, ["elevation"] = 4.0 });
+        Assert.Equal(tops[0] + 1, f.Bounds(walls[0]).Max.Z, 6);
+        Assert.Equal(tops[1] + 1, f.Bounds(walls[1]).Max.Z, 6);
+    }
+
+    [Fact]
+    public void Roof_windows_and_dormers_cut_the_covering_and_are_built_with_the_roof()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "modern_barn");
+        var net = Q(f, roof, "NetArea");
+        var gross = Q(f, roof, "GrossArea");
+        Assert.Equal(gross, net, 6);
+        // A 78 × 118 roof window on the south slope: its area on the slope comes off the covering.
+        var w = (string)f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 3, ["y"] = 1.5 })!["id"]!;
+        Assert.Equal(gross - 0.78 * 1.18, Q(f, roof, "NetArea"), 6);
+        var parts = f.Session.Geometry(roof)!.Parts.Select(p => p.Key).ToList();
+        Assert.Contains("roof-windows", parts);
+        Assert.Contains("glass", parts);
+        Assert.Equal(1, Q(f, roof, "RoofWindows", "openings"));
+        // A gable dormer beside it: its walls, its own roof, its notch out of the covering.
+        f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 7, ["y"] = 0.6, ["kind"] = "dormer", ["width"] = 1.4, ["wallHeight"] = 0.9 });
+        parts = f.Session.Geometry(roof)!.Parts.Select(p => p.Key).ToList();
+        Assert.Contains("dormer-walls", parts);
+        Assert.Contains("dormer-roofs", parts);
+        Assert.True(Q(f, roof, "DormerWallArea", "openings") > 1);
+        Assert.True(Q(f, roof, "NetArea") < gross - 0.78 * 1.18 - 1);
+        // Off the roof, over another opening, or past its edges: refused.
+        Assert.Throws<CommandException>(() => f.Run("architecture.addRoofOpening", new JsonObject { ["roofId"] = roof, ["x"] = 30, ["y"] = 30 }));
+        Assert.Throws<CommandException>(() => f.Run("architecture.addRoofOpening", new JsonObject { ["roofId"] = roof, ["x"] = 3.2, ["y"] = 1.6 }));
+        Assert.Throws<CommandException>(() => f.Run("architecture.addRoofOpening", new JsonObject { ["roofId"] = roof, ["x"] = 0.1, ["y"] = 1.5 }));
+        f.Run("architecture.removeRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = w });
+        Assert.Equal(0, Q(f, roof, "RoofWindows", "openings"));
+    }
+
+    [Fact]
+    public void A_roof_window_is_resized_on_its_slope_by_its_grips()
+    {
+        // Decision 280: the roof tells the interface each opening's frame on its slope, so the grips stand on its edges.
+        var f = new Fixture();
+        var roof = AddRoof(f, "modern_barn");
+        var gross = Q(f, roof, "GrossArea");
+        var w = (string)f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 3, ["y"] = 1.5 })!["id"]!;
+        var node = f.Session.Snapshot().Nodes.Single(n => n.Id == roof);
+        var frame = node.Props["openingFrames"]![w]!;
+        var (d, n, k) = (new Vec2((double)frame["d"]![0]!, (double)frame["d"]![1]!), new Vec2((double)frame["n"]![0]!, (double)frame["n"]![1]!), (double)frame["k"]!);
+        Assert.Equal(1, d.Length, 9);
+        Assert.Equal(1, n.Length, 9);
+        Assert.Equal(0, Vec2.Dot(d, n), 9);
+        // The south slope rises to +Y; a length up the slope measures less in plan, by the pitch.
+        Assert.Equal(1, Math.Abs(n.Y), 9);
+        Assert.True(k is > 0 and < 1);
+        // Its top edge dragged up 0.2 m in plan: longer by 0.2 / k on the slope, its bottom edge where it was.
+        f.Run("architecture.updateRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = w, ["length"] = 1.18 + 0.2 / k, ["x"] = 3, ["y"] = 1.5 + n.Y * 0.1, ["width"] = 1.14 });
+        Assert.Equal(gross - 1.14 * (1.18 + 0.2 / k), Q(f, roof, "NetArea"), 6);
+        // One undo step each.
+        f.Session.Undo();
+        Assert.Equal(gross - 0.78 * 1.18, Q(f, roof, "NetArea"), 6);
+        // Past the slope's edges, or thinner than a frame: refused, the window as it was.
+        Assert.Throws<CommandException>(() => f.Run("architecture.updateRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = w, ["width"] = 20 }));
+        Assert.Throws<CommandException>(() => f.Run("architecture.updateRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = w, ["length"] = 0.1 }));
+        Assert.Equal(gross - 0.78 * 1.18, Q(f, roof, "NetArea"), 6);
+        // A dormer's frame too.
+        var dormer = (string)f.Run("architecture.addRoofOpening", new JsonObject { ["x"] = 7, ["y"] = 0.6, ["kind"] = "dormer", ["width"] = 1.4, ["wallHeight"] = 0.9 })!["id"]!;
+        f.Run("architecture.updateRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = dormer, ["width"] = 1.8, ["x"] = 7.2 });
+        Assert.NotNull(f.Session.Snapshot().Nodes.Single(x => x.Id == roof).Props["openingFrames"]![dormer]);
+        // Gone with the last opening.
+        f.Run("architecture.removeRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = w });
+        f.Run("architecture.removeRoofOpening", new JsonObject { ["roofId"] = roof, ["id"] = dormer });
+        Assert.Null(f.Session.Snapshot().Nodes.Single(x => x.Id == roof).Props["openingFrames"]);
+    }
+
+    // ------------------------------------------------------------ a barrel vault
+
+    [Fact]
+    public void A_barrel_roof_is_a_vault_between_two_gable_ends()
+    {
+        // A 6 m span rising 1.5 m: a circle of R = (3² + 1.5²) / 3 = 3.75, its centre 2.25 m under the wall plates.
+        EdgeRule[] rules = [Eave(), Gable(), Eave(), Gable()];
+        var s = RoofSolver.SolveBarrel(Rect, rules, 1.5);
+        Planar(s);
+        Assert.Equal(1.5, s.Height, 9);
+        Assert.Equal(2, s.Gables.Count);
+        Assert.Equal(20, Len(s, LineKind.Eave), 9);
+        Assert.Equal(10, Len(s, LineKind.Ridge), 9);
+        Assert.Equal(1.5, s.Lines.Single(l => l.Kind == LineKind.Ridge).A.Z, 9);
+        Assert.Equal(0, s.HeightAt(new Vec2(5, 0))!.Value, 6);
+        Assert.Equal(1.5, s.HeightAt(new Vec2(5, 3))!.Value, 9);
+        // Between, the vault in facets as every curve is (Chords, audit 22.11.2026): within a millimetre of the circle (measured
+        // to its centre, 2.25 m under the plates), never outside it.
+        for (var y = 0.05; y < 6; y += 0.05)
+        {
+            var off = new Vec2(y - 3, s.HeightAt(new Vec2(5, y))!.Value + 2.25).Length;
+            Assert.InRange(off, 3.75 - Chords.Tolerance - 1e-9, 3.75 + 1e-9);
+        }
+        Assert.All(s.Planes, p => Assert.Equal(4, p.Points.Count));
+        Assert.True(s.Planes.Count >= 12);
+        Assert.Equal(0, Len(s, LineKind.Hip) + Len(s, LineKind.Break), 9);
+        // Overhanging eaves go on round the circle, under the plate; the rakes lengthen the ridge.
+        var o = RoofSolver.SolveBarrel(Rect, [Eave(30, 0.5), Gable(0.3), Eave(30, 0.5), Gable(0.3)], 1.5);
+        Assert.Equal(10.6, Len(o, LineKind.Ridge), 9);
+        var eaves = o.Lines.Where(l => l.Kind == LineKind.Eave).ToList();
+        Assert.Equal(2, eaves.Count);
+        Assert.All(eaves, l => Assert.True(l.A.Z < -0.5 && (Math.Abs(l.A.Y + 0.5) < 1e-9 || Math.Abs(l.A.Y - 6.5) < 1e-9)));
+        // Higher than half the span it is no vault; an L has no two parallel eaves to span between.
+        Assert.Throws<ArgumentException>(() => RoofSolver.SolveBarrel(Rect, rules, 3.2));
+        Assert.Throws<ArgumentException>(() => RoofSolver.SolveBarrel([new(0, 0), new(10, 0), new(10, 6), new(5, 6), new(5, 3), new(0, 3)], [Eave(), Gable(), Eave(), Gable(), Eave(), Gable()], 1));
+    }
+
+    [Fact]
+    public void A_barrel_roof_over_the_house_and_its_gable_walls_rise_to_the_curve()
+    {
+        var (f, roof, walls) = House("modern_barrel");                  // a vault across the 6 m, rising 0.3 · 6 = 1.8 m
+        Assert.Equal("barrel", f.Model.Get(roof)!.Str("shape"));
+        Assert.Equal(1.8, f.Model.Get(roof)!.Num("rise"), 9);
+        // The eave walls keep their 3 m; the gable walls rise to the crown of the vault (a deck on the walls, no wall plate).
+        Assert.Equal(3, f.Bounds(walls[0]).Max.Z, 6);
+        Assert.Equal(3, f.Bounds(walls[2]).Max.Z, 6);
+        Assert.Equal(4.8, f.Bounds(walls[1]).Max.Z, 3);
+        Assert.Equal(4.8, f.Bounds(walls[3]).Max.Z, 3);
+        // The gable's top follows the circle: low near the eaves, and over the storey about the circular segment's worth of masonry.
+        var east = f.Session.Geometry(walls[1])!;
+        Assert.True(east.Parts.SelectMany(p => p.Solid.Vertices).Where(v => v.Y < 0.3).Max(v => v.Z) < 3.5);
+        var width = f.Bounds(walls[1]).Max.X - f.Bounds(walls[1]).Min.X;
+        var R = (9 + 1.8 * 1.8) / 3.6;
+        var segment = R * R / 2 * (2 * Math.Asin(3 / R) - Math.Sin(2 * Math.Asin(3 / R)));
+        Assert.InRange(east.Parts.Sum(p => Measure.Volume(p.Solid)), width * (6 * 3 + segment * 0.9), width * (6.5 * 3 + segment * 1.02));
+        // One ridge in plan and no hips; the covering's area is the vault's, over the rakes; a deck, so no timber; gutters on both eaves.
+        var g = f.Session.Geometry(roof)!;
+        Assert.Contains(g.Plan!, p => p.Kind == "ridge");
+        Assert.DoesNotContain(g.Plan!, p => p.Kind is "hip" or "break");
+        // (the 0.15 m overhangs go on round the circle, so the covering is the arc over 3.15 m each side of the crown)
+        Assert.InRange(Q(f, roof, "GrossArea"), 2 * R * Math.Asin(3.15 / R) * 10.6 * 0.995, 2 * R * Math.Asin(3.15 / R) * 10.6);
+        Assert.DoesNotContain("timber", g.Parts.Select(p => p.Key));
+        Assert.Contains(g.Parts, p => p.Key!.StartsWith("gutter:"));
+        Assert.Contains("covering", g.Parts.Select(p => p.Key));
+        // Its rise is a field of its own; past half the span the change is refused.
+        f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["rise"] = 3 } });
+        Assert.Equal(6, f.Bounds(walls[1]).Max.Z, 3);
+        Assert.Throws<CommandException>(() => f.Run("architecture.updateRoof", new JsonObject { ["id"] = roof, ["attrs"] = new JsonObject { ["rise"] = 3.5 } }));
+    }
+
+    // ------------------------------------------------------------ a wall under any body
+
+    static double Vol(Fixture f, string id) => f.Session.Geometry(id)!.Parts.Sum(p => Measure.Volume(p.Solid));
+
+    [Fact]
+    public void A_wall_attached_to_any_body_rises_to_its_underside()
+    {
+        var f = new Fixture(new ArchitectureModule(), new DraftingModule(), new StudioModule());
+        var upper = (string)f.Run("storey.create", [])!["id"]!;            // +3.00
+        var top = (string)f.Run("storey.create", [])!["id"]!;              // +6.00
+        string Plan(string storey) => (string)f.Run("view.create", new JsonObject { ["kind"] = "plan", ["storeyId"] = storey })!["id"]!;
+        string Draw(string view, double x0, double x1) => (string)f.Run("drafting.draw", new JsonObject
+        {
+            ["viewId"] = view,
+            ["shape"] = new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(new JsonArray(x0, 0), new JsonArray(x1, 0), new JsonArray(x1, 1), new JsonArray(x0, 1)), ["closed"] = true },
+        })!["ids"]![0]!;
+        // A Studio loft from a 2 × 1 square at +3.00 to the same square 8 m on at +6.00: its underside climbs 3 m over 8.
+        var a = Draw(Plan(upper), 0, 2);
+        var b = Draw(Plan(top), 8, 10);
+        var body = (string)f.Run("studio.loft", new JsonObject { ["profileId"] = a, ["profileIds"] = new JsonArray(a, b) })!["id"]!;
+        // A ground-floor wall along it, 3 m: attached to the body it rises under the slope, to 6 m where the body ends, and is its own 3 m past it.
+        var wall = f.Wall(-1, 0.5, 12, 0.5);
+        var plain = Vol(f, wall);
+        f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(wall), ["roofIds"] = new JsonArray(body) });
+        Assert.Equal(6, f.Bounds(wall).Max.Z, 2);
+        var vs = f.Session.Geometry(wall)!.Parts.SelectMany(p => p.Solid.Vertices).ToList();
+        Assert.Equal(3, vs.Where(v => v.X > 10.05).Max(v => v.Z), 2);
+        Assert.Equal(3, vs.Where(v => v.X < 1.95).Max(v => v.Z), 2);
+        // The slope's triangle, 8 · 3 / 2, on top of the plain wall's 13 · 3.
+        Assert.Equal(plain * (39 + 12) / 39, Vol(f, wall), 1);
+        // The sketch moved: the body changed, the wall follows (its underside now climbs from 2 to 8).
+        f.Run("drafting.updateDraft", new JsonObject { ["id"] = b, ["shape"] = new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(new JsonArray(6, 0), new JsonArray(8, 0), new JsonArray(8, 1), new JsonArray(6, 1)), ["closed"] = true } });
+        vs = f.Session.Geometry(wall)!.Parts.SelectMany(p => p.Solid.Vertices).ToList();
+        Assert.Equal(3, vs.Where(v => v.X > 8.05).Max(v => v.Z), 2);
+        Assert.Equal(6, f.Bounds(wall).Max.Z, 2);
+        // A second wall under the body, the triangles cached for the revision: it follows the sketch too.
+        var second = f.Wall(-1, 0.9, 12, 0.9);
+        f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(second), ["roofIds"] = new JsonArray(body) });
+        _ = f.Session.Geometry(wall); _ = f.Session.Geometry(second);
+        f.Run("drafting.updateDraft", new JsonObject { ["id"] = b, ["shape"] = new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(new JsonArray(8, 0), new JsonArray(10, 0), new JsonArray(10, 1), new JsonArray(8, 1)), ["closed"] = true } });
+        foreach (var w in new[] { wall, second })
+            Assert.Equal(51, Vol(f, w) / plain * 39, 1);
+        f.Run("element.delete", new JsonObject { ["id"] = second });
+        // Detached, its own 3 m again; a wall is no body to rise to.
+        f.Run("architecture.detachFromRoof", new JsonObject { ["ids"] = new JsonArray(wall) });
+        Assert.Equal(3, f.Bounds(wall).Max.Z, 6);
+        Assert.Throws<CommandException>(() => f.Run("architecture.attachToRoof", new JsonObject { ["ids"] = new JsonArray(wall), ["roofIds"] = new JsonArray(f.Wall(0, 5, 5, 5)) }));
+    }
+
+    [Fact]
+    public void Hip_roof_gutters_miter_at_corners_without_gaps_or_internal_caps()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "traditional_campie");                      // hip 28°, 600 mm eaves
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roof,
+            ["attrs"] = new JsonObject { ["gutterProfile"] = "box", ["gutterWidth"] = 0.14, ["gutterOffset"] = 0.05, ["gutterFall"] = 5 },
+        });
+        var r = Roof.Resolve(f.Model.Get(roof)!, f.Model)!;
+        var shape = Roof.Solve(r).Shape!;
+        var gutters = RoofParts.Gutters(r, shape);
+        Assert.Equal(4, gutters.Count);
+        Assert.All(gutters, g =>
+        {
+            Assert.False(g.CapStart);
+            Assert.False(g.CapEnd);
+            Assert.NotEqual(0, g.StartMiter);
+            Assert.NotEqual(0, g.EndMiter);
+        });
+        Assert.Equal(0, Q(f, roof, "GutterEndCount", "drainage"), 9);
+
+        // South eave (y = -0.6) and east eave (x = 10.6) meet at their outer corner (10.6 + 0.05 + 0.14, -0.6 - 0.05 - 0.14).
+        var parts = f.Session.Geometry(roof)!.Parts.Where(p => p.Key!.StartsWith("gutter:")).ToList();
+        Assert.Equal(4, parts.Count);
+        Assert.All(parts, p => Assert.True(Measure.SignedVolume(p.Solid) > 0));
+        var south = parts[0].Solid.Vertices;
+        var east = parts[1].Solid.Vertices;
+        var cornerX = 10.6 + 0.05 + 0.14;
+        var cornerY = -0.6 - 0.05 - 0.14;
+        Assert.Contains(south, v => Math.Abs(v.X - cornerX) < 1e-4 && Math.Abs(v.Y - cornerY) < 1e-4);
+        Assert.Contains(east, v => Math.Abs(v.X - cornerX) < 1e-4 && Math.Abs(v.Y - cornerY) < 1e-4);
+    }
+
+    [Fact]
+    public void Free_gutter_ends_keep_end_caps_when_an_edge_has_no_gutter_or_on_a_gable()
+    {
+        var f = new Fixture();
+        var roof = AddRoof(f, "traditional_campie");
+        // Disable south eave's gutter: east and west gutters now have one free end each, while north corners stay joined.
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roof,
+            ["edges"] = new JsonArray(new JsonObject { ["gutter"] = false }, null, null, null),
+        });
+        var r = Roof.Resolve(f.Model.Get(roof)!, f.Model)!;
+        var gutters = RoofParts.Gutters(r, Roof.Solve(r).Shape!);
+        Assert.Equal(3, gutters.Count);
+        Assert.Equal(2, gutters.Sum(g => (g.CapStart ? 1 : 0) + (g.CapEnd ? 1 : 0)));
+        Assert.Equal(2, Q(f, roof, "GutterEndCount", "drainage"), 9);
+
+        // Gable roof: 2 parallel eaves, 4 free ends.
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roof,
+            ["attrs"] = new JsonObject { ["shape"] = "gable" },
+            ["edges"] = new JsonArray(new JsonObject { ["gutter"] = true }, null, null, null),
+        });
+        Assert.Equal(4, Q(f, roof, "GutterEndCount", "drainage"), 9);
+    }
+
+    [Fact]
+    public void L_shaped_hip_roof_miters_both_exterior_and_interior_corners_without_overlap()
+    {
+        var f = new Fixture();
+        var roof = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["storeyId"] = f.Storey,
+            ["points"] = Corners((0, 0), (10, 0), (10, 4), (4, 4), (4, 10), (0, 10)),
+            ["style"] = "traditional_campie",
+        })!["id"]!;
+        var r = Roof.Resolve(f.Model.Get(roof)!, f.Model)!;
+        var shape = Roof.Solve(r).Shape!;
+        var gutters = RoofParts.Gutters(r, shape);
+        Assert.Equal(6, gutters.Count);
+        Assert.All(gutters, g =>
+        {
+            Assert.False(g.CapStart);
+            Assert.False(g.CapEnd);
+        });
+
+        // Every adjacent pair of gutters shares the exact same outer miter corner point and does not overshoot past it.
+        const double width = 0.125;
+        for (var i = 0; i < gutters.Count; i++)
+        {
+            var g1 = gutters[i];
+            var g2 = gutters[(i + 1) % gutters.Count];
+            var d1 = (g1.B - g1.A).Xy.Normalized();
+            var d2 = (g2.B - g2.A).Xy.Normalized();
+            var outer1 = g1.B.Xy + g1.Out * width + d1 * (width * g1.EndMiter);
+            var outer2 = g2.A.Xy + g2.Out * width + d2 * (width * g2.StartMiter);
+            Assert.True((outer1 - outer2).Length < 1e-6, $"Corner {i}: {outer1} != {outer2}");
+        }
+
+        // Built gutter solids have positive volume and meet at the interior corner without overshooting.
+        var parts = f.Session.Geometry(roof)!.Parts.Where(p => p.Key!.StartsWith("gutter:")).ToList();
+        Assert.Equal(6, parts.Count);
+        Assert.All(parts, p => Assert.True(Measure.SignedVolume(p.Solid) > 0));
+    }
+
+    [Fact]
+    public void Exploding_a_roof_replaces_it_with_editable_Studio_solids_and_undo_restores_it()
+    {
+        var f = new Fixture(new ArchitectureModule(), new StudioModule());
+        var pts = new JsonArray(Rect.Select(p => (JsonNode)new JsonArray(p.X, p.Y)).ToArray());
+        var roofId = (string)f.Run("architecture.addRoof", new JsonObject { ["points"] = pts })!["id"]!;
+        var storeyId = Spatial.StoreyOf(f.Model, roofId)!.Id;
+        var beforeParts = f.Session.Geometry(roofId)!.Parts;
+        Assert.NotEmpty(beforeParts);
+
+        var res = f.Run("architecture.explodeRoof", new JsonObject { ["id"] = roofId })!;
+        var made = res["ids"]!.AsArray().Select(x => (string)x!).ToList();
+
+        Assert.Null(f.Model.Get(roofId));
+        Assert.Equal(beforeParts.Count, made.Count);
+        for (var i = 0; i < made.Count; i++)
+        {
+            var solid = f.Model.Get(made[i])!;
+            Assert.Equal("body", solid.Str("operation"));
+            Assert.NotNull(solid.Attrs[StoredBodies.SolidBodyKey]);
+            Assert.Equal(storeyId, Spatial.StoreyOf(f.Model, solid.Id)?.Id);
+            Assert.Equal(beforeParts[i].Name, solid.Name);
+            Assert.Equal(beforeParts[i].Material, solid.Str("material"));
+            var built = f.Session.Geometry(solid.Id)!.Parts;
+            Assert.Single(built);
+            Assert.Equal(beforeParts[i].Color, built[0].Color);
+            Assert.Equal(Measure.Volume(beforeParts[i].Solid), Measure.Volume(built[0].Solid), 1);
+        }
+
+        // The exploded solids are editable via Studio / element transforms.
+        var first = made[0];
+        var minX = f.Bounds(first).Min.X;
+        f.Run("element.transform", new JsonObject { ["ids"] = new JsonArray(first), ["op"] = "move", ["by"] = new JsonArray(1, 0) });
+        Assert.Equal(minX + 1, f.Bounds(first).Min.X, 4);
+
+        // One undo step restores the original parametric roof (after undoing the transform first).
+        f.Session.Undo();
+        f.Session.Undo();
+        Assert.NotNull(f.Model.Get(roofId));
+        Assert.All(made, id => Assert.Null(f.Model.Get(id)));
+    }
+
+    [Fact]
+    public void Exploding_a_roof_with_hosted_downpipes_removes_downpipes_and_undo_restores_all()
+    {
+        var f = new Fixture(new ArchitectureModule(), new StudioModule());
+        var pts = new JsonArray(Rect.Select(p => (JsonNode)new JsonArray(p.X, p.Y)).ToArray());
+        var roofId = (string)f.Run("architecture.addRoof", new JsonObject { ["points"] = pts })!["id"]!;
+        f.Run("architecture.makeDownpipes", new JsonObject { ["id"] = roofId });
+        var pipesBefore = f.Model.OfClass(Drainage.DownpipeClass).Where(p => p.Str("roofId") == roofId).Select(p => p.Id).ToList();
+        Assert.NotEmpty(pipesBefore);
+
+        var res = f.Run("architecture.explodeRoof", new JsonObject { ["id"] = roofId })!;
+        var made = res["ids"]!.AsArray().Select(x => (string)x!).ToList();
+
+        Assert.Null(f.Model.Get(roofId));
+        Assert.DoesNotContain(f.Model.OfClass(Drainage.DownpipeClass), p => p.Str("roofId") == roofId);
+        Assert.NotEmpty(made);
+
+        f.Session.Undo();
+        Assert.NotNull(f.Model.Get(roofId));
+        Assert.Equal(pipesBefore.Count, f.Model.OfClass(Drainage.DownpipeClass).Count(p => p.Str("roofId") == roofId));
+    }
+
+    // ------------------------------------------------------------ curved boundaries & fillets (forum topic 160)
+
+    [Theory]
+    [InlineData("flat")]
+    [InlineData("shed")]
+    [InlineData("hip")]
+    public void A_roof_with_a_curved_edge_resolves_solves_and_builds_parts(string shape)
+    {
+        var f = new Fixture(new ArchitectureModule());
+        // 10 x 6 rectangle with the front edge (edge 0, y = 0) bulging outward by 1.2 m (negative rise on CCW outline).
+        var id = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["points"] = new JsonArray(new JsonArray(0, 0), new JsonArray(10, 0), new JsonArray(10, 6), new JsonArray(0, 6)),
+            ["arcs"] = new JsonArray(-1.2, 0, 0, 0),
+        })!["id"]!;
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = id,
+            ["attrs"] = new JsonObject { ["shape"] = shape, ["pitch"] = 30, ["overhang"] = 0.5 },
+            ["edges"] = new JsonArray(new JsonObject { ["overhang"] = 0.7 }, null, null, null),
+        });
+
+        var roof = f.Model.Get(id)!;
+        Assert.Equal(4, Roof.Contour(roof).Count);
+        var resolved = Roof.Resolve(roof, f.Model)!;
+        Assert.NotNull(resolved);
+        Assert.NotNull(resolved.EdgeOf);
+        // Edge 0 was discretized into multiple chord segments, all sharing logical edge 0's 0.7 m overhang.
+        var edge0Segments = Enumerable.Range(0, resolved.Outline.Count).Where(k => resolved.LogicalEdge(k) == 0).ToList();
+        Assert.True(edge0Segments.Count > 5);
+        Assert.All(edge0Segments, k => Assert.Equal(0.7, resolved.Rules[k].Overhang, 6));
+
+        if (shape != "flat")
+        {
+            var (solved, problem) = Roof.Solve(resolved);
+            Assert.Null(problem);
+            Assert.NotNull(solved);
+            Assert.True(solved!.Planes.Count > 0);
+            Planar(solved);
+        }
+
+        var geom = f.Session.Geometry(id)!;
+        Assert.Null(geom.Diagnostics);
+        Assert.Contains(geom.Parts, p => p.Key == "covering");
+        if (shape == "hip")
+        {
+            Assert.Contains(geom.Parts, p => p.Key?.StartsWith("timber:") == true);
+            Assert.Contains(geom.Parts, p => p.Key?.StartsWith("gutter:") == true);
+        }
+    }
+
+    [Fact]
+    public void Filleting_a_roof_corner_produces_an_arc_of_the_requested_radius_and_undo_restores_it()
+    {
+        var f = new Fixture(new ArchitectureModule());
+        var id = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["x1"] = 0, ["y1"] = 0, ["x2"] = 10, ["y2"] = 6,
+        })!["id"]!;
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = id,
+            ["attrs"] = new JsonObject { ["shape"] = "hip", ["pitch"] = 30, ["overhang"] = 0.4 },
+            ["edges"] = new JsonArray(null, new JsonObject { ["pitch"] = 40 }, null, null),
+        });
+
+        var before = f.Model.Get(id)!;
+        Assert.Equal(4, Roof.Contour(before).Count);
+        Assert.Null(Slabs.Rises(before));
+
+        // Fillet corner 1 (at [10, 0]) with radius 1.5 m.
+        f.Run("architecture.roundCorner", new JsonObject { ["id"] = id, ["index"] = 1, ["radius"] = 1.5 });
+
+        var after = f.Model.Get(id)!;
+        var corners = Roof.Contour(after);
+        var rises = Slabs.Rises(after);
+        Assert.Equal(5, corners.Count);
+        Assert.NotNull(rises);
+        // Edge 1 is the fillet arc between [8.5, 0] and [10, 1.5], radius 1.5 m.
+        var fillet = ArcOutline.Edge(corners, rises, 1);
+        Assert.True(fillet.IsArc);
+        Assert.Equal(1.5, fillet.Radius, 4);
+        // Edge 1's old 40° pitch rule moved to edge 2 (after the inserted fillet edge).
+        var rules = Roof.Rules(after, corners);
+        Assert.Equal(40, rules[2].Pitch, 6);
+
+        var geom = f.Session.Geometry(id)!;
+        Assert.Null(geom.Diagnostics);
+        Assert.Contains(geom.Parts, p => p.Key == "covering");
+
+        // Undo restores the pre-fillet 4-corner roof.
+        Assert.NotNull(f.Session.Undo());
+        var undone = f.Model.Get(id)!;
+        Assert.Equal(4, Roof.Contour(undone).Count);
+        Assert.Null(Slabs.Rises(undone));
+        Assert.Equal(40, Roof.Rules(undone, Roof.Contour(undone))[1].Pitch, 6);
+    }
+
+    [Fact]
+    public void Setting_a_roof_edge_arc_bends_and_straightens_the_edge()
+    {
+        var f = new Fixture(new ArchitectureModule());
+        var id = (string)f.Run("architecture.addRoof", new JsonObject { ["x1"] = 0, ["y1"] = 0, ["x2"] = 8, ["y2"] = 6 })!["id"]!;
+        f.Run("architecture.setEdgeArc", new JsonObject { ["id"] = id, ["index"] = 0, ["rise"] = -0.8 });
+
+        var bent = f.Model.Get(id)!;
+        Assert.NotNull(Slabs.Rises(bent));
+        Assert.True(Roof.Resolve(bent, f.Model)!.Outline.Count > 4);
+        Assert.Contains(f.Session.Geometry(id)!.Parts, p => p.Key == "covering");
+
+        f.Run("architecture.setEdgeArc", new JsonObject { ["id"] = id, ["index"] = 0, ["rise"] = 0 });
+        var straight = f.Model.Get(id)!;
+        Assert.Null(Slabs.Rises(straight));
+        Assert.Equal(4, Roof.Resolve(straight, f.Model)!.Outline.Count);
+    }
+
+    // ------------------------------------------------------------ customizable roof layers & unlocked extensions (forum 160)
+
+    [Fact]
+    public void Custom_roof_layers_build_distinct_parts_with_expected_thicknesses_and_materials()
+    {
+        var f = new Fixture(new ArchitectureModule());
+        var roofId = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["points"] = new JsonArray(new JsonArray(0, 0), new JsonArray(10, 0), new JsonArray(10, 6), new JsonArray(0, 6)),
+        })!["id"]!;
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roofId,
+            ["attrs"] = new JsonObject
+            {
+                ["structure"] = "none",
+                ["layers"] = new JsonArray(
+                    new JsonObject { ["material"] = "OSB", ["thickness"] = 0.022, ["role"] = "sheathing" },
+                    new JsonObject { ["material"] = "Mineral wool", ["thickness"] = 0.16, ["role"] = "insulation" },
+                    new JsonObject { ["material"] = "Clay tile", ["thickness"] = 0.03, ["role"] = "finish" }
+                ),
+            },
+        });
+        var geom = f.Session.Geometry(roofId)!;
+        var l0 = geom.Parts.Single(p => p.Key == "layer:0");
+        var l1 = geom.Parts.Single(p => p.Key == "layer:1");
+        var l2 = geom.Parts.Single(p => p.Key == "layer:2");
+        Assert.DoesNotContain(geom.Parts, p => p.Key is "covering" or "deck");
+        Assert.NotNull(l0.Material);
+        Assert.NotNull(l1.Material);
+        Assert.NotNull(l2.Material);
+        Assert.NotEqual(l0.Material, l1.Material);
+        Assert.NotEqual(l1.Material, l2.Material);
+
+        var roof = f.Session.Model.Get(roofId)!;
+        var q = Roof.Quantities(roof, geom, f.Session.Model).ToList();
+        var layerQtos = q.Where(x => x.Name == "Lapin_RoofLayerQuantities").ToList();
+        Assert.Equal(3, layerQtos.Count);
+        Assert.Equal(0.022, layerQtos[0].Quantities.Single(i => i.Name == "Width").Value, 6);
+        Assert.Equal(0.16, layerQtos[1].Quantities.Single(i => i.Name == "Width").Value, 6);
+        Assert.Equal(0.03, layerQtos[2].Quantities.Single(i => i.Name == "Width").Value, 6);
+
+        // Volumes scale with layer thickness (same roof area).
+        var v0 = Measure.Volume(l0.Solid);
+        var v1 = Measure.Volume(l1.Solid);
+        var v2 = Measure.Volume(l2.Solid);
+        Assert.Equal(0.16 / 0.022, v1 / v0, 2);
+        Assert.Equal(0.03 / 0.022, v2 / v0, 2);
+
+        // RoofPreview section emits each layer.
+        var preview = RoofPreview.Of(roof, f.Session.Model);
+        var secItems = preview["section"]!["items"]!.AsArray().OfType<JsonObject>().ToList();
+        Assert.Contains(secItems, i => (string?)i["role"] == "layer:0");
+        Assert.Contains(secItems, i => (string?)i["role"] == "layer:1");
+        Assert.Contains(secItems, i => (string?)i["role"] == "layer:2");
+    }
+
+    [Fact]
+    public void Unlocked_layer_extensions_shift_individual_layer_boundaries_in_3d_and_section()
+    {
+        var f = new Fixture(new ArchitectureModule());
+        var roofId = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["points"] = new JsonArray(new JsonArray(0, 0), new JsonArray(10, 0), new JsonArray(10, 6), new JsonArray(0, 6)),
+        })!["id"]!;
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = roofId,
+            ["attrs"] = new JsonObject
+            {
+                ["shape"] = "gable",
+                ["pitch"] = 30,
+                ["overhang"] = 0.5,
+                ["gableOverhang"] = 0.3,
+                ["layers"] = new JsonArray(
+                    new JsonObject { ["material"] = "OSB", ["thickness"] = 0.02, ["role"] = "sheathing" },
+                    new JsonObject { ["material"] = "Mineral wool", ["thickness"] = 0.14, ["role"] = "insulation" },
+                    new JsonObject { ["material"] = "Clay tile", ["thickness"] = 0.04, ["role"] = "finish" }
+                ),
+                ["layerExtents"] = new JsonArray(
+                    new JsonObject { ["layer"] = 0, ["edge"] = "outline", ["offset"] = 0.25 },
+                    new JsonObject { ["layer"] = 1, ["edge"] = "edge", ["index"] = 0, ["offset"] = -0.20 }
+                ),
+            },
+        });
+        var geom = f.Session.Geometry(roofId)!;
+        var b0 = Measure.Bounds(geom.Parts.Single(p => p.Key == "layer:0").Solid)!.Value;
+        var b1 = Measure.Bounds(geom.Parts.Single(p => p.Key == "layer:1").Solid)!.Value;
+        var b2 = Measure.Bounds(geom.Parts.Single(p => p.Key == "layer:2").Solid)!.Value;
+
+        // Layer 0 extends +0.25 m all round past layer 2 (which has 0 extent).
+        Assert.Equal(b2.Min.X - 0.25, b0.Min.X, 3);
+        Assert.Equal(b2.Max.X + 0.25, b0.Max.X, 3);
+        Assert.Equal(b2.Min.Y - 0.25, b0.Min.Y, 3);
+        Assert.Equal(b2.Max.Y + 0.25, b0.Max.Y, 3);
+
+        // Layer 1 stops 0.20 m short at edge 0 (y = 0 eave), while its other edges match layer 2.
+        Assert.Equal(b2.Min.Y + 0.20, b1.Min.Y, 3);
+        Assert.Equal(b2.Max.Y, b1.Max.Y, 3);
+        Assert.Equal(b2.Min.X, b1.Min.X, 3);
+        Assert.Equal(b2.Max.X, b1.Max.X, 3);
+
+        // Section preview reflects the independent X extents of layer 0 and layer 1 vs layer 2.
+        var preview = RoofPreview.Of(f.Session.Model.Get(roofId)!, f.Session.Model);
+        var items = preview["section"]!["items"]!.AsArray().OfType<JsonObject>().ToList();
+        static (double MinX, double MaxX) XSpan(IEnumerable<JsonObject> layerItems)
+        {
+            var xs = layerItems.SelectMany(i => i["pts"]!.AsArray().Where((_, k) => k % 2 == 0).Select(v => (double)v!)).ToList();
+            return (xs.Min(), xs.Max());
+        }
+        var s0 = XSpan(items.Where(i => (string?)i["role"] == "layer:0"));
+        var s1 = XSpan(items.Where(i => (string?)i["role"] == "layer:1"));
+        var s2 = XSpan(items.Where(i => (string?)i["role"] == "layer:2"));
+        Assert.Equal(s2.MaxX - s2.MinX + 0.50, s0.MaxX - s0.MinX, 2);
+        Assert.Equal(s2.MaxX - s2.MinX - 0.20, s1.MaxX - s1.MinX, 2);
+    }
+
+    [Fact]
+    public void Roofs_without_layers_keep_legacy_covering_and_deck_behavior()
+    {
+        var f = new Fixture(new ArchitectureModule());
+        var framedId = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["points"] = new JsonArray(new JsonArray(0, 0), new JsonArray(8, 0), new JsonArray(8, 6), new JsonArray(0, 6)),
+        })!["id"]!;
+        var framedGeom = f.Session.Geometry(framedId)!;
+        Assert.Contains(framedGeom.Parts, p => p.Key == "covering");
+        Assert.DoesNotContain(framedGeom.Parts, p => p.Key?.StartsWith("layer:") == true);
+
+        var deckId = (string)f.Run("architecture.addRoof", new JsonObject
+        {
+            ["points"] = new JsonArray(new JsonArray(0, 10), new JsonArray(8, 10), new JsonArray(8, 16), new JsonArray(0, 16)),
+        })!["id"]!;
+        f.Run("architecture.updateRoof", new JsonObject
+        {
+            ["id"] = deckId,
+            ["attrs"] = new JsonObject { ["structure"] = "none" },
+        });
+        var deckGeom = f.Session.Geometry(deckId)!;
+        Assert.Contains(deckGeom.Parts, p => p.Key == "covering");
+        Assert.Contains(deckGeom.Parts, p => p.Key == "deck");
+        Assert.DoesNotContain(deckGeom.Parts, p => p.Key?.StartsWith("layer:") == true);
+    }
+}

@@ -1,0 +1,394 @@
+/**
+ * A drafted entity in the inspector, in CAD terms: a shape's layer, colour,
+ * line type and pen (by layer), and the geometry of its kind, lines by their
+ * ends, circles by centre and radius, polylines by their vertices, with the
+ * lengths and areas that follow; a hatch by its pattern; a text by its words,
+ * style, angle and place; a dimension and a tag by what they belong to.
+ * Lengths in the project's unit, angles in degrees, areas in m².
+ */
+
+import { EditStyleButton } from '../core/EditStyleButton';
+import { ColourField } from '../../shell/ColourField';
+import { Fragment, useEffect, useState } from 'react';
+import { X } from 'lucide-react';
+import type { NodeDto } from '../../engine/protocol';
+import { execute, query, useSession } from '../../engine/session';
+import { useUi } from '../../app/store';
+import type { Vec2 } from '../../platform/module';
+import { fromJson, toJson, type Shape } from '../../viewport/cad/shapes';
+import { ROLES, roleLabel } from '../../viewport/cad/session';
+import { sideLengths, withSideLength } from '../../viewport/cad/sides';
+import { formatLength, lengthText, unitLabel, useStandards } from '../../engine/unitsStore';
+import { LengthCell, LengthField, NumberField } from '../../shell/cells';
+import { useLayers, type DraftLayer } from '../../viewport/cad/layers';
+import { useLineTypes } from '../core/lineTypes/lineTypes';
+import { lineTypeNames, withCurrent } from '../core/lineTypes/lineTypeModel';
+import { ptStrict } from '../../platform/vec';
+import { TagFields } from './tag';
+import { selectionWith } from '../../shell/params';
+import { CloudFields, KeyFields } from './sheetAnnotations';
+import { EXT_SUPPRESS, EXT_SUPPRESS_LABELS, extSuppressAttr } from '../core/dimensionLines';
+import { PatternOptions, UNITS_LABEL, effectiveUnits, scaleLabel, type HatchUnits, type PatternInfo } from '../core/hatchUnits';
+import { TEXT_ALIGNS, TEXT_ALIGN_LABELS, alignAttr, alignOf, styleOptions, type StyleEntry } from './textProps';
+
+/**
+ * Who a style change goes to (a forum user's report, topic #29: a change with several selected reached only one): every
+ * selected drafted shape (a layer, a colour, a role), hatch (its pattern), text (its style) or dimension (its style) with this one.
+ */
+const isDrafted = (n: NodeDto) => n.type === 'IfcAnnotation' && (!!n.props.shape || !!n.props.hatch);
+const drafted = (node: NodeDto) => selectionWith(node, isDrafted);
+const hatches = (node: NodeDto) => selectionWith(node, (n) => n.type === 'IfcAnnotation' && !!n.props.hatch);
+const alike = (node: NodeDto) => selectionWith(node, (n) => n.type === 'IfcAnnotation' && n.props.predefinedType === node.props.predefinedType && !n.props.shape && !n.props.hatch);
+
+type Layer = DraftLayer;
+
+const deg = (rad: number) => Math.round((rad * 180) / Math.PI * 100) / 100;
+const m2 = (v: number) => `${v.toFixed(3)} m²`;
+const polygonArea = (pts: Vec2[]) => Math.abs(pts.reduce((a, p, i) => { const q = pts[(i + 1) % pts.length]; return a + p.x * q.y - q.x * p.y; }, 0)) / 2;
+const polylineLength = (pts: Vec2[], closed: boolean) => {
+  let l = 0;
+  for (let i = 0; i + 1 < pts.length; i++) l += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  if (closed && pts.length > 2) l += Math.hypot(pts[0].x - pts[pts.length - 1].x, pts[0].y - pts[pts.length - 1].y);
+  return l;
+};
+
+/** A length typed in the project's unit (metres in and out), committed on Enter or blur; empty keeps the value. */
+const Len = ({ value, onCommit, noUnit, min }: { value: number | null; onCommit: (m: number) => void; noUnit?: boolean; min?: number }) =>
+  <LengthField metres={value} noUnit={noUnit} min={min} onCommit={(m) => { if (m != null) onCommit(m); }} />;
+/** A number (an angle, a scale) typed in, committed on Enter or blur; empty keeps the value. */
+const Num = ({ value, onCommit, suffix }: { value: number; onCommit: (n: number) => void; suffix?: string }) =>
+  <NumberField value={value} suffix={suffix} onCommit={(n) => { if (n != null) onCommit(n); }} />;
+
+function Point({ label, p, onCommit }: { label: string; p: Vec2; onCommit?: (q: Vec2) => void }) {
+  return (
+    <>
+      <dt>{label}</dt>
+      <dd className="pair">
+        {onCommit
+          ? <><Len noUnit value={p.x} onCommit={(x) => onCommit({ x, y: p.y })} /><Len value={p.y} onCommit={(y) => onCommit({ x: p.x, y })} /></>
+          : <span className="num">{formatLength(p.x)} · {formatLength(p.y)} {unitLabel()}</span>}
+      </dd>
+    </>
+  );
+}
+
+const Row = ({ label, value }: { label: string; value: string }) => <><dt>{label}</dt><dd><span className="num">{value}</span></dd></>;
+
+function ShapeFields({ node, shape }: { node: NodeDto; shape: Shape }) {
+  const set = (s: Shape) => void execute('drafting.updateDraft', { id: node.id, shape: toJson(s) });
+  switch (shape.type) {
+    case 'line': {
+      const d = { x: shape.b.x - shape.a.x, y: shape.b.y - shape.a.y };
+      return (
+        <>
+          <Point label="Start" p={shape.a} onCommit={(a) => set({ ...shape, a })} />
+          <Point label="End" p={shape.b} onCommit={(b) => set({ ...shape, b })} />
+          <Row label="Length" value={lengthText(Math.hypot(d.x, d.y))} />
+          <Row label="Angle" value={`${deg(Math.atan2(d.y, d.x))}°`} />
+        </>
+      );
+    }
+    case 'polyline':
+      return (
+        <>
+          <Row label="Vertices" value={String(shape.pts.length)} />
+          <dt>Closed</dt><dd><input type="checkbox" checked={shape.closed} onChange={(e) => set({ ...shape, closed: e.target.checked })} /></dd>
+          <Row label="Length" value={lengthText(polylineLength(shape.pts, shape.closed))} />
+          {shape.closed && shape.pts.length > 2 && <Row label="Area" value={m2(polygonArea(shape.pts))} />}
+          {/* Each side's length, typed: its end moves along it and the vertices after it follow, up to the next side running the same way (a Studio solid on it follows). */}
+          {shape.pts.length <= 24 && sideLengths(shape.pts, shape.closed).map((l, i) => (
+            <Fragment key={i}>
+              <dt title="Type a length: the side's end moves along it, the sides after it follow up to the next one running the same way">Side {i + 1}</dt>
+              <dd><Len value={l} onCommit={(v) => { const next = withSideLength(shape.pts, shape.closed, i, v); if (next) set({ ...shape, pts: next }); }} /></dd>
+            </Fragment>
+          ))}
+        </>
+      );
+    case 'circle':
+      return (
+        <>
+          <Point label="Centre" p={shape.c} onCommit={(c) => set({ ...shape, c })} />
+          <dt>Radius</dt><dd><Len value={shape.r} min={1e-6} onCommit={(r) => set({ ...shape, r })} /></dd>
+          <Row label="Diameter" value={lengthText(2 * shape.r)} />
+          <Row label="Circumference" value={lengthText(2 * Math.PI * shape.r)} />
+          <Row label="Area" value={m2(Math.PI * shape.r * shape.r)} />
+        </>
+      );
+    case 'arc': {
+      let sweep = (shape.end - shape.start) % (2 * Math.PI);
+      if (sweep <= 0) sweep += 2 * Math.PI;
+      return (
+        <>
+          <Point label="Centre" p={shape.c} onCommit={(c) => set({ ...shape, c })} />
+          <dt>Radius</dt><dd><Len value={shape.r} min={1e-6} onCommit={(r) => set({ ...shape, r })} /></dd>
+          <dt>Start angle</dt><dd><Num value={deg(shape.start)} onCommit={(a) => set({ ...shape, start: (a * Math.PI) / 180 })} suffix="°" /></dd>
+          <dt>End angle</dt><dd><Num value={deg(shape.end)} onCommit={(a) => set({ ...shape, end: (a * Math.PI) / 180 })} suffix="°" /></dd>
+          <Row label="Length" value={lengthText(shape.r * sweep)} />
+        </>
+      );
+    }
+  }
+}
+
+/**
+ * A drafted hatch: its pattern, its size (on paper, the same at every scale, or real, following the view's scale: report #157;
+ * changed, the engine turns the scale by the view's so it looks as it did), scale and angle, and where its pattern starts
+ * (the origin; empty: the view's).
+ */
+function HatchFields({ node, hatch }: { node: NodeDto; hatch: Record<string, unknown> }) {
+  useStandards((s) => s.units);
+  const [patterns, setPatterns] = useState<PatternInfo[]>([]);
+  useEffect(() => { void query<PatternInfo[]>('hatch.list').then((r) => r && setPatterns(r)); }, []);
+  const loops = Array.isArray(hatch.loops) ? (hatch.loops as unknown[][]).map((l) => l.map(ptStrict).filter((p): p is Vec2 => !!p)) : [];
+  const area = loops.length ? loops.reduce((a, l, i) => a + (i === 0 ? 1 : -1) * polygonArea(l), 0) : null;
+  const set = (patch: Record<string, unknown>) => void execute('drafting.updateDraft', { ids: patch.origin !== undefined ? [node.id] : hatches(node), hatch: patch });
+  const pattern = String(hatch.pattern ?? 'SOLID');
+  const origin = ptStrict(hatch.origin);
+  const bg = typeof hatch.background === 'string' ? hatch.background : null;
+  const own = hatch.units === 'paper' || hatch.units === 'model' ? (hatch.units as HatchUnits) : undefined;
+  const units = effectiveUnits(own, patterns.find((p) => p.name === pattern));
+  return (
+    <>
+      <dt>Pattern</dt>
+      <dd><select value={pattern} onChange={(e) => set({ pattern: e.target.value })}><PatternOptions patterns={patterns} current={pattern} /></select></dd>
+      <dt title="Pattern's own: as the pattern says. Drafting: the spacing is paper millimetres, the same on every scale. Real size: it is the real object's millimetres, so it follows the view's scale">Units</dt>
+      <dd><select data-field="draft-hatch-units" value={own ?? ''} onChange={(e) => set({ units: e.target.value || null })}>
+        <option value="">pattern's own</option>
+        <option value="paper">{UNITS_LABEL.paper}</option>
+        <option value="model">{UNITS_LABEL.model}</option>
+      </select></dd>
+      <dt>{scaleLabel(units)}</dt><dd><Num value={Number(hatch.scale ?? 1)} onCommit={(s) => { if (s > 0) set({ scale: s }); }} /></dd>
+      <dt>Angle</dt><dd><Num value={Number(hatch.angle ?? 0)} onCommit={(a) => set({ angle: a })} suffix="°" /></dd>
+      <dt title="Opaque background fill behind the hatch lines (transparent when off)">Background</dt>
+      <dd className="row">
+        {bg ? (
+          <>
+            <ColourField value={bg} onChange={(v) => set({ background: v })} />
+            <button type="button" className="icon mini" title="Transparent background" onClick={() => set({ background: null })}><X size={10} /></button>
+          </>
+        ) : (
+          <button type="button" className="btn small" onClick={() => set({ background: '#ffffff' })}>Mask</button>
+        )}
+      </dd>
+      <dt title="Where the pattern starts; empty: the view's origin">Origin</dt>
+      <dd className="pair">
+        <Len noUnit value={origin?.x ?? null} onCommit={(x) => set({ origin: [x, origin?.y ?? 0] })} />
+        <Len value={origin?.y ?? null} onCommit={(y) => set({ origin: [origin?.x ?? 0, y] })} />
+        {origin && <button type="button" className="link" onClick={() => set({ origin: null })}>view's</button>}
+      </dd>
+      {area != null && <Row label="Area" value={m2(Math.abs(area))} />}
+    </>
+  );
+}
+
+function Drafted({ node }: { node: NodeDto }) {
+  const layers = useLayers();
+  const layerName = typeof node.props.layer === 'string' ? node.props.layer : '0';
+  const layer = layers.find((l) => l.name === layerName);
+  const own = typeof node.props.color === 'string' ? node.props.color : null;
+  // Its own line type and pen over its layer's (issue #89, decision 715); none: by layer.
+  const lineTypes = useLineTypes();
+  const ownType = typeof node.props.lineType === 'string' ? node.props.lineType : null;
+  const ownWeight = typeof node.props.weight === 'number' ? node.props.weight : null;
+  const shape = node.props.shape && typeof node.props.shape === 'object' ? fromJson(node.props.shape as Record<string, unknown>) : null;
+  const hatch = node.props.hatch && typeof node.props.hatch === 'object' ? (node.props.hatch as Record<string, unknown>) : null;
+  const kind = hatch ? 'Hatch' : shape ? { line: 'Line', polyline: 'Polyline', circle: 'Circle', arc: 'Arc', ellipse: 'Ellipse' }[shape.type] : 'Shape';
+  return (
+    <dl className="fields">
+      <Row label="Kind" value={kind} />
+      <dt data-i18n-ctx="cad">Layer</dt>
+      <dd><select value={layerName} onChange={(e) => void execute('drafting.updateDraft', { ids: drafted(node), layer: e.target.value })}>
+        {(layers.length ? layers : [{ name: layerName } as Layer]).map((l) => <option key={l.name} value={l.name}>{l.name}</option>)}
+      </select></dd>
+      <dt>Colour</dt>
+      <dd className="pair">
+        <ColourField value={own ?? layer?.color ?? '#18181b'} onChange={(v) => void execute('drafting.updateDraft', { ids: drafted(node), color: v })} />
+        {own
+          ? <button type="button" className="link" onClick={() => void execute('drafting.updateDraft', { ids: drafted(node), color: null })}>by layer</button>
+          : <span className="muted small">by layer</span>}
+      </dd>
+      <dt title="What it is for: Studio's operations find their profile, path, rail or axis by it; construction lines are never printed">Role</dt>
+      <dd><select value={typeof node.props.role === 'string' ? node.props.role : ''} onChange={(e) => void execute('drafting.updateDraft', { ids: drafted(node), role: e.target.value || null })}>
+        <option value="">none</option>
+        {ROLES.map((r) => <option key={r} value={r}>{roleLabel(r)}</option>)}
+      </select></dd>
+      {!hatch && <>
+        <dt>Line type</dt>
+        <dd className="pair">
+          <select data-field="draft-line-type" value={ownType ?? ''} onChange={(e) => void execute('drafting.updateDraft', { ids: drafted(node), lineType: e.target.value || null })}>
+            <option value="">by layer</option>
+            {withCurrent(lineTypeNames(lineTypes), ownType).map((t) => <option key={t} value={t}>{t}</option>)}
+          </select>
+          {!ownType && layer && <span className="muted small" data-no-i18n>{layer.lineType}</span>}
+        </dd>
+        <dt>Pen</dt>
+        <dd className="pair" data-field="draft-pen">
+          <NumberField value={ownWeight ?? layer?.weight ?? 0.25} suffix="mm" min={0.05} max={2}
+            onCommit={(w) => { if (w != null && w !== ownWeight) void execute('drafting.updateDraft', { ids: drafted(node), weight: w }); }} />
+          {ownWeight != null
+            ? <button type="button" className="link" onClick={() => void execute('drafting.updateDraft', { ids: drafted(node), weight: null })}>by layer</button>
+            : <span className="muted small">by layer</span>}
+        </dd>
+      </>}
+      {/* A closed shape may be drawn as a revision cloud (decision 620). */}
+      {!hatch && shape && (shape.type === 'circle' || (shape.type === 'polyline' && shape.closed)) && <CloudFields node={node} ids={drafted(node)} />}
+      {hatch ? <HatchFields node={node} hatch={hatch} /> : shape ? <ShapeFields node={node} shape={shape} /> : null}
+    </dl>
+  );
+}
+
+/** The project's text and dimension styles (Manage → Drafting standards), read again when the model changes. */
+function useStyleBook(): { textStyles: StyleEntry[]; dimStyles: StyleEntry[] } {
+  const version = useSession((s) => s.version);
+  const [book, setBook] = useState<{ textStyles: StyleEntry[]; dimStyles: StyleEntry[] }>({ textStyles: [], dimStyles: [] });
+  useEffect(() => {
+    let live = true;
+    void query<{ textStyles?: StyleEntry[]; dimStyles?: StyleEntry[] }>('standards.get').then((b) => {
+      if (live && b) setBook({ textStyles: b.textStyles ?? [], dimStyles: b.dimStyles ?? [] });
+    });
+    return () => { live = false; };
+  }, [version]);
+  return book;
+}
+
+/** A style picked by name and kept by its id; "default" (none) takes the standard one. */
+function StylePick({ list, value, field, onPick }: { list: StyleEntry[]; value: unknown; field: string; onPick: (id: string | null) => void }) {
+  const o = styleOptions(list, value);
+  return (
+    <select className="cell" data-field={field} value={o.value} onChange={(e) => onPick(e.target.value || null)}>
+      <option value="">default</option>
+      {o.options.map((s) => <option key={s.id} value={s.id} data-no-i18n>{s.label}</option>)}
+    </select>
+  );
+}
+
+function TextFields({ node }: { node: NodeDto }) {
+  const set = (attrs: Record<string, unknown>) => void execute('element.update', { ids: 'text' in attrs ? [node.id] : alike(node), attrs });
+  const at = ptStrict(node.props.at);
+  const text = typeof node.props.text === 'string' ? node.props.text : '';
+  const [body, setBody] = useState(text);
+  useEffect(() => setBody(text), [text]);
+  const styles = useStyleBook();
+  return (
+    <dl className="fields">
+      <dt>Text</dt>
+      <dd><textarea rows={2} value={body} onChange={(e) => setBody(e.target.value)} onBlur={() => { if (body.trim() && body !== text) set({ text: body }); }} /></dd>
+      {/* The project's text styles by name, kept by id (forum topic 148: a name typed found no style). */}
+      <dt>Text style</dt><dd className="pair"><StylePick list={styles.textStyles} value={node.props.textStyle} field="textStyle" onPick={(id) => set({ textStyle: id })} /><EditStyleButton tab="text" styleId={node.props.textStyle} /></dd>
+      <dt title="Without a width, of its point; with one, in its box">Alignment</dt>
+      <dd><select className="cell" data-field="align" value={alignOf(node.props.align)} onChange={(e) => set({ align: alignAttr(e.target.value) })}>
+        {TEXT_ALIGNS.map((a) => <option key={a} value={a}>{TEXT_ALIGN_LABELS[a]}</option>)}
+      </select></dd>
+      <dt>Angle</dt><dd><Num value={typeof node.props.angle === 'number' ? node.props.angle : 0} onCommit={(a) => set({ angle: a })} suffix="°" /></dd>
+      <dt title="Wrap lines at this width; empty: no wrapping">Width</dt><dd data-field="text-width"><LengthCell metres={typeof node.props.width === 'number' ? node.props.width : null} placeholder="auto" onCommit={(w) => set({ width: w && w > 0 ? w : null })} /></dd>
+      {at && <Point label="Position" p={at} />}
+      {/* A leader note's arrow (decision 620): taken off, the text stays. */}
+      {Array.isArray(node.props.leader) && node.props.leader.length > 0 && (
+        <><dt>Leader</dt><dd><button type="button" className="link" data-testid="text-leader-remove" onClick={() => void execute('element.update', { ids: [node.id], attrs: { leader: null } })}>remove</button></dd></>
+      )}
+    </dl>
+  );
+}
+
+function DimensionFields({ node }: { node: NodeDto }) {
+  // A string's points (pts); an older dimension's two ends (a, b).
+  const pts = Array.isArray(node.props.pts) ? (node.props.pts as unknown[]).map(ptStrict).filter((p): p is NonNullable<ReturnType<typeof ptStrict>> => !!p) : [ptStrict(node.props.a), ptStrict(node.props.b)].filter((p): p is NonNullable<ReturnType<typeof ptStrict>> => !!p);
+  const a = pts[0], b = pts[pts.length - 1], at = ptStrict(node.props.at);
+  const styles = useStyleBook();
+  return (
+    <dl className="fields">
+      <Row label="Kind" value={ptStrict(node.props.dir) ? 'Linear' : 'Aligned'} />
+      {/* The project's dimension styles by name, kept by id (as a text's style, forum topic 148). */}
+      {/* Its style edited in Manage → Drafting standards → Dimensions, opened on it (forum topic 173). */}
+      <dt>Dimension style</dt><dd className="pair"><StylePick list={styles.dimStyles} value={node.props.dimStyle} field="dimStyle" onPick={(id) => void execute('element.update', { ids: alike(node), attrs: { dimStyle: id } })} /><EditStyleButton tab="dim" styleId={node.props.dimStyle} /></dd>
+      {/* Its own text height on the paper (decision 271); empty: the dimension style's. */}
+      <dt title="On the paper; empty: the dimension style's">Text height</dt>
+      <dd><NumberField value={typeof node.props.textHeight === 'number' ? node.props.textHeight : null} placeholder="by style" suffix="mm" min={0.5} max={50}
+        onCommit={(h) => void execute('element.update', { ids: alike(node), attrs: { textHeight: h } })} /></dd>
+      {/* Its own extension lines left out (issue #66): empty, as its dimension style says. */}
+      <dt title="Leave out its first extension line, its last, or both; empty: as its dimension style says">Extension lines off</dt>
+      <dd><select data-field="extSuppress" value={typeof node.props.extSuppress === 'string' ? node.props.extSuppress : ''}
+        onChange={(e) => void execute('element.update', { ids: alike(node), attrs: { extSuppress: extSuppressAttr(e.target.value) } })}>
+        <option value="">as the style</option>
+        {EXT_SUPPRESS.map((x) => <option key={x} value={x}>{EXT_SUPPRESS_LABELS[x]}</option>)}
+      </select></dd>
+      {pts.length > 2 && <Row label="Points" value={String(pts.length)} />}
+      {a && <Point label="Start" p={a} />}
+      {b && <Point label="End" p={b} />}
+      {a && b && <Row label="Length" value={lengthText(Math.hypot(b.x - a.x, b.y - a.y))} />}
+      {at && <Point label="Position" p={at} />}
+    </dl>
+  );
+}
+
+/** The plans an annotation can go to: every plan view (floor, site, location, ceiling), and each storey's own plan where it has no floor plan view. */
+function planTargets(nodes: Map<string, NodeDto>): { id: string; name: string }[] {
+  const all = [...nodes.values()];
+  const views = all.filter((n) => n.type === 'LapinView' && (n.props.kind ?? 'plan') === 'plan');
+  const storeys = all.filter((n) => n.type === 'IfcBuildingStorey')
+    .sort((a, b) => (Number(a.props.elevation) || 0) - (Number(b.props.elevation) || 0));
+  const own = storeys.filter((st) => !views.some((v) => v.props.storeyId === st.id && !v.props.site)).map((st) => ({ id: `plan:${st.id}`, name: st.name }));
+  return [...own, ...views.map((v) => ({ id: v.id, name: v.name }))];
+}
+
+/**
+ * The plan an annotation is on, and where to move or copy it (decision 274): plans share their coordinates, so it keeps
+ * its place; a dimension's points hold on what the new plan cuts. The selection goes with it.
+ */
+function ViewFields({ node }: { node: NodeDto }) {
+  const nodes = useSession((s) => s.nodes);
+  const viewId = typeof node.props.viewId === 'string' ? node.props.viewId : null;
+  const targets = planTargets(nodes);
+  if (!viewId || !targets.some((t) => t.id === viewId)) return null;
+  const ids = () => { const sel = useUi.getState().selected; return sel.includes(node.id) ? sel : [node.id]; };
+  const send = (target: string, copy: boolean) => { if (target && (copy || target !== viewId)) void execute('drafting.toView', { ids: ids(), viewId: target, ...(copy ? { copy } : {}) }); };
+  return (
+    <dl className="fields">
+      <dt title="Moves the selection to another plan, where it is">View</dt>
+      <dd><select className="cell" value={viewId} onChange={(e) => send(e.target.value, false)}>
+        {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select></dd>
+      <dt title="Copies the selection to another plan, where it is">Copy to</dt>
+      <dd><select className="cell" value="" onChange={(e) => send(e.target.value, true)}>
+        <option value="">—</option>
+        {targets.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+      </select></dd>
+    </dl>
+  );
+}
+
+/**
+ * The DXF import a drafted entity came in with (decision 382): its file, and whether its drawing is shown in 3D on the
+ * view's plane, the whole import at once (a link's is in Manage → Links).
+ */
+function DxfImportFields({ node }: { node: NodeDto }) {
+  const id = typeof node.props.dxfImport === 'string' ? node.props.dxfImport : null;
+  const record = useSession((s) => {
+    if (!id) return null;
+    for (const n of s.nodes.values()) if (n.type === 'IfcProject') { const all = n.props.dxfImports as Record<string, { file?: string; in3d?: boolean }> | undefined; return all?.[id] ?? null; }
+    return null;
+  });
+  if (!id || !record) return null;
+  return (
+    <dl className="fields">
+      <dt title="The DXF file this came in with">DXF import</dt><dd><span data-no-i18n>{record.file ?? ''}</span></dd>
+      <dt title="The import's whole drawing on its view's plane in the 3D view (View → DXF in 3D shows or hides every import)">In 3D</dt>
+      <dd><input type="checkbox" data-testid="dxf-import-in3d" checked={record.in3d !== false} onChange={(e) => void execute('drafting.setUnderlay3d', { id, shown: e.target.checked })} /></dd>
+    </dl>
+  );
+}
+
+function Fields({ node }: { node: NodeDto }) {
+  switch (node.props.predefinedType) {
+    case 'DRAFT': return <Drafted node={node} />;
+    case 'TEXT': return <TextFields node={node} />;
+    case 'DIMENSION': return <DimensionFields node={node} />;
+    case 'TAG': return <TagFields node={node} />;
+    case 'SHEETLEGEND': case 'SCALEBAR': case 'NORTHARROW': return <KeyFields node={node} />;
+    default: return null;
+  }
+}
+
+export function DraftSection({ node }: { node: NodeDto }) {
+  return <><Fields node={node} /><DxfImportFields node={node} /><ViewFields node={node} /></>;
+}

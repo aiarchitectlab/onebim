@@ -1,0 +1,55 @@
+---
+title: Simpel armering
+order: 52
+summary: Armering tegnet på snit og planer, tværsnit skåret, hvor du klikker, og armeringslisten.
+---
+
+Fanen **Simpel armering** tegner armering, som en armeringsliste laves: stænger som former med deres mål, bøjler fordelt langs en bjælke, mærker i cirkler og en liste, der lægger dem sammen. Den virker i enhver visning: et snit, en plan, en facade.
+
+![Fanen Simpel armering](shots/ribbon-rebar.webp)
+
+## Et snit, hvor du arbejder
+
+Armering har brug for tværsnittet ved siden af længdesnittet. **Snit her** gør begge dele: vælg en bjælke, en søjle eller en væg i den visning, du er i, og hvor du klikker, skæres et snit *på tværs*, vinkelret på dens akse, og tegnes ved siden af dit klik, i samme visning, med en halv meter af omgivelserne (dækket, søjlen). En søjle skæres vandret i den højde, du klikkede. Klik inde i elementets snit, ikke kun på dets kant: i et snit eller en facade tager klikket, som i en plan, det element, hvis snit rummer det.
+
+Den indsatte visning følger elementet: flyt bjælken, og snittet flytter med. Træk den indsatte visning i dens greb; dens egenskaber giver den en skalafaktor og en ramme. **Tværsnit** laver samme snit som sin egen visning, og **Indsat visning** sætter enhver eksisterende visning ind i den, du er i, i sand størrelse og i værtsvisningens målestok, så stænger tegnet ovenpå passer til betonen.
+
+![En bjælkes længdesnit med dens tværsnit indsat og dens armering](shots/rebar-section.webp)
+
+## Stænger
+
+**Lige stang**, **L-stang**, **U-stang**, **Bøjle**, **Binder** og **Polylinjestang** sættes med et klik (polylinjen ved dens punkter). Hver er en form med parametre: træk i et greb, og det mål, det står for, følger; skriv det i egenskabspanelet i millimeter. Stængerne tegnes i deres tykkelse, i en farve pr. diameter (Armeringsindstillinger), og bukkes med den radius, SR EN 1992-1-1 kræver: dorn 4Ø til og med Ø16, 7Ø derover.
+
+Kroge sættes i hver ende: 90°, 135° eller 180°, deres lige længde efter praksis (12Ø, 10Ø, 5Ø, aldrig under 50 mm), på den anden side, når du beder om det. En bøjle fødes med to 135°-kroge vendt indad.
+
+**Ankergreb.** En valgt stang set forfra viser ved siden af sine greb orange romber, der står *uden for* den med **dæklaget**: ét ved dens udgangspunkt og ét ved hver fri ende (en ende med krog har intet). De står for forskallingsfladen: træk ét til elementets snit — dets hjørne, dets flade; tegningen snapper dertil — og stangen stopper ved dæklaget indenfor. Endens anker sætter stangens længde, udgangspunktets flytter hele stangen. Dæklaget er stangens eget, skrevet i feltet **Dæklag** i dens egenskaber (ryd det for at gå tilbage), ellers bøjledæklaget på værtens type plus bøjlen, ellers det fra Armeringsindstillinger; feltet siger hvilket som et vink.
+
+**Stang i snit** er en stang set fra enden: en prik i dens diameter, med den længde, den har langs stangen. **Samme stang i snit** sætter den valgte stang som prik et andet sted uden at tælle den to gange. En **Række** i egenskaberne gentager en stang for hver så mange millimeter, som stængerne i et lag i et tværsnit.
+
+Mærkets cirkel viser mærkenummeret, og hvad stangen er: `4Ø12 L=2450`. Træk cirklen, hvor den læses bedst.
+
+**Etikettens** stil siger, hvad den skriver, og hvor den står: dens dele i rækkefølge (antal, diameter, afstand, længde, mærke, stål, fri tekst), cirklen, om teksten løber vandret, langs stængerne eller i en vinkel, på hvilken side af stængerne den står og hvor mange millimeter fra dem, henvisningslinjen. Den sættes i **Armeringsindstillinger** for hver slags (stænger, bøjler på typen, søjlestænger, fordelinger), på en type ved siden af dens bøjler og på en stang i dens egenskaber; det mest specifikke vinder. En cirkel tegnes aldrig uden mærke. Etiketterne for en types bøjler, en søjles stænger og en stang set i en anden visning har også greb: træk i en, og den beholder den plads i den visning (**Sæt etiketten tilbage** i egenskaberne fortryder det); indtil da stables etiketter, der ville mødes, under hinanden i deres mærkers rækkefølge.
+
+En **fordeling** — bøjler på typen, bøjler langs en bane — markeres som en **målkæde** uden værdier: en linje parallelt med stængerne uden for dem, en kort streg hvor hver stang krydser den og i begge ender, etiketten over linjen langs den, cirklen rørende dens start. Træk cirklen hen, hvor den læses bedst; træk målkædens midte for at flytte den væk fra stængerne. **Markeret med** i etikettens stil slår målkæden fra og lader teksten og cirklen stå ved siden af stængerne. **Henvisningslinjen** kan mangle, være én linje eller en til hver stang set som en prik (standarden for stænger i et tværsnit: én stang, én linje; over seksten kun enderne og den midterste). Træk midten af en henvisningslinje for at knække den dér; knækket har derefter sit eget greb, og Ctrl/⌘-klik på det fjerner det.
+
+Længderne er de nominelle, målt på stangens akse mellem dens hjørner, med kroge; den udfoldede længde om bukningerne står i egenskabspanelet.
+
+**Del stang** deler en længdestang, der er længere end leveringslængden (12 m eller 6 m, i **Armeringsindstillinger**). Hvor de to stykker overlapper, bestemmer du, ikke Lapin: en underside-stang stødes nær understøtningerne, en overside-stang væk fra dem. Så stødzonen angiver du selv: klik på stangen i den ene ende af stødet, så i den anden; eller klik, hvor den første stang slutter, og skriv stødlængden (800 for 800 mm), målt langs stangen; Enter eller Escape efter det første klik lader indstillingernes **stødlængde** (50Ø medmindre den er sat) slutte ved det klik. I stangens egenskaber skrives samme zone som **Stød fra … til …** i millimeter fra stangens start, med stødlængden ved siden af (ændrer du den, bliver „til“ stående og „fra“ flytter sig); den første stang slutter ved *til*, den anden begynder ved *fra*, og de to længder vises, mens du skriver, før **Del stangen**. Det første beholder mærket og startkrogen, det andet får det næste mærke og endekrogen, og listen tæller dem som to mærker med deres egne længder. Det andet stykke tegnes en anelse ved siden af det første, så stødet kan læses. En stang over leveringslængden markeres i dens egenskaber, og **Del ved leveringslængden** lader stødet slutte ved leveringslængden, så det første stykke er præcis så langt.
+
+## Bøjler på bjælke- eller søjletypen
+
+Bøjler tegnes ikke én ad gangen: de hører til **typen**. Under Konstruktion → Konstruktionstyper får en rektangulær bjælke- eller søjletype **Bøjler på denne type**: deres diameter, dæklaget og fordelingen — ét trin hele vejen eller **tre zoner**, hver med sin del af længden (en tredjedel som standard) og sit trin, tættere i enderne. Hvert element af typen viser dem så i ethvert snit, som visningen ligger til aksen: rektanglet inden for dæklaget i tværsnittet, en linje pr. bøjle i længdesnittet, linjer over bjælken i en konstruktionsplan; med etiketten `41Ø8/150` og mærkets cirkel. De tælles med i armeringslisten under typens mærke. En **søjles** bøjler kan være omkredsens alene, **med en rombe indeni** (dens hjørner midt på siderne) eller **med to indeni, én hver vej**, hver slags med sit mærke. En søjle armeres etage for etage, så dens **længdestænger** sidder også på typen: så mange pr. flade med fælles hjørner, deres diameter og **stødjernene**, der går ud over toppen (1 m som standard) til søjlen ovenover; prikker i dens vandrette snit og i en konstruktionsplan, linjer i et lodret snit. **Øverst** siger, hvordan de slutter: **Efter søjlen ovenover** (standard) fører dem videre som stødjern, hvor en søjle står på denne, og hvor ingen gør (øverste etage), stopper dem under toppen, inden for dæklaget, med en 90°-krog (12Ø) bøjet indad; **Stødjern ud over toppen** og **90°-kroge under toppen** vælger det ene, uanset hvad der står ovenover. En stang med krog er en L-stang i bøjelisten, med krogen talt med i længden.
+
+En bjælkes **længdestænger** sidder ikke på typen (de løber over flere fag): tegn dem i længdesnittet eller i planen, med deres kroge. En stang tegnet inde i en bjælkes snit hører til den bjælke og står i rummet: **På tværs af tegningen** lægger den så mange gange i visningens retning, **efter dæklaget** (den første og den sidste ved fladerne, inden for dæklag og bøjle, resten jævnt fordelt) eller **med et trin**. Tværsnittet viser så stængerne som prikker, hvor de er, en konstruktionsplan som linjer, og listen tæller dem alle: `3Ø16 L=6400`. Det samme gælder en stang tegnet i snittet af en søjle, en væg, et dæk, et fundament eller en trappe. I en trappe lægges stængerne mellem betonfladerne på dens løb og reposer, aldrig gelænderne eller belægningen.
+
+**Stænger i 3D** (Vis → Stænger i 3D, eller knappen i denne fane) viser eller skjuler 3D-visningens kategori **Armering**, det samme som dens række i Synlighed / Grafik (<kbd>VV</kbd>): hver stang i rummet som et rør med dens diameter, fejet langs dens bukkede form, i dens farve, typens bøjler på deres stationer, søjlens stænger, de stænger du har tegnet med deres kopier. Hver 3D-visning udelader stængerne, indtil du viser dem, uanset stil; en skjult bjælke tager sine bøjler med sig. Stængerne i en linket eller importeret konstruktions-IFC (IfcReinforcingBar) er i samme kategori: de vises og skjules med disse, delt hvor de gentages, så tusinder drejer glat, og planer og snit tegner dem kun ved LOD 400 (konstruktionsstilens). Fanens stænger er et billede til skærmen, bedt om fra motoren mens de vises: de vælges ikke, eksporteres ikke, og over to millioner trekanter tegnes kun de første. Stænger som egne elementer i modellen, genereret fra typerne, med optimering og konfiguratorer, hører til premium-udgaven Rebar BIM.
+
+## Bøjler langs en bjælke
+
+**Bøjler langs** tager de to ender af en vej; bøjlerne fordeles, så én står i hver ende, med det trin, du sætter (150 mm som standard). **Zoner** ændrer trinnet undervejs: **Tredjedele** sætter i hver ende et halvt så stort trin, som en seismisk bjælke kræver; etiketten siger `25Ø8/100-200`. Vis dem alle, kun enderne og midten med en stiplet linje imellem, eller én.
+
+## Listen
+
+**Armeringsliste** laver en liste over hver stang efter mærke: diameter, form, antal, længde af én, samlet længde og masse, med summer pr. diameter. Et mærke, hvis stænger afviger i diameter eller længde, noteres. Det er en liste som de andre: på ark, i CSV og XLSX.
+
+**Armeringsindstillinger** gemmer projektets valg: en farve pr. diameter, tekst- og cirkelstørrelser på papir, stålet, dæklaget, segmentlængderne skrevet langs stængerne og etiketternes stil for hver slags.

@@ -1,0 +1,2525 @@
+/**
+ * The 3D view: the engine's meshes in three.js (metres, Z up), on the
+ * architect's-sheet palette. A click selects; with a drawing tool on, clicks
+ * on the active storey's plane give its points.
+ */
+
+import { useEffect, useRef, useState } from 'react';
+import { useShallow } from 'zustand/react/shallow';
+import { partLook, useLooks, type Look } from '../platform/looks';
+import { useSunlight } from '../platform/sunlight';
+import { doubleClickHandlers, pickable, pickHandlers } from '../platform/scope';
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { Aperture, Lightbulb, X } from 'lucide-react';
+import { openContextMenu } from '../shell/ContextMenu';
+import { selectionItems, temporaryItems } from '../shell/selectionMenu';
+import { viewSheetItems } from '../shell/browserFind';
+import type { CapItem, NodeDto, RenderItem } from '../engine/protocol';
+import { activeStorey, engine, engineInBrowser, execute, query, useSession } from '../engine/session';
+import { num, storeys as storeysOf } from '../engine/model';
+import { chipText, cutZ, settingOf } from './storeys3d';
+import { showAllStoreys3d } from './storeys3dActions';
+import { everyLayerPatch, layers3dOf, layersChip, shownIn } from './layers3d';
+import { setTool, useUi } from '../app/store';
+import { currentViewTheme, useViewTheme } from '../app/viewTheme';
+import { useDisplay } from '../app/display';
+import { usePaneField } from '../app/pane';
+import { findTool, overlays3d, subSelectionTag } from '../platform/modules';
+import type { FaceHit, Vec2 } from '../platform/module';
+import { completeTool } from './tools';
+import { boxUv, boxUvSized, hasRelief, imageOf, imageTexture, orthophotos, orthoTexture, orthoUv, pictureOf, pictureUv, reliefOf, sizeOf, splitByFace, surfaceMaps, textureFor, textureOf, tileOf, whenImagesLoad, withRelief, type Face, type TextureKind } from './textures';
+import { lookOf } from './look';
+import { xrayLooks } from './xray';
+import { glassThrough, reflections, standardMaterial } from './materialLook';
+import { DIAGRAM_BACKGROUND, DIAGRAM_EDGES, diagramLooks, flatTextures, useDiagram } from './diagram';
+import { nightOf, Realism, sunColour, useCameraLook, useRenderProfile, whiteBalanceKelvin } from './render3d';
+import { buildTraceScene, exposureFactor, resolutionOf, TraceMaterials, type TraceInput } from './pathTrace';
+import type { PathTraceView, TraceLook, TraceSky } from './pathTraceView';
+import { finished, progressOf, readout, setRenderSettings, setRendering, toggleRendering, useRenderApi, useRenderMode, useRenderSettings } from './renderMode';
+import { projectTitle, safeFileName, saveFile } from '../engine/files';
+import { LightRig, useLightBudget, whiteBalanceGains, type LightProfileDto, type LightSourceDto } from './lights3d';
+import { onVoxels, placeProbes, probeBudget, weakGpu, type Vec3 as ProbeVec3 } from './probes';
+import { glossySamples, ReflectionProbes, roomOfObject } from './probes3d';
+import { KeyPlan } from './KeyPlan';
+import { poseOf, positionOf, useCamera, type CameraApi, type CameraPose } from './camera';
+import { Grips3D } from './Grips3D';
+import { AxisDrag3D } from './AxisDrag3D';
+import { FaceSketch3D } from './FaceSketch3D';
+import { Draft3D } from './Draft3D';
+import { Move3D } from './Move3D';
+import { Place3D } from './Place3D';
+import { Drop3D } from './Drop3D';
+import { isPointGesture } from './gesture3d';
+import { Sketch3D } from './Sketch3D';
+import { SketchGrips3D } from './SketchGrips3D';
+import { Guides3D } from './Guides3D';
+import { useDirect } from './sketch/direct';
+import { useFaceSketch } from './faceSketch';
+import { useAxisDrag } from './axisDrag';
+import { SectionBox3D } from './SectionBox3D';
+import { changed3d, key3d, recall3d, remember3d } from './viewState3d';
+import { RefPlanes3D, useRefPlaneDrag } from './RefPlanes3D';
+import { Location3D } from './Location3D';
+import { coreBounds, type Bounds } from './zoom';
+import { usePrefs } from '../app/prefs';
+import { ucsOf, useLocation } from '../app/location';
+import { planePoint, refPlanesGroup, refPlanesKey, refPlanesOf } from './refPlanes';
+import { REBAR_GROUP, useRebar3d } from './rebar3d';
+import { useVoids3d, VOIDS_GROUP } from './voids3d';
+import { boxPlanes, modelBounds, planesKey, toggleSectionBoxHidden, useSectionBox, type SectionBox } from './sectionBox';
+import { alignSectionBox, commitBox, cutAtPlan, fitSectionBox } from './sectionBoxTools';
+import { useDrawing, type DrawingDto } from './drawing';
+import { CUT_LAYERS, cssColor, dashSegments, drawingPoint, penPixels, evenOddShapes, onCut, sectionPieces, sectionPlanes, sectionPose, textFont, textQuad, useClip3d, useSection3d, type ClipPlane, type DrawingText, type ViewFrameDto } from './section3d';
+import { clampPitch, easeEye, exitWalk, lookVector, toggleFly, useWalk, walkStep, walkWish, EYE_HEIGHT, WALK_KEYS, type WalkStart } from './walk';
+import { TICK, Walker, worldOf } from './walkPhysics';
+import { InstanceLayer } from './instancing';
+import { openGroupOf, shownSelection, useExpansion } from '../platform/groups';
+import { useTagHover } from './tagTarget';
+import { preselectionColour, selectionColour, useHighlight } from '../app/highlight';
+import { pickByMods, pickRegion } from '../platform/assemblies';
+import { dragAction, modsOf, regionMode, regionSelection, wheelFactor, zoomsToCursor, type Mods } from '../app/navStyle';
+import { currentNavStyle } from '../app/navStyleStore';
+import { boxEdges, boxOf, partSelected, projectSegments, takes, toggleRegion3d, useRegion3d, type Project } from './select3d';
+import { clippedAway, seenHit } from './seen3d';
+import { clearShown, publishShown } from './cad/shown';
+import { usePaneActive } from '../app/pane';
+import { dragTo, isWindow, regionTestOf, SelectRegion, toggleLasso, type SelectDrag } from './selectDrag';
+import type { Seg } from './selectBox';
+import { resetTemporary, temporaryOn, useTemporary } from './temporary';
+import { place, placedBox } from '../engine/instances';
+import { fineShown, useFineBodies } from './fineBodies';
+import { disposeUnderlays, sameSources, underlayGroup, underlaySources, type UnderlayBatch } from './underlays3d';
+import { PointCloudLayer, type Hierarchy, type Tile } from './pointClouds3d';
+import { SplatLayer, underlayLines, type SplatPage } from './splats3d';
+import { openCrop, startCalibrate } from '../modules/core/cloudCalibrate';
+import { cloudAt } from './scene3d';
+import { cloudSpecs, isCloudLink, setCloudStatus, setSplatsDrawn, type ViewCloud } from './pointClouds';
+import { copyArrays, displayQualityOf, levelFor, pixelsPerMetre, type DisplayQuality, type LodCamera } from './lod';
+import { inWorld } from '../engine/instances';
+import { clampWheel, middleDouble, wheelZoom } from './zoom';
+import { orbitAbout, orbitAngles, orbitPivot, orthoZoomShift, zoomAbout, type Rig } from './navigate3d';
+
+const CLEAR = { paper: 0xf3efe7, graphite: 0x1c1b19, classic: 0xffffff, contrast: 0xffffff } as const;
+/** How often the instances' copies are chosen again while the camera moves (ms). */
+const LOD_EVERY = 150;
+/** The ground grid per theme: its axes in the accent, its lines a shade off the paper. */
+const GRID = { paper: [0xb5532d, 0xd6cebf], graphite: [0xe07a4f, 0x34312c], classic: [0x0067c0, 0xd0d0d0], contrast: [0x003f9e, 0x9a9a9a] } as const;
+/** The edges' one material, shared by every element (highlights and looks change only the faces'). */
+const EDGES_COLOUR = 0x1e2a3a;
+const EDGES = new THREE.LineBasicMaterial({ color: EDGES_COLOUR });
+EDGES.userData.shared = true;
+/** CAD linework's materials, one a colour (a DXF's lines keep their layer's), shared like the edges'. */
+const LINEWORK = new Map<string, THREE.LineBasicMaterial>();
+function lineworkMaterial(color: string): THREE.LineBasicMaterial {
+  let m = LINEWORK.get(color);
+  if (!m) { m = new THREE.LineBasicMaterial({ color: new THREE.Color(color) }); m.userData.shared = true; LINEWORK.set(color, m); }
+  return m;
+}
+
+
+function groundGrid(theme: keyof typeof GRID, z: number, step = 1, ucs: { x: number; y: number; angle: number } | null = null): THREE.GridHelper {
+  // 60 lines each way at the step (1 m: the adaptive grid's), at most 600; a fixed step's grid turns with the UCS (decision 445).
+  const n = Math.max(2, Math.min(600, Math.round(60 / Math.max(step, 1e-3))));
+  const grid = new THREE.GridHelper(n * step, n, GRID[theme][0], GRID[theme][1]);
+  underlayLines(grid);
+  grid.rotation.order = 'ZXY';
+  grid.rotation.x = Math.PI / 2;
+  grid.rotation.z = ucs ? (ucs.angle * Math.PI) / 180 : 0;
+  grid.position.set(ucs?.x ?? 0, ucs?.y ?? 0, z);
+  grid.name = 'ground-grid';
+  return grid;
+}
+
+/** A surface's meshes in its material (its own image, or its texture tinted by its colour, per face when they differ) added to `group`. */
+function addSurface(group: THREE.Group, nodeId: string, positions: Float32Array, normals: Float32Array, indices: Int32Array, color: string, material?: string | null) {
+  const nodes = useSession.getState().nodes;
+  {
+    if (positions.length) {
+      const mat = material ? nodes.get(material) : undefined;
+      // A terrain under an orthophoto wears it, laid by the photo's corners in plan.
+      const owner = nodes.get(nodeId);
+      const ortho = owner?.type === 'IfcGeographicElement' && owner.props.predefinedType === 'TERRAIN' ? orthophotos(nodes)[0] : undefined;
+      if (ortho) {
+        // The photo on the ground's top only; its sides and bottom keep the terrain's colour.
+        const top: number[] = [], rest: number[] = [];
+        for (let k = 0; k + 2 < indices.length; k += 3) {
+          const [a, b, c] = [indices[k], indices[k + 1], indices[k + 2]];
+          const ux = positions[3 * b] - positions[3 * a], uy = positions[3 * b + 1] - positions[3 * a + 1], uz = positions[3 * b + 2] - positions[3 * a + 2];
+          const vx = positions[3 * c] - positions[3 * a], vy = positions[3 * c + 1] - positions[3 * a + 1], vz = positions[3 * c + 2] - positions[3 * a + 2];
+          const nz = ux * vy - uy * vx, len = Math.hypot(uy * vz - uz * vy, uz * vx - ux * vz, nz);
+          (len > 0 && nz / len > 0.3 ? top : rest).push(a, b, c);
+        }
+        indices = Int32Array.from(rest);
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        if (normals.length === positions.length) g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        else g.computeVertexNormals();
+        g.setIndex(new THREE.BufferAttribute(Uint32Array.from(top), 1));
+        const uv = new Float32Array((positions.length / 3) * 2);
+        for (let i = 0; i < positions.length / 3; i++) { const [u, v] = orthoUv(ortho, positions[3 * i], positions[3 * i + 1]); uv[2 * i] = u; uv[2 * i + 1] = v; }
+        g.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+        const mesh = new THREE.Mesh(g, new THREE.MeshStandardMaterial({ color: 0xffffff, map: orthoTexture(ortho), roughness: 0.95, metalness: 0, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 }));
+        mesh.userData.nodeId = nodeId;
+        mesh.castShadow = mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+      // An entourage figure of a picture kind: its picture on the card, nothing else.
+      const picture = pictureOf(nodeId, nodes);
+      if (picture) {
+        const pg = new THREE.BufferGeometry();
+        pg.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        if (normals.length === positions.length) pg.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        else pg.computeVertexNormals();
+        pg.setIndex(new THREE.BufferAttribute(new Uint32Array(indices.buffer, indices.byteOffset, indices.length), 1));
+        pictureUv(pg, typeof owner?.props.rotation === 'number' ? owner.props.rotation : 0);
+        // A cut-out: the PNG's see-through pixels discarded (alphaTest, no blending, so it sorts with glass as a solid does),
+        // its shadow cut out the same way.
+        const pm = new THREE.MeshStandardMaterial({ color: 0xffffff, map: imageTexture(picture, THREE.ClampToEdgeWrapping), roughness: 0.85, metalness: 0, alphaTest: 0.5, side: THREE.DoubleSide });
+        const pmMesh = new THREE.Mesh(pg, pm);
+        pmMesh.userData.nodeId = nodeId;
+        pmMesh.castShadow = pmMesh.receiveShadow = true;
+        group.add(pmMesh);
+        return;
+      }
+      // How it renders (report #76): rough or glossy, metal, see-through, glowing; its texture's size and turn.
+      const lk = lookOf(mat);
+      // The material's own image: on every face, untinted, at its size in metres.
+      const own = imageOf(mat, nodes);
+      // Its relief (a normal map, a bump map), on the faces' coordinates as its own image lies.
+      const relief = reliefOf(mat, nodes);
+      const relieved = hasRelief(relief);
+      if (own) {
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        if (normals.length === positions.length) g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        else g.computeVertexNormals();
+        g.setIndex(new THREE.BufferAttribute(new Uint32Array(indices.buffer, indices.byteOffset, indices.length), 1));
+        boxUvSized(g, own.width, own.height, lk.textureRotation);
+        const mesh = new THREE.Mesh(g, withRelief(standardMaterial(0xffffff, imageTexture(own), lk), relief, lk.normalStrength, lk.bumpStrength, undefined, lk.aoStrength));
+        mesh.userData.nodeId = nodeId;
+        mesh.castShadow = mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+      const kinds: Record<Face, TextureKind | null> = { side: textureOf(mat, 'side'), end: textureOf(mat, 'end'), top: textureOf(mat, 'top') };
+      const all = new Uint32Array(indices.buffer, indices.byteOffset, indices.length);
+      // One mesh, or one per face when the ends or the top look different (a brick wall's cut ends).
+      const faces = own ? {} : kinds.end !== kinds.side || kinds.top !== kinds.side ? splitByFace(positions, all) : { side: all };
+      for (const [face, idx] of Object.entries(faces) as [Face, Uint32Array][]) {
+        if (!idx.length) continue;
+        const g = new THREE.BufferGeometry();
+        g.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        if (normals.length === positions.length) g.setAttribute('normal', new THREE.BufferAttribute(normals, 3));
+        else g.computeVertexNormals();
+        g.setIndex(new THREE.BufferAttribute(idx, 1));
+        // The material's texture, tinted by its colour, laid on in metres.
+        const kind = kinds[face];
+        if (kind) boxUv(g, kind, tileOf(mat), lk.textureRotation);
+        else if (relieved) { const [w, h] = sizeOf(mat); boxUvSized(g, w, h, lk.textureRotation); }
+        const base = standardMaterial(kind ? 0xffffff : new THREE.Color(color), kind ? textureFor(kind, color) : null, lk);
+        const mesh = new THREE.Mesh(g, relieved ? withRelief(base, relief, lk.normalStrength, lk.bumpStrength, undefined, lk.aoStrength) : base);
+        mesh.userData.nodeId = nodeId;
+        // What is seen through casts no shadow (glass lets the sun in).
+        mesh.castShadow = lk.transparency <= 0;
+        mesh.receiveShadow = true;
+        group.add(mesh);
+      }
+    }
+  }
+}
+
+/**
+ * A heavy part's copies (lod.ts): the part's own meshes and each coarser copy's, a group each, one shown at a
+ * time by the camera's distance; the copies are never picked (a click and a face tool meet the part itself).
+ */
+interface LodSet { levels: THREE.Group[]; errors: number[]; centre: [number, number, number]; radius: number }
+
+/** The sphere round a part's points: its box's middle and half its diagonal. */
+function sphereOf(positions: Float32Array): { centre: [number, number, number]; radius: number } {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < positions.length; i += 3) for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], positions[i + a]); hi[a] = Math.max(hi[a], positions[i + a]); }
+  return { centre: [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2], radius: Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2 };
+}
+
+const NO_RAYCAST = () => undefined;
+/** What is picked but not drawn (a bare opening's face in its hole, its outline until selected). */
+const UNSEEN_FACE = new THREE.MeshBasicMaterial({ visible: false, side: THREE.DoubleSide });
+UNSEEN_FACE.userData.shared = true;
+const UNSEEN_LINE = new THREE.LineBasicMaterial({ visible: false });
+UNSEEN_LINE.userData.shared = true;
+
+/** How near a line a ray passes to meet it: about six pixels where the ray meets the ground, never less than a centimetre. */
+function lineThreshold(cam: THREE.Camera, ray: THREE.Raycaster): number {
+  const ortho = (cam as THREE.OrthographicCamera).isOrthographicCamera ? cam as THREE.OrthographicCamera : null;
+  if (ortho) return Math.max(0.01, ((ortho.top - ortho.bottom) / ortho.zoom) * 0.008);
+  const g = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0, 0, 1), 0), new THREE.Vector3());
+  const d = g ? g.distanceTo(ray.ray.origin) : cam.position.length();
+  return Math.max(0.01, d * 0.008);
+}
+
+function meshOf(item: RenderItem): THREE.Group {
+  const group = new THREE.Group();
+  group.userData.nodeId = item.nodeId;
+  const add = (into: THREE.Group, positions: Float32Array, normals: Float32Array, indices: Int32Array, edges: Float32Array, color: string, material?: string | null) => {
+    addSurface(into, item.nodeId, positions, normals, indices, color, material);
+    if (edges.length) {
+      const e = new THREE.BufferGeometry();
+      e.setAttribute('position', new THREE.BufferAttribute(edges, 3));
+      into.add(new THREE.LineSegments(e, EDGES));
+    }
+  };
+  add(group, item.positions, item.normals, item.indices, item.edges, item.color);
+  const lods: LodSet[] = [];
+  for (const p of item.parts ?? []) {
+    // A part with a key (a layer) in a group of its own, so a look can show it apart (the 4D simulation's layers).
+    let into = group;
+    if (p.key) { into = new THREE.Group(); into.userData.part = p.key; group.add(into); }
+    if (!p.lods?.length) { add(into, p.positions, p.normals, p.indices, p.edges, p.color, p.material); continue; }
+    const levels = [p, ...p.lods.map(copyArrays)].map((m, k) => {
+      const g = new THREE.Group();
+      g.visible = k === 0;
+      // A level of detail: hidden for a coarser copy, still the one a click meets (seen3d.ts).
+      g.userData.lodLevel = true;
+      add(g, m.positions, m.normals, m.indices, m.edges, p.color, p.material);
+      if (k > 0) g.traverse((c) => { c.raycast = NO_RAYCAST; });
+      into.add(g);
+      return g;
+    });
+    lods.push({ levels, errors: p.lods.map((l) => l.error), ...sphereOf(p.positions) });
+  }
+  if (lods.length) group.userData.lods = lods;
+  // Linework (a DXF's 3D lines, the shapes drafted on a view's plane: decision 312): lines in space, in their own colour, picked as their element.
+  if (item.lines?.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(item.lines, 3));
+    // A bare wall opening's outline (decision 312): drawn only while selected, its face (unseen) taking the click in the hole.
+    const opening = item.type === 'IfcOpeningElement';
+    const lines = new THREE.LineSegments(g, opening ? UNSEEN_LINE : lineworkMaterial(item.color));
+    lines.userData.nodeId = item.nodeId;
+    lines.userData.linework = opening ? '' : item.color;
+    group.add(lines);
+    if (opening && item.lines.length >= 18) {
+      const q = item.lines;
+      // The outline's first three segments' starts are three corners; the fourth closes the quad.
+      const corner = (k: number) => [q[k * 6], q[k * 6 + 1], q[k * 6 + 2]];
+      const quad = new THREE.BufferGeometry();
+      quad.setAttribute('position', new THREE.BufferAttribute(new Float32Array([...corner(0), ...corner(1), ...corner(2), ...(q.length >= 24 ? corner(3) : corner(2))]), 3));
+      quad.setIndex([0, 1, 2, 0, 2, 3]);
+      const hit = new THREE.Mesh(quad, UNSEEN_FACE);
+      hit.userData.nodeId = item.nodeId;
+      hit.userData.pickOnly = true;
+      group.add(hit);
+    }
+  }
+  return group;
+}
+
+/** The caps' hatch lines, as thin as a sheet's (one material, shared). */
+const HATCH = new THREE.LineBasicMaterial({ color: 0x2b2b2b });
+HATCH.userData.shared = true;
+
+/** Cut outlines on the caps: a little heavier than the model's edges, so the cut reads first. */
+const CAP_EDGE_PX = 1.6;
+
+/**
+ * An element's caps where the section cuts it (view.caps): each part's in
+ * its own material, as its faces are, outlined in the cut's line.
+ */
+function capsOf(item: CapItem): THREE.Group {
+  const group = new THREE.Group();
+  group.userData.nodeId = item.nodeId;
+  group.userData.caps = true;
+  const edges: number[] = [];
+  const hatch: number[] = [];
+  for (const p of item.parts) {
+    if (p.fill) {
+      // As a sheet draws the cut: the material's section fill, flat, and its hatch over it.
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.BufferAttribute(p.positions, 3));
+      g.setAttribute('normal', new THREE.BufferAttribute(p.normals, 3));
+      g.setIndex(new THREE.BufferAttribute(new Uint32Array(p.indices.buffer, p.indices.byteOffset, p.indices.length), 1));
+      const fill = cssColor(p.fill);
+      const mesh = new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color: new THREE.Color(fill?.hex ?? '#ffffff') }));
+      mesh.userData.nodeId = item.nodeId;
+      group.add(mesh);
+      if (p.hatch) for (const v of p.hatch) hatch.push(v);
+    } else addSurface(group, item.nodeId, p.positions, p.normals, p.indices, p.color, p.material);
+    for (const v of p.edges) edges.push(v);
+  }
+  if (hatch.length) {
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(hatch), 3));
+    group.add(new THREE.LineSegments(g, HATCH));
+  }
+  if (edges.length) {
+    const mat = new LineMaterial({ color: 0x1e2a3a, linewidth: CAP_EDGE_PX });
+    const lines = new LineSegments2(new LineSegmentsGeometry().setPositions(edges), mat);
+    lines.onBeforeRender = (renderer) => { renderer.getSize(mat.resolution); };
+    group.add(lines);
+  }
+  return group;
+}
+
+/** Each element's box (its parts' too), worked out once per item, for what a clipping plane takes away wholly. */
+const boxes = new WeakMap<RenderItem, number[] | null>();
+function itemBox(item: RenderItem): number[] | null {
+  if (boxes.has(item)) return boxes.get(item)!;
+  const all = [item.positions, ...(item.parts ?? []).map((p) => p.positions)];
+  let b: number[] | null = null;
+  for (const a of all) {
+    const own = a?.length ? boxOf(a) : null;
+    if (own) b = b ? [Math.min(b[0], own[0]), Math.min(b[1], own[1]), Math.min(b[2], own[2]), Math.max(b[3], own[3]), Math.max(b[4], own[4]), Math.max(b[5], own[5])] : own;
+  }
+  boxes.set(item, b);
+  return b;
+}
+
+/** Whether a section box, a section or the storeys' cut takes an element away wholly (decision 498: nothing of it to select). */
+function clipped(item: RenderItem, planes: readonly THREE.Plane[]): boolean {
+  if (!planes.length) return false;
+  const b = itemBox(item);
+  return !!b && clippedAway(b, planes);
+}
+
+/**
+ * An element lit as the selection (the user's selection colour) or as the one under the cursor (their preselection colour,
+ * a little fainter); off, its own look back. Settings: app/highlight.ts.
+ */
+function highlight(group: THREE.Object3D, on: boolean, hex: string = selectionColour(), glow = 0.45) {
+  const lit = new THREE.Color(hex);
+  group.traverse((c) => {
+    // Linework has no faces to glow: its lines take the selection's colour.
+    if (typeof c.userData.linework === 'string') { (c as THREE.LineSegments).material = on ? lineworkMaterial(hex) : c.userData.linework ? lineworkMaterial(c.userData.linework) : UNSEEN_LINE; return; }
+    const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+    // Off, a glowing material gets its own glow back.
+    const own = m?.userData.emissive as { hex: number; intensity: number } | undefined;
+    if (m && 'emissive' in m) m.emissive = on ? lit : new THREE.Color(own?.hex ?? 0);
+    if (m && 'emissiveIntensity' in m) m.emissiveIntensity = on ? glow : own?.intensity ?? 0;
+  });
+}
+
+/**
+ * A module's look (a phase's, the 4D simulation's): hidden, or its faces tinted and see-through; a part (a layer) its own
+ * look or hidden; none: its own colours back. The same look as last time leaves the materials as they are (a simulation's
+ * day that changes nothing for an element costs nothing).
+ */
+function look(group: THREE.Object3D, l: Look | undefined) {
+  group.visible = !l?.hidden;
+  if (group.userData.look === l) return;
+  group.userData.look = l;
+  paint(group, l);
+}
+
+function paint(group: THREE.Object3D, l: Look | undefined) {
+  // The element's own meshes take its look; a part's group (a layer) its own, or the element's without the parts'.
+  const base = l?.parts ? { ...l, parts: undefined } : l;
+  const visit = (c: THREE.Object3D) => {
+    if (c !== group && c.userData.part) {
+      const own = partLook(l?.parts, c.userData.part as string);
+      c.visible = !own?.hidden;
+      paint(c, own ?? base);
+      return;
+    }
+    tint(c, l);
+    for (const k of c.children) visit(k);
+  };
+  visit(group);
+}
+
+function tint(c: THREE.Object3D, l: Look | undefined) {
+  const m = (c as THREE.Mesh).material as THREE.MeshStandardMaterial | undefined;
+  if (!m || !('emissive' in m)) return;
+  if (m.userData.own === undefined) m.userData.own = m.color.getHex();
+  m.color.setHex(l?.color ? new THREE.Color(l.color).getHex() : m.userData.own as number);
+  // A see-through material (glass) stays as see-through as it is, and fades further with the look.
+  // Glass letting light through (the realistic view) is drawn whole: the light comes through it, not past it.
+  const through = !!m.userData.glass && (m as THREE.MeshPhysicalMaterial).transmission > 0;
+  const opacity = (l?.opacity ?? 1) * (through ? 1 : (m.userData.opacity as number | undefined) ?? 1);
+  // Turning see-through, or back, changes the shader three.js compiled: it must be told.
+  if (m.transparent !== opacity < 1) m.needsUpdate = true;
+  m.transparent = opacity < 1;
+  m.opacity = opacity;
+  m.depthWrite = opacity >= 1;
+  // What is seen through casts no shadow (a buildable volume, a phase shown faded), nor does glass.
+  (c as THREE.Mesh).castShadow = opacity >= 1 && !m.userData.glass;
+}
+
+/** Free an object's GPU resources: geometries, materials and their textures (not the shared ones). */
+function dispose(o: THREE.Object3D) {
+  const free = (m: THREE.Material) => {
+    if (m.userData.shared) return;
+    const map = (m as THREE.MeshStandardMaterial).map;
+    if (map && !map.userData.shared) map.dispose();
+    m.dispose();
+  };
+  o.traverse((c) => {
+    const m = c as THREE.Mesh;
+    m.geometry?.dispose();
+    const mat = m.material as THREE.Material | THREE.Material[] | undefined;
+    if (Array.isArray(mat)) mat.forEach(free); else if (mat) free(mat);
+    if ((c as THREE.Light).isLight) (c as THREE.Light).dispose();
+  });
+}
+
+/** The lowest storey's elevation (0 at most): where the grid's axes lie. */
+const gridBase = (nodes: Map<string, NodeDto>) => {
+  let base = 0;
+  for (const n of nodes.values()) if (n.type === 'IfcBuildingStorey') base = Math.min(base, Number(n.props.elevation ?? 0));
+  return base;
+};
+/** A named face as the engine gives it (core.faceAt), or a body's flat face (studio.faceAt: no role, no label). */
+interface FaceDto { role?: string; label?: string; normal: number[]; outline: number[][] }
+
+/** Whether a face or pick tool takes an element of this class ('*': any). */
+const takesType = (types: string[], type: string) => types.includes('*') || types.includes(type);
+
+/** Where a ray hit: the point, and the hit triangle's normal in the world (an instance's turned by its matrix first). */
+function faceHit(hit: THREE.Intersection): FaceHit {
+  const n = hit.face ? hit.face.normal.clone() : null;
+  const inst = hit.object as THREE.InstancedMesh;
+  if (n && inst.isInstancedMesh && hit.instanceId !== undefined) { const m = new THREE.Matrix4(); inst.getMatrixAt(hit.instanceId, m); n.transformDirection(m); }
+  n?.transformDirection(hit.object.matrixWorld);
+  return { point: [hit.point.x, hit.point.y, hit.point.z], ...(n ? { normal: [n.x, n.y, n.z] } : {}) };
+}
+
+/** A face lit up: its outline filled, a hair off it towards the viewer, and drawn round. */
+function faceMesh(face: FaceDto): THREE.Object3D {
+  const n = new THREE.Vector3(face.normal[0], face.normal[1], face.normal[2]).normalize();
+  const pts = face.outline.map((p) => new THREE.Vector3(p[0], p[1], p[2]).addScaledVector(n, 0.004));
+  const seed = Math.abs(n.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+  const u = new THREE.Vector3().crossVectors(n, seed).normalize();
+  const v = new THREE.Vector3().crossVectors(n, u);
+  const flat = pts.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)));
+  const tris = THREE.ShapeUtils.triangulateShape(flat, []);
+  const geo = new THREE.BufferGeometry().setFromPoints(pts);
+  geo.setIndex(tris.flat());
+  const group = new THREE.Group();
+  group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: selectionColour(), transparent: true, opacity: 0.45, side: THREE.DoubleSide, depthWrite: false })));
+  group.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color: selectionColour() })));
+  return group;
+}
+
+/**
+ * A section's drawing laid on its cut (section3d.ts): its fills a few
+ * millimetres into the kept side, so they close the cut solids, its lines
+ * and texts just over them (inside the kept side, so the section's own
+ * clipping plane leaves them); what is seen beyond is left to the model.
+ * With `annotations`, the dimensions, levels, tags and texts too, where the
+ * drawing has them: those beside the building stand in the air on the plane.
+ * Without `cut` (the caps drawn in their materials), only those.
+ */
+function sectionOverlay(d: DrawingDto, annotations: boolean, anisotropy: number, cut = true): THREE.Group {
+  const group = new THREE.Group();
+  group.name = 'section-overlay';
+  // A developed section (jogged, curved, along an element) piece by piece, each on its own plane.
+  for (const piece of sectionPieces(d)) {
+  const f = piece.frame;
+  const basis = (lift: number) => {
+    const o = drawingPoint(f, 0, 0, lift);
+    return new THREE.Matrix4().makeBasis(new THREE.Vector3(...f.right), new THREE.Vector3(...f.up), new THREE.Vector3(...f.dir)).setPosition(o.x, o.y, o.z);
+  };
+  const fillAt = basis(0.004), lineAt = basis(0.002);
+  for (const pen of piece.pens) {
+    if (!onCut(pen.layer, annotations)) continue;
+    // With the caps in their materials, the drawing's own cut (fills, hatches, outlines) is not laid over them.
+    if (!cut && CUT_LAYERS.has(pen.layer)) continue;
+    if (pen.texts?.length) {
+      for (const t of pen.texts) { const m = textMesh(t, d.scale, f, pen.stroke, anisotropy); if (m) group.add(m); }
+      continue;
+    }
+    const fill = cssColor(pen.fill);
+    if (fill && pen.loops?.length) {
+      const shapes = evenOddShapes(pen.loops).map(({ outer, holes }) => {
+        const s = new THREE.Shape();
+        const path = (p: THREE.Path, l: number[]) => { p.moveTo(l[0], l[1]); for (let k = 2; k + 1 < l.length; k += 2) p.lineTo(l[k], l[k + 1]); p.closePath(); };
+        path(s, outer);
+        for (const h of holes) { const hp = new THREE.Path(); path(hp, h); s.holes.push(hp); }
+        return s;
+      });
+      const geo = new THREE.ShapeGeometry(shapes);
+      geo.applyMatrix4(fillAt);
+      group.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+        color: new THREE.Color(fill.hex), transparent: fill.opacity < 1, opacity: fill.opacity, side: THREE.DoubleSide,
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2,
+      })));
+    }
+    const stroke = cssColor(pen.stroke);
+    // Dashed as on paper, the whole pattern in the model's metres at the view's scale; as wide as the pen on a sheet at 100 %.
+    const segs = pen.dash && pen.dash.length >= 2 ? dashSegments(pen.segments ?? [], pen.dash, d.scale) : pen.segments ?? [];
+    if (stroke && segs.length >= 4) {
+      const pos = new Float32Array((segs.length / 2) * 3);
+      for (let k = 0; k + 1 < segs.length; k += 2) {
+        const v = new THREE.Vector3(segs[k], segs[k + 1], 0).applyMatrix4(lineAt);
+        pos.set([v.x, v.y, v.z], (k / 2) * 3);
+      }
+      const geo = new LineSegmentsGeometry().setPositions(pos);
+      const mat = new LineMaterial({ color: new THREE.Color(stroke.hex).getHex(), linewidth: penPixels(pen.width), transparent: stroke.opacity < 1, opacity: stroke.opacity });
+      const lines = new LineSegments2(geo, mat);
+      // Its width is in the screen's pixels: the material learns the screen's size as it is drawn.
+      lines.onBeforeRender = (renderer) => { renderer.getSize(mat.resolution); };
+      group.add(lines);
+    }
+  }
+  }
+  return group;
+}
+
+/** Pixels to a text's em on its canvas: sharp up close, mipmapped further off. */
+const TEXT_PX = 64;
+
+/**
+ * A drawing's text on the section's plane: a quad as large as the 2D drawing
+ * sets it (section3d.textQuad, at the view's scale), its words drawn on a
+ * canvas in the same font; facing the viewer and reading left to right from
+ * the side the section looks from (from behind, it is not drawn).
+ */
+function textMesh(t: DrawingText, scale: number | undefined, f: ViewFrameDto, color: string | null, anisotropy: number): THREE.Mesh | null {
+  if (!t.text.trim() || !(t.height > 0)) return null;
+  const canvas = document.createElement('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return null;
+  const middle = t.baseline === 'middle';
+  const setup = () => { ctx.font = textFont(t, TEXT_PX); ctx.textBaseline = middle ? 'middle' : 'alphabetic'; ctx.textAlign = 'left'; };
+  setup();
+  const m = ctx.measureText(t.text);
+  // The font's box over and under the line the text stands on (or is centred on).
+  const ascent = m.fontBoundingBoxAscent ?? TEXT_PX * (middle ? 0.6 : 0.95);
+  const descent = m.fontBoundingBoxDescent ?? TEXT_PX * (middle ? 0.6 : 0.25);
+  const pad = 2;
+  canvas.width = Math.ceil(m.width + 2 * pad);
+  canvas.height = Math.ceil(ascent + descent + 2 * pad);
+  setup();
+  ctx.fillStyle = cssColor(color)?.hex ?? '#000000';
+  ctx.fillText(t.text, pad, pad + ascent);
+  // The quad as large as the canvas (its rounding up, under a pixel, taken in), the anchor where the text stands.
+  const q = textQuad(t, scale, (canvas.width - 2 * pad) / TEXT_PX, ascent / TEXT_PX, (canvas.height - 2 * pad - ascent) / TEXT_PX, pad / TEXT_PX);
+  const pos = new Float32Array(12);
+  q.forEach((p, i) => { const w = drawingPoint(f, p.x, p.y, 0.001); pos.set([w.x, w.y, w.z], i * 3); });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]), 2));
+  geo.setIndex([0, 1, 2, 0, 2, 3]);
+  const map = new THREE.CanvasTexture(canvas);
+  map.colorSpace = THREE.SRGBColorSpace;
+  map.anisotropy = anisotropy;
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map, transparent: true, depthWrite: false, side: THREE.FrontSide,
+    polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -4,
+  }));
+  mesh.renderOrder = 2;
+  return mesh;
+}
+
+const gridsOf = (nodes: Map<string, NodeDto>) => [...nodes.values()].filter((n) => n.type === 'IfcGrid');
+
+export function Viewport3D() {
+  const host = useRef<HTMLDivElement>(null);
+  /** The 3D view this viewport shows now (a saved view's id, else "3d"), for the memory that outlives the viewport (viewState3d.ts). */
+  const keyRef = useRef('3d');
+  const scene = useRef<THREE.Scene | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  /** The camera in use (perspective or orthographic), for the grips drawn over the scene. */
+  const camRef = useRef<THREE.Camera | null>(null);
+  // Frames are drawn on demand: when the camera moves, the view resizes or the scene changes.
+  const invalidate = useRef<() => void>(() => undefined);
+  /** The project's display quality (lod.ts), read by every frame's choice of copies. */
+  const qualityRef = useRef<DisplayQuality>('balanced');
+  const items = useRef(new Map<string, { item: RenderItem; object: THREE.Group }>());
+  /** The elements drawn as instances of shared meshes (instancing.ts). */
+  const instances = useRef<InstanceLayer | null>(null);
+  /** The point clouds linked, streamed by the camera (pointClouds3d.ts). */
+  const cloudLayer = useRef<PointCloudLayer | null>(null);
+  /** The Gaussian splat clouds linked, drawn by Lapin's own renderer (splats3d.ts). */
+  const splatLayer = useRef<SplatLayer | null>(null);
+  const cloudKeyRef = useRef('[]');
+  /** The model's box (the sun's shadows are fitted in it) forgotten: the elements changed. */
+  const boxDirty = useRef<() => void>(() => undefined);
+  /** What the path tracer renders changed (the elements, their looks, the cut, the lights): its scene is built again (docs/plan-render.md, S4). */
+  const traceDirty = useRef<() => void>(() => undefined);
+  /** The model changed (not the selection): the rooms' reflection probes placed and baked again (docs/plan-render.md, S3). */
+  const probesDirty = useRef<() => void>(() => undefined);
+  const repaintTrace = useRef<() => void>(() => undefined);
+  /** The cut elements' caps, by element (a section or the section box shown). */
+  const caps = useRef(new Map<string, THREE.Group>());
+  /** The caps' meshes as the engine sent them, for the walker to collide with. */
+  const capItems = useRef<CapItem[]>([]);
+  const [capsShown, setCapsShown] = useState(0);
+  const toolId = useUi((s) => s.tool);
+  const tool = findTool(toolId);
+  // What a click does, kept current for the listeners set up once.
+  const clickRef = useRef<(hit: { nodeId: string | null; ground: Vec2 | null; mods: Mods; face?: FaceHit; part?: string }) => void>(() => undefined);
+  /** The classes a face tool works on (null: no face tool on), for the hover that lights up the face under the cursor. */
+  const faceTypes = useRef<string[] | null>(null);
+  /** The query that names the face under the cursor for the face tool on. */
+  const faceQuery = useRef('core.faceAt');
+  const clearFace = useRef<() => void>(() => undefined);
+  const [faceLabel, setFaceLabel] = useState<{ text: string; x: number; y: number } | null>(null);
+  /** The reference plane under the cursor (no tool on), drawn stronger. */
+  const [planeHover, setPlaneHover] = useState<string | null>(null);
+  const planeHoverRef = useRef<string | null>(null);
+  /** Walking: started and stopped by the walk's store (set up with the scene). */
+  const walkApi = useRef<{ start(w: WalkStart): void; stop(): void; changed(): void }>({ start: () => undefined, stop: () => undefined, changed: () => undefined });
+  /** The section the camera was last turned to, so it turns once per showing, not on every edit. */
+  const framedSection = useRef<string | null>(null);
+  const elevationRef = useRef(0);
+  /** The clipping planes: a section's shown in 3D, and the cut above the storeys shown; the renderer takes both. */
+  const sectionClip = useRef<THREE.Plane[]>([]);
+  const storeyClip = useRef<THREE.Plane[]>([]);
+  const applyClip = () => {
+    const all = [...sectionClip.current, ...storeyClip.current];
+    if (rendererRef.current) rendererRef.current.clippingPlanes = all;
+    traceDirty.current();
+    useClip3d.setState({ planes: all.map((p) => ({ normal: [p.normal.x, p.normal.y, p.normal.z], constant: p.constant })) });
+  };
+  useUi((s) => s.storeyId);
+  useSession((s) => s.nodes);
+  const quality = useSession((s) => displayQualityOf(s.nodes));
+  // The user's selection and preselection colours (View → Preferences → Display): a change lights the elements again.
+  const selColour = useHighlight((h) => h.selectColour);
+  const preColour = useHighlight((h) => h.preselectColour);
+  const preselect = useHighlight((h) => h.preselect);
+  // The element under the cursor, lit before a click (null: none, or no preselection).
+  const [hover3d, setHover3d] = useState<string | null>(null);
+  const hover3dRef = useRef<string | null>(null);
+  qualityRef.current = quality;
+  useEffect(() => { invalidate.current(); }, [quality]);
+  // While a shape is drawn on a face or a distance set on the canvas, the face's name is put away: it would cover them.
+  const faceSketching = useFaceSketch((st) => !!st.spec), directSketching = useDirect((st) => !!st.tool);
+  const sketching = faceSketching || directSketching, dragging = useAxisDrag((st) => !!st.spec);
+  const onCanvasEdit = sketching || dragging;
+  const storey = activeStorey();
+  elevationRef.current = num(storey ?? undefined, 'elevation');
+
+  useEffect(() => { clearFace.current(); setFaceLabel(null); }, [toolId]);
+  faceTypes.current = tool?.gesture?.kind === 'face' ? tool.gesture.types : null;
+  faceQuery.current = tool?.gesture?.kind === 'face' ? tool.gesture.query ?? 'core.faceAt' : 'core.faceAt';
+
+  clickRef.current = ({ nodeId, ground, mods, face, part }) => {
+    const g = tool?.gesture;
+    // A member of a group picks the group (docs/groups.md); drilling, a part its wholes first (platform/assemblies.ts).
+    if (!g) {
+      for (const h of pickHandlers) if (h(nodeId ?? null)) return;
+      const node = nodeId ? useSession.getState().nodes.get(nodeId) : undefined;
+      // A part its module selects on its own (a stair's railing, forum topic 102): owner#tag, as a grid's axis.
+      const tag = node && part ? subSelectionTag(node, part) : null;
+      pickByMods(node && pickable(node) ? (tag ? `${node.id}#${tag}` : node.id) : null, mods, currentNavStyle());
+      return;
+    }
+    // In 3D a pick-then-point tool completes with its pick alone (the tool's default for the second point).
+    if (g.kind === 'face' || g.kind === 'pick' || g.kind === 'pickThenPoint') {
+      const node = nodeId ? useSession.getState().nodes.get(nodeId) : undefined;
+      if (!node || !takesType(g.types, node.type)) { useSession.setState({ error: 'Pick an element this tool works on.' }); return; }
+      // The point where the face was clicked (a door at the height clicked on its wall), not where the ray meets the level behind it.
+      const at = face?.point?.length && face.point.length >= 2 ? { x: face.point[0], y: face.point[1] } : ground;
+      void completeTool(tool!, { points: at ? [at] : [], entity: node, face });
+      return;
+    }
+    // Tools that take points: the 3D placement host's (Place3D.tsx, snapped).
+    if (isPointGesture(g)) return;
+  };
+
+  useEffect(() => {
+    const el = host.current!;
+    // The faster graphics chip where a laptop has two (forum topic 162): a model seen close fills the screen, and the
+    // integrated chip a webview is often given by default could barely turn the view.
+    const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setClearColor(CLEAR[currentViewTheme()]);
+    rendererRef.current = renderer;
+    // The room metals and glossy faces reflect (materialLook.ts), made once.
+    reflections(renderer);
+    el.appendChild(renderer.domElement);
+    THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
+    const s = new THREE.Scene();
+    scene.current = s;
+    // How the view renders: as a drawing, medium or realistic (render3d.ts), the passes made once.
+    const realism = new Realism(renderer, s);
+    // The light fixtures, lamps and glowing materials as lights in the medium and realistic views (lights3d.ts, docs/plan-render.md S2).
+    const rig = new LightRig();
+    s.add(rig.group);
+    // The rooms' reflection probes in the medium and realistic views (probes.ts, probes3d.ts, docs/plan-render.md S3): placed
+    // on the rooms from the glossy faces drawn, baked a few faces a frame, nearest first; a weak chip gets fewer and smaller.
+    const probes = new ReflectionProbes(renderer, s, reflections(renderer));
+    const weak = (() => {
+      try {
+        const gl = renderer.getContext();
+        const info = gl.getExtension('WEBGL_debug_renderer_info');
+        return weakGpu(String(gl.getParameter(info ? info.UNMASKED_RENDERER_WEBGL : gl.RENDERER) ?? ''), renderer.capabilities.maxTextureSize);
+      } catch { return false; }
+    })();
+    // Room volumes, openings, drafted shapes and grids: aids of the screen, neither reflected nor reflecting.
+    const PROBE_SKIP = new Set(['IfcSpace', 'IfcOpeningElement', 'IfcAnnotation', 'IfcGrid']);
+    let probeTimer = 0;
+    const placeProbesNow = () => {
+      if (!probes.on) return;
+      const rooms = [];
+      const shiny: ProbeVec3[] = [];
+      for (const { item, object } of items.current.values()) {
+        if (item.type === 'IfcSpace') { const r = roomOfObject(item.nodeId, object); if (r) rooms.push(r); continue; }
+        if (object.visible && !PROBE_SKIP.has(item.type)) glossySamples(object, shiny);
+      }
+      probes.place(placeProbes(rooms, onVoxels(shiny, 0.5)));
+    };
+    const placeProbesSoon = () => {
+      clearTimeout(probeTimer);
+      probeTimer = window.setTimeout(() => { placeProbesNow(); invalidate.current(); }, 250);
+    };
+    probesDirty.current = () => { probes.patchAll(s); placeProbesSoon(); };
+    /** What a probe's capture leaves out (lines, room volumes, the grids) and the realistic sky round the probe: the restore. */
+    const prepareCapture = (at: ProbeVec3) => {
+      const hidden: THREE.Object3D[] = [];
+      const hide = (o: THREE.Object3D | undefined) => { if (o?.visible) { o.visible = false; hidden.push(o); } };
+      for (const { item, object } of items.current.values()) if (PROBE_SKIP.has(item.type)) hide(object);
+      hide(s.getObjectByName('ref-planes'));
+      hide(s.getObjectByName('ground-grid'));
+      s.traverseVisible((o) => {
+        const x = o as THREE.Object3D & { isLine?: boolean; isPoints?: boolean; isSprite?: boolean; isLineSegments2?: boolean; material?: { isLineMaterial?: boolean } };
+        if (x.isLine || x.isPoints || x.isSprite || x.isLineSegments2 || x.material?.isLineMaterial) hide(o);
+      });
+      const sky = realism.sky, shown = sky.visible, where = sky.position.clone();
+      sky.visible = realism.spec.sky;
+      sky.position.set(at[0], at[1], at[2]);
+      return () => { for (const o of hidden) o.visible = true; sky.visible = shown; sky.position.copy(where); };
+    };
+    let lightSources: LightSourceDto[] = [];
+    const lightProfiles = new Map<string, LightProfileDto>();
+    let lightsAsked = 0;
+    let lightTimer = 0;
+    const fetchLights = () => {
+      clearTimeout(lightTimer);
+      lightTimer = window.setTimeout(async () => {
+        const n = ++lightsAsked;
+        if (useRenderProfile.getState().profile === 'drawing' || useRenderProfile.getState().profile === 'diagram') { lightSources = []; rig.setProfile('drawing', []); useLightBudget.setState({ total: 0, drawn: 0, shadowed: 0 }); invalidate.current(); return; }
+        const list = await query<LightSourceDto[]>('light.sources', {}).catch(() => null);
+        if (n !== lightsAsked || !list) return;
+        for (const key of new Set(list.map((x) => x.profile).filter((k): k is string => !!k)))
+          if (!lightProfiles.has(key)) { const p = await query<LightProfileDto | null>('light.profile', { key }).catch(() => null); if (p) lightProfiles.set(key, p); }
+        if (n !== lightsAsked) return;
+        lightSources = list;
+        rig.setProfile(useRenderProfile.getState().profile, list, lightProfiles);
+        rig.markDirty();
+        probes.stale();
+        traceDirty.current();
+        invalidate.current();
+      }, 120);
+    };
+    const unlights = useSession.subscribe((st, before) => { if (st.nodes !== before.nodes) fetchLights(); });
+    const persp = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
+    persp.up.set(0, 0, 1);
+    persp.position.set(18, -22, 16);
+    const orthoCam = new THREE.OrthographicCamera(-1, 1, 1, -1, -5000, 5000);
+    orthoCam.up.set(0, 0, 1);
+    let cam: THREE.PerspectiveCamera | THREE.OrthographicCamera = persp;
+    camRef.current = cam;
+    // A wheel step held to about a notch before the orbit controls read it (zoom.ts): macOS's accelerated flicks and a 3D mouse's emulated wheel zoom in steps, not in one jump.
+    renderer.domElement.addEventListener('wheel', clampWheel, { capture: true, passive: false });
+    const controls = new OrbitControls<THREE.PerspectiveCamera | THREE.OrthographicCamera>(persp, renderer.domElement);
+    controls.target.set(4, 3, 0);
+    controls.update();
+
+    // The camera as the key plan sees and steers it.
+    const pose = (): CameraPose => poseOf(cam.position, controls.target);
+    const orthoFrustum = (distance: number) => {
+      const halfH = distance * Math.tan((persp.fov * Math.PI) / 360);
+      orthoCam.left = -halfH * persp.aspect; orthoCam.right = halfH * persp.aspect; orthoCam.top = halfH; orthoCam.bottom = -halfH;
+      orthoCam.updateProjectionMatrix();
+    };
+    const applyPose = (p: CameraPose) => {
+      const at = positionOf(p);
+      cam.position.set(at.x, at.y, at.z);
+      controls.target.set(p.target.x, p.target.y, p.target.z);
+      if (cam === orthoCam) orthoFrustum(p.distance);
+      controls.update();
+    };
+    const publish = () => {
+      const p = pose();
+      useCamera.setState({ ...p, position: { x: cam.position.x, y: cam.position.y, z: cam.position.z }, fov: (persp.fov * Math.PI) / 180, ortho: cam === orthoCam, zoom: cam === orthoCam ? orthoCam.zoom : 1, aspect: persp.aspect });
+    };
+    let flight = 0;
+    const flyTo = (goal: CameraPose, animate = true) => {
+      cancelAnimationFrame(flight);
+      if (!animate) { applyPose(goal); publish(); return; }
+      const from = pose();
+      const dAz = Math.atan2(Math.sin(goal.azimuth - from.azimuth), Math.cos(goal.azimuth - from.azimuth));
+      const t0 = performance.now();
+      const step = (now: number) => {
+        const t = Math.min(1, (now - t0) / 250), e = t * (2 - t);
+        const mix = (a: number, b: number) => a + (b - a) * e;
+        applyPose({ azimuth: from.azimuth + dAz * e, pitch: mix(from.pitch, goal.pitch), distance: mix(from.distance, goal.distance), target: { x: mix(from.target.x, goal.target.x), y: mix(from.target.y, goal.target.y), z: mix(from.target.z, goal.target.z) } });
+        publish();
+        if (t < 1) flight = requestAnimationFrame(step);
+      };
+      flight = requestAnimationFrame(step);
+    };
+    const api: CameraApi = {
+      orbitTo: (part, animate = true) => flyTo({ ...pose(), ...part }, animate),
+      lookAt: (p) => { const at = cam.position; flyTo(poseOf({ x: at.x, y: at.y, z: at.z }, p), false); },
+      moveTo: (p) => { const cur = pose(); const dx = p.x - cam.position.x, dy = p.y - cam.position.y; flyTo({ ...cur, target: { x: cur.target.x + dx, y: cur.target.y + dy, z: cur.target.z } }, false); },
+      setHeight: (z) => { const cur = pose(); flyTo({ ...cur, target: { ...cur.target, z: cur.target.z + (z - cam.position.z) } }, false); },
+      fit: (animate = true) => {
+        // The model's main body (decision 446): what stands far from it (a stray element, a far survey object) left out.
+        const own: THREE.Box3[] = [];
+        for (const { object } of live.values()) if (object.visible) { const b = new THREE.Box3().expandByObject(object); if (!b.isEmpty()) own.push(b); }
+        // The instanced elements (a large model's): one box; a point cloud only where there is no model (an airborne scan is a district), as plans do.
+        const shared = new THREE.Box3();
+        layer.expand(shared, useLooks.getState().looks);
+        if (!shared.isEmpty()) own.push(shared);
+        const cloudBox = cloudLayer.current?.box();
+        if (!own.length && cloudBox && !cloudBox.isEmpty()) own.push(cloudBox.clone());
+        const core = coreBounds(own.map((b) => [b.min.x, b.min.y, b.max.x, b.max.y] as Bounds));
+        const box = new THREE.Box3();
+        if (core) for (const b of own) { const mx = (b.min.x + b.max.x) / 2, my = (b.min.y + b.max.y) / 2; if (mx >= core.bounds[0] && mx <= core.bounds[2] && my >= core.bounds[1] && my <= core.bounds[3]) box.union(b); }
+        if (box.isEmpty()) box.set(new THREE.Vector3(-5, -5, 0), new THREE.Vector3(5, 5, 3));
+        const centre = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+        const radius = Math.max(size.length() / 2, 1);
+        const distance = (radius / Math.sin((persp.fov * Math.PI) / 360)) * 1.05;
+        flyTo({ ...pose(), target: { x: centre.x, y: centre.y, z: centre.z }, distance }, animate);
+      },
+      setOrtho: (on) => {
+        const p = pose();
+        if (cam === orthoCam && !on) { p.distance /= orthoCam.zoom; orthoCam.zoom = 1; }
+        cam = on ? orthoCam : persp;
+        camRef.current = cam;
+        controls.object = cam;
+        applyPose(p);
+        publish();
+        invalidate.current();
+      },
+      screenOf: (p) => {
+        cam.updateMatrixWorld();
+        const v = new THREE.Vector3(p.x, p.y, p.z).project(cam);
+        if (v.z > 1 || v.z < -1) return null;
+        const r = renderer.domElement.getBoundingClientRect();
+        return { x: r.left + ((v.x + 1) / 2) * r.width, y: r.top + ((1 - v.y) / 2) * r.height };
+      },
+      boxOf: (ids) => {
+        const box = new THREE.Box3();
+        for (const id of ids) { const o = live.get(id)?.object; if (o?.visible) box.expandByObject(o); }
+        return box.isEmpty() ? null : { min: { x: box.min.x, y: box.min.y, z: box.min.z }, max: { x: box.max.x, y: box.max.y, z: box.max.z } };
+      },
+      // The view drawn now, on its own canvas (a video's frames are copied from it right away).
+      canvas: () => {
+        const refPlanes = s.getObjectByName('ref-planes');
+        const shown = refPlanes?.visible ?? false;
+        if (refPlanes) refPlanes.visible = false;
+        try { realism.render(cam, controls.target.distanceTo(cam.position)); } finally { if (refPlanes) refPlanes.visible = shown; }
+        return renderer.domElement;
+      },
+      // Drawn once more right before it is read: the drawing buffer is not kept between frames.
+      snapshot: (maxWidth = 1280) => {
+        try {
+          // The reference planes are for the screen: a picture (a remark's viewpoint) goes without them.
+          const refPlanes = s.getObjectByName('ref-planes');
+          const shown = refPlanes?.visible ?? false;
+          if (refPlanes) refPlanes.visible = false;
+          try { realism.render(cam, controls.target.distanceTo(cam.position)); } finally { if (refPlanes) refPlanes.visible = shown; }
+          const src = renderer.domElement;
+          const scale = Math.min(1, maxWidth / Math.max(src.width, 1));
+          if (scale >= 1) return src.toDataURL('image/png');
+          const c = document.createElement('canvas');
+          c.width = Math.max(1, Math.round(src.width * scale));
+          c.height = Math.max(1, Math.round(src.height * scale));
+          c.getContext('2d')?.drawImage(src, 0, 0, c.width, c.height);
+          return c.toDataURL('image/png');
+        } catch { return null; }
+      },
+    };
+    useCamera.setState({ api });
+    // Back from another tab: the camera this 3D view had (forum topic 62); a camera moved is kept as it moves.
+    const kept = recall3d(keyRef.current);
+    if (kept?.pose) { api.setOrtho(Boolean(kept.ortho)); api.orbitTo(kept.pose, false); }
+    // A walk's eye is not the camera the tab keeps: when the walk ends the camera there was comes back (and is what a returning viewport recalls).
+    const unkeep = useCamera.subscribe((c) => { if (useWalk.getState().start) return; remember3d(keyRef.current, { pose: { azimuth: c.azimuth, pitch: c.pitch, distance: c.distance, target: c.target }, ortho: c.ortho }); });
+    s.add(new THREE.HemisphereLight(0xffffff, 0xd6cebf, 2.2));
+    const hemi = s.children[s.children.length - 1] as THREE.HemisphereLight;
+    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
+    sun.position.set(20, -30, 40);
+    s.add(sun);
+    s.add(sun.target);
+    // A module's sun (the sun study): aimed from its direction over the model, casting shadows; none: the fixed light back.
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFShadowMap; // three folded PCFSoftShadowMap into it (0.182 already fell back to it with a warning)
+    // The ground the shadows fall on where there is no terrain: invisible but for them.
+    const shadowOnly = new THREE.ShadowMaterial({ opacity: 0.28 });
+    // The realistic view's ground where the model has no terrain: a dry meadow's colour, rough, taking the shadows.
+    const meadow = new THREE.MeshStandardMaterial({ color: 0xa3ab86, roughness: 1, metalness: 0 });
+    const shadowGround = new THREE.Mesh<THREE.PlaneGeometry, THREE.Material>(new THREE.PlaneGeometry(4000, 4000), shadowOnly);
+    shadowGround.receiveShadow = true;
+    shadowGround.visible = false;
+    s.add(shadowGround);
+    // The model's box the sun's shadows are fitted to, found again only when the elements change.
+    let modelBox: THREE.Box3 | null = null;
+    let terrain = false;
+    boxDirty.current = () => { modelBox = null; };
+    const boxOfModel = () => {
+      if (modelBox) return modelBox;
+      const box = new THREE.Box3();
+      terrain = false;
+      for (const { item, object } of items.current.values()) {
+        if (object.visible) box.expandByObject(object);
+        if (item.type === 'IfcGeographicElement') terrain = true;
+      }
+      instances.current?.expand(box, useLooks.getState().looks);
+      if (box.isEmpty()) box.set(new THREE.Vector3(-10, -10, 0), new THREE.Vector3(10, 10, 10));
+      return (modelBox = box);
+    };
+    // The shadows fitted to what the camera looks at (a site's buildings near, not all of it at once), no further than the model.
+    let fitted = '';
+    // The ground: the realistic view's meadow where there is no terrain (the grid put away), else only the sun's shadows.
+    const placeGround = () => {
+      const spec = realism.spec;
+      boxOfModel();
+      const dir = useSunlight.getState().dir;
+      const meadowOn = spec.ground && !terrain;
+      shadowGround.material = meadowOn ? meadow : shadowOnly;
+      shadowGround.visible = meadowOn || (!!dir && dir[2] > 0.005);
+      // The meadow 3 cm under the ground floor's slabs (2 mm z-fought with a floor's top seen from inside: it showed over the parquet).
+      shadowGround.position.z = meadowOn ? -0.03 : elevationRef.current - 0.002;
+      const grid = s.getObjectByName('ground-grid');
+      if (grid) grid.visible = !spec.ground;
+    };
+    const fitShadow = () => {
+      placeGround();
+      if (!sun.castShadow) return;
+      const dir = useSunlight.getState().dir;
+      if (!dir) return;
+      const box = boxOfModel();
+      const whole = box.getBoundingSphere(new THREE.Sphere());
+      const near = Math.max(30, controls.target.distanceTo(cam.position) * 1.6);
+      const centre = whole.radius <= near ? whole.center.clone() : box.clampPoint(controls.target, new THREE.Vector3());
+      const radius = Math.max(Math.min(whole.radius, near), 5);
+      const key = `${centre.x.toFixed(1)},${centre.y.toFixed(1)},${centre.z.toFixed(1)},${radius.toFixed(1)},${dir.join(',')}`;
+      if (key === fitted) return;
+      fitted = key;
+      sun.target.position.copy(centre);
+      sun.position.set(centre.x + dir[0] * radius * 2, centre.y + dir[1] * radius * 2, centre.z + dir[2] * radius * 2);
+      const c = sun.shadow.camera;
+      c.left = -radius; c.right = radius; c.top = radius; c.bottom = -radius; c.near = 0.1; c.far = radius * 4;
+      c.updateProjectionMatrix();
+    };
+    const aimSun = () => {
+      const { dir } = useSunlight.getState();
+      const spec = realism.spec;
+      // After sunset (medium and realistic): the exposure opens, the sky's light fades, the lamps light the rooms (render3d.ts, nightOf).
+      const night = dir ? nightOf((Math.asin(Math.max(-1, Math.min(1, dir[2]))) * 180) / Math.PI) : 0;
+      realism.setNight(night);
+      realism.setSun(dir);
+      probes.stale();
+      placeGround();
+      fitted = '';
+      // The diagram's light is neutral and even: a white fill from every side (a face turned from the sun is about three quarters as bright as a lit one), the sun a lesser share.
+      hemi.color.setHex(0xffffff); hemi.groundColor.setHex(spec.diagram ? 0xffffff : 0xd6cebf);
+      if (!dir) {
+        sun.castShadow = false; sun.intensity = spec.diagram ? 0.9 : 1.6; hemi.intensity = spec.diagram ? 2.6 : spec.skyLight ? 1.2 : 2.2;
+        sun.color.set(0xffffff);
+        sun.position.set(20, -30, 40); sun.target.position.set(0, 0, 0);
+        invalidate.current();
+        return;
+      }
+      const up = dir[2] > 0.005;
+      const altitude = (Math.asin(Math.max(-1, Math.min(1, dir[2]))) * 180) / Math.PI;
+      // The drawing keeps its even light under the sun; the others take most of theirs from the sky (render3d.ts).
+      sun.intensity = up ? (spec.diagram ? 0.9 : spec.skyLight ? 3.2 : 2.6) : 0;
+      hemi.intensity = spec.diagram ? 2.6 : spec.skyLight ? (up ? 0.25 : 0.4) : up ? 1.1 : 0.6;
+      // The night's sky light: what is left of it under the opened exposure, a faint glow (the drawing keeps its even light).
+      if (realism.night > 0) hemi.intensity *= (1 - realism.night) + (realism.night * 0.04) / realism.gain;
+      // The diagram's sun is white: a card model under a daylight lamp, not a sunset.
+      if (spec.diagram) sun.color.set(0xffffff); else sunColour(altitude, sun.color);
+      sun.castShadow = up;
+      if (sun.shadow.mapSize.x !== spec.shadowMap) {
+        sun.shadow.mapSize.set(spec.shadowMap, spec.shadowMap);
+        sun.shadow.map?.dispose();
+        sun.shadow.map = null;
+      }
+      sun.shadow.bias = -0.0005;
+      sun.shadow.normalBias = 0.02;
+      fitShadow();
+      traceDirty.current();
+      invalidate.current();
+    };
+    // A profile chosen: its passes, glass letting light through or not, the sun's light and shadows again.
+    const applyProfile = () => {
+      const { profile } = useRenderProfile.getState();
+      realism.setProfile(profile);
+      probes.configure(probeBudget(profile, weak));
+      placeProbesSoon();
+      glassThrough(s, realism.spec.glass);
+      // The roughness and occlusion maps in the medium and realistic views; the drawing keeps its flat look (docs/plan-render.md, S1).
+      surfaceMaps(s, profile === 'medium' || profile === 'realistic');
+      flatTextures(s, profile === 'diagram');
+      // The diagram's light background and light edges (viewport/diagram.ts); the other displays keep the theme's.
+      rendererRef.current?.setClearColor(profile === 'diagram' ? DIAGRAM_BACKGROUND : CLEAR[currentViewTheme()]);
+      EDGES.color.setHex(profile === 'diagram' ? DIAGRAM_EDGES : EDGES_COLOUR);
+      invalidate.current();
+      aimSun();
+      fetchLights();
+      traceDirty.current();
+    };
+    const unprofile = useRenderProfile.subscribe(applyProfile);
+    const unlook = useCameraLook.subscribe(() => { realism.applyLook(); repaintTrace.current(); invalidate.current(); });
+    const unsunlight = useSunlight.subscribe(aimSun);
+    applyProfile();
+    s.add(groundGrid(currentViewTheme(), elevationRef.current));
+    const layer = new InstanceLayer(EDGES);
+    s.add(layer.group);
+    instances.current = layer;
+    // The point clouds linked (docs/point-clouds.md): their tiles streamed by the camera every frame.
+    const clouds = new PointCloudLayer({
+      status: (id) => query('pointcloud.status', { id }),
+      hierarchy: (id) => query<Hierarchy>('pointcloud.hierarchy', { id }),
+      tiles: (id, nodes) => engine.call<Tile[]>('pointcloud.tiles', { id, nodes }, { timeoutMs: 60_000 }),
+    }, () => invalidate.current());
+    clouds.onStatus = (id, st) => setCloudStatus(id, st);
+    s.add(clouds.group);
+    // The snaps in 3D find the clouds' points through the scene (scene3d.ts, cloudPointsNear).
+    s.userData.pointClouds = clouds;
+    cloudLayer.current = clouds;
+    clouds.sync(JSON.parse(cloudKeyRef.current));
+    // Gaussian splats (docs/plan-gaussian-splats.md): the splat links drawn as splats, their Gaussians asked for page by page.
+    const splats = new SplatLayer({
+      status: (id) => query('pointcloud.status', { id }),
+      page: (id, start, budget, sh, shBytes) => engine.call<SplatPage>('pointcloud.splats', { id, start, budget, sh, shBytes }, { timeoutMs: 120_000 }),
+    }, () => invalidate.current(), renderer.capabilities.maxTextureSize);
+    splats.onDrawn = (id, n) => setSplatsDrawn(id, n);
+    s.add(splats.group);
+    splatLayer.current = splats;
+    splats.sync(JSON.parse(cloudKeyRef.current));
+
+    // Each frame draws every heavy part's copy its distance chooses (lod.ts); the instances' choice, at most every
+    // LOD_EVERY ms while the camera moves (a pass goes through every instance), and once more when it stops.
+    const lodCamera = (): LodCamera => cam === orthoCam
+      ? { kind: 'ortho', metresHigh: (orthoCam.top - orthoCam.bottom) / orthoCam.zoom, heightPx: renderer.domElement.clientHeight }
+      : { kind: 'perspective', eye: [persp.position.x, persp.position.y, persp.position.z], fovDeg: persp.fov, heightPx: renderer.domElement.clientHeight };
+    let lastInstanceLod = 0;
+    let trailing = 0;
+    const relevel = () => {
+      const c = lodCamera();
+      const q = qualityRef.current;
+      for (const { object } of items.current.values()) {
+        const sets = object.userData.lods as LodSet[] | undefined;
+        if (!sets) continue;
+        for (const set of sets) {
+          const k = levelFor(set.errors, pixelsPerMetre(c, set.centre, set.radius), q);
+          set.levels.forEach((g, i) => { g.visible = i === k; });
+        }
+      }
+      if (!layer.hasCopies()) return;
+      const now = performance.now();
+      if (now - lastInstanceLod >= LOD_EVERY) { lastInstanceLod = now; layer.relevel(c, q); }
+      else if (!trailing) trailing = window.setTimeout(() => { trailing = 0; invalidate.current(); }, LOD_EVERY);
+    };
+    let frame = 0;
+    // The lights drawn this frame (the budget, from the eye), their fixtures' own bodies casting no shadow over them.
+    const placeLights = () => {
+      if (!rig.active) return;
+      const shown = lightSources.filter((x) => items.current.get(x.id)?.object.visible !== false);
+      for (const x of shown) items.current.get(x.id)?.object.traverse((o) => { if (o.castShadow) o.castShadow = false; });
+      const c = rig.update(shown, lightProfiles, [cam.position.x, cam.position.y, cam.position.z], [controls.target.x, controls.target.y, controls.target.z]);
+      const b = useLightBudget.getState();
+      if (b.total !== c.total || b.drawn !== c.drawn || b.shadowed !== c.shadowed) useLightBudget.setState({ total: c.total, drawn: c.drawn, shadowed: c.shadowed });
+    };
+    // ─── Rendering: the path tracer (docs/plan-render.md, S4; pathTrace.ts, pathTraceView.ts, renderMode.ts) ───
+    // Built from what this view draws now; refines while the camera rests, starts over when it moves, the live view
+    // shown until its first sample. Loaded the first time Render is pressed.
+    let tracer: PathTraceView | null = null;
+    let tracerLoad: Promise<void> | null = null;
+    let tracerScene: THREE.Scene | null = null;
+    const traceMaterials = new TraceMaterials();
+    let traceDirtyAt = 0;
+    let traceKey = '';
+    let traceT0 = performance.now();
+    let traceShownAt = 0;
+    let presented = -1;
+    let stillBusy = false;
+    let stillCancel = false;
+    // Room volumes, openings, drafted shapes and grids are the screen's aids, not what a photograph shows.
+    const UNTRACED = new Set(['IfcSpace', 'IfcOpeningElement', 'IfcAnnotation', 'IfcGrid']);
+    const plainGround = new THREE.MeshStandardMaterial({ color: CLEAR[currentViewTheme()], roughness: 1, metalness: 0 });
+    const traceInput = (): TraceInput => {
+      const roots: THREE.Object3D[] = [];
+      for (const { item, object } of items.current.values()) if (object.visible && !UNTRACED.has(item.type)) roots.push(object);
+      for (const g of caps.current.values()) if (g.visible) roots.push(g);
+      const bars = s.getObjectByName(REBAR_GROUP);
+      if (bars?.visible) roots.push(bars);
+      boxOfModel();
+      const spec = realism.spec;
+      return {
+        roots,
+        instances: layer.traceInstances(useLooks.getState().looks),
+        planes: renderer.clippingPlanes,
+        lights: lightSources.filter((x) => items.current.get(x.id)?.object.visible !== false),
+        profiles: lightProfiles,
+        ground: terrain ? null : spec.ground ? { z: 0, material: meadow } : { z: elevationRef.current, material: plainGround },
+      };
+    };
+    const traceSky = (): TraceSky => {
+      const t = realism.traceSky();
+      const towards = sun.position.clone().sub(sun.target.position).normalize();
+      const up = sun.intensity > 0 && towards.z > 0.005;
+      return { ...t, backdropColour: new THREE.Color(CLEAR[currentViewTheme()]), sun: up ? { dir: towards, light: sun.color.clone().multiplyScalar(sun.intensity) } : null };
+    };
+    const traceLook = (): TraceLook => {
+      const st = useRenderSettings.getState(), look = useCameraLook.getState();
+      const wb = st.wb === 'view' ? look.wb : st.wb;
+      const spec = realism.spec;
+      return { exposure: exposureFactor(spec.exposure, realism.gain, st.ev ?? look.ev), gains: whiteBalanceGains(whiteBalanceKelvin(wb, realism.night)), toneMapping: spec.toneMapping };
+    };
+    const dofOf = () => { const st = useRenderSettings.getState(); return st.dof ? { fStop: st.fStop, focus: st.focus } : null; };
+    const disposeOwned = (sc: THREE.Scene | null) => sc?.traverse((o) => { const g = (o as THREE.Mesh).geometry; if (g?.userData.traceOwned) g.dispose(); });
+    /** A short key of what a built scene holds, so a change that leaves it the same (a selection) does not start the picture over. */
+    const keyOf = (sc: THREE.Scene) => {
+      let h = 0;
+      const add = (t: string) => { for (let i = 0; i < t.length; i++) h = (Math.imul(h, 31) + t.charCodeAt(i)) | 0; };
+      for (const o of sc.children) {
+        const m = o as THREE.Mesh;
+        if (m.isMesh) add(`${m.geometry.uuid}${Array.isArray(m.material) ? m.material.map((x) => x.uuid).join() : m.material.uuid}${m.matrix.elements.join()}`);
+        else if ((o as THREE.Light).isLight) add(`${o.userData.source}${(o as THREE.Light).intensity}${o.position.toArray().join()}${(o as THREE.Light).color.getHex()}`);
+      }
+      return `${sc.children.length}:${h}`;
+    };
+    const rebuildTrace = () => {
+      if (!tracer) return;
+      const t0 = performance.now();
+      const { scene: next, stats } = buildTraceScene(traceInput(), traceMaterials);
+      const key = keyOf(next);
+      tracer.setSky(traceSky());
+      if (tracerScene && key === traceKey) { disposeOwned(next); return; }
+      const bvh = tracer.setScene(next, cam);
+      disposeOwned(tracerScene);
+      tracerScene = next;
+      traceKey = key;
+      traceT0 = performance.now();
+      presented = -1;
+      useRenderMode.setState({ stats, buildMs: Math.round(performance.now() - t0), phase: 'tracing' });
+      if (host.current) { host.current.dataset.traceTriangles = String(stats.triangles); host.current.dataset.traceBvhMs = String(Math.round(bvh)); }
+    };
+    traceDirty.current = () => { if (useRenderMode.getState().on) { traceDirtyAt = performance.now(); invalidate.current(); } };
+    /** One frame of the render mode; false when the live view is to be drawn instead (moving, building, before the first sample). */
+    const traceFrame = (): boolean => {
+      const mode = useRenderMode.getState();
+      if (!mode.on) return false;
+      if (stillBusy) return true;
+      if (realism.profile === 'drawing' || realism.profile === 'diagram') { setRendering(false); return false; }
+      if (!tracer) {
+        tracerLoad ??= import('./pathTraceView').then(({ PathTraceView }) => {
+          tracer = new PathTraceView(renderer);
+          traceDirtyAt = 1;
+          void import('./oidn').then((m) => m.oidnAvailable()).then((ok) => useRenderApi.setState({ denoiser: ok ? 'oidn' : 'shader' }));
+          useRenderApi.setState({ api: renderApi });
+          invalidate.current();
+        }).catch((e: unknown) => { useRenderMode.setState({ on: false, phase: 'off', error: e instanceof Error ? e.message : String(e) }); });
+        return false;
+      }
+      const now = performance.now();
+      if (traceDirtyAt) {
+        // A moment after the last change (an edit dragged changes the model every frame).
+        if (tracerScene && now - traceDirtyAt < 250) { window.setTimeout(() => invalidate.current(), 260); return false; }
+        traceDirtyAt = 0;
+        useRenderMode.setState({ phase: 'building' });
+        rebuildTrace();
+      }
+      if (!tracerScene) return false;
+      const moved = tracer.syncCamera(cam, dofOf());
+      if (moved) { tracer.reset(); traceT0 = now; presented = -1; }
+      const st = useRenderSettings.getState();
+      const seconds = (now - traceT0) / 1000;
+      const samples = tracer.samples;
+      const done = finished(st, samples, seconds);
+      if (!moved && !done) tracer.step();
+      const publish = (force = false) => {
+        if (!force && now - traceShownAt < 250) return;
+        traceShownAt = now;
+        useRenderMode.setState({ phase: tracer!.compiling ? 'loading' : done ? 'done' : 'tracing', samples: Math.floor(tracer!.samples), seconds: done ? useRenderMode.getState().seconds : seconds });
+        if (host.current) host.current.dataset.traceSamples = String(Math.floor(tracer!.samples));
+      };
+      if (!done) invalidate.current();
+      if (tracer.samples < 1) { publish(); return false; }
+      const whole = Math.floor(tracer.samples);
+      if (whole !== presented || done) {
+        if (whole !== presented) tracer.present(traceLook(), st.denoise);
+        presented = whole;
+      }
+      publish(done);
+      return true;
+    };
+    const repaint = () => { presented = -1; invalidate.current(); };
+    repaintTrace.current = repaint;
+    /** The still image (the dialog's Save image): rendered at its size, denoised, written to a PNG and saved. */
+    const saveImage = async (): Promise<string | null> => {
+      if (!useRenderMode.getState().on) setRendering(true);
+      invalidate.current();
+      // The tracer loaded and its scene built (the first time Render is pressed it compiles its shaders).
+      for (let i = 0; i < 600 && (!tracer || !tracerScene || traceDirtyAt || tracer.compiling); i++) await new Promise((r) => setTimeout(r, 100));
+      const t = tracer;
+      if (!t || !tracerScene) return null;
+      const st = useRenderSettings.getState();
+      const dpr = renderer.getPixelRatio();
+      const view = { width: Math.round(el.clientWidth * dpr), height: Math.round(el.clientHeight * dpr) };
+      let size = resolutionOf(st.resolution, view, { width: st.width, height: st.height });
+      const max = Math.min(8192, renderer.capabilities.maxTextureSize);
+      if (size.width > max || size.height > max) { const k = max / Math.max(size.width, size.height); size = { width: Math.floor(size.width * k), height: Math.floor(size.height * k) }; }
+      const target = t.pt.target as THREE.WebGLRenderTarget;
+      const reuse = target.width === size.width && target.height === size.height && finished(st, t.samples, (performance.now() - traceT0) / 1000);
+      stillBusy = true;
+      stillCancel = false;
+      controls.enabled = false;
+      useRenderMode.setState({ phase: 'still', still: { ...size, progress: 0 } });
+      try {
+        if (!reuse) {
+          t.setSize(size);
+          t.setTiles(Math.max(2, Math.ceil(Math.sqrt((size.width * size.height) / 500_000))));
+          t.syncCamera(cam, dofOf(), size.width / size.height);
+          t.reset();
+          const t0 = performance.now();
+          await new Promise<void>((resolve, reject) => {
+            const tick = () => {
+              if (stillCancel) { reject(new Error('cancelled')); return; }
+              // One tile a frame: the GPU's work is not the script's time, and piling tiles into one frame can outlast the
+              // operating system's patience with the GPU (the context is lost).
+              t.step();
+              const secs = (performance.now() - t0) / 1000;
+              useRenderMode.setState({ still: { ...size, progress: progressOf(st, t.samples, secs) }, samples: Math.floor(t.samples), seconds: secs });
+              if (t.samples >= 1) t.present(traceLook(), false);
+              if (finished(st, t.samples, secs)) resolve(); else requestAnimationFrame(tick);
+            };
+            requestAnimationFrame(tick);
+          });
+        }
+        useRenderMode.setState({ phase: 'denoising' });
+        await new Promise((r) => requestAnimationFrame(r));
+        const color = st.denoise ? await denoiseElsewhere(t) : undefined;
+        const rt = new THREE.WebGLRenderTarget(size.width, size.height);
+        t.present(traceLook(), st.denoise && !color, rt, color);
+        const px = new Uint8Array(size.width * size.height * 4);
+        renderer.readRenderTargetPixels(rt, 0, 0, size.width, size.height, px);
+        rt.dispose();
+        color?.dispose();
+        const canvas = document.createElement('canvas');
+        canvas.width = size.width; canvas.height = size.height;
+        const ctx = canvas.getContext('2d')!;
+        const img = ctx.createImageData(size.width, size.height);
+        const row = size.width * 4;
+        for (let y = 0; y < size.height; y++) img.data.set(px.subarray((size.height - 1 - y) * row, (size.height - y) * row), y * row);
+        ctx.putImageData(img, 0, 0);
+        const blob = await new Promise<Blob | null>((r) => canvas.toBlob(r, 'image/png'));
+        if (!blob) return null;
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        lastStill = bytes;
+        if (host.current) host.current.dataset.stillBytes = String(bytes.length);
+        if (stillToMemory) return 'memory';
+        return await saveFile(bytes, `${safeFileName(`${projectTitle(useSession.getState().doc?.path)} render`)}.png`, 'image/png');
+      } catch (e) {
+        if (e instanceof Error && e.message === 'cancelled') return null;
+        throw e;
+      } finally {
+        if (!reuse) { t.setSize(null); t.setTiles(2); t.syncCamera(cam, dofOf()); t.reset(); traceT0 = performance.now(); }
+        stillBusy = false;
+        controls.enabled = true;
+        presented = -1;
+        useRenderMode.setState({ phase: 'tracing', still: null });
+        invalidate.current();
+      }
+    };
+    // The guide's scenes (scripts/user-docs) take the still without a save dialog.
+    let lastStill: Uint8Array | null = null;
+    let stillToMemory = false;
+    const renderApi = {
+      saveImage,
+      cancel: () => { stillCancel = true; },
+      still: async () => { stillToMemory = true; try { await saveImage(); return lastStill; } finally { stillToMemory = false; } },
+    };
+    /** Intel Open Image Denoise beside the engine (the desktop's): the light, albedo and normals sent, the light back; undefined where there is none. */
+    const denoiseElsewhere = async (t: PathTraceView): Promise<THREE.Texture | undefined> => {
+      if (useRenderApi.getState().denoiser !== 'oidn') return undefined;
+      try {
+        const { oidnDenoise } = await import('./oidn');
+        return await oidnDenoise(t.readForDenoise());
+      } catch { return undefined; }
+    };
+    const unrender = useRenderMode.subscribe((st, before) => {
+      if (st.on !== before.on) { if (st.on) { traceDirtyAt = 1; presented = -1; } invalidate.current(); }
+    });
+    const unrenderSettings = useRenderSettings.subscribe((st, before) => {
+      // The depth of field changes the picture (it starts over); the rest only how it is shown or when it is done.
+      if (st.dof !== before.dof || st.fStop !== before.fStop || st.focus !== before.focus) { tracer?.reset(); traceT0 = performance.now(); }
+      repaint();
+    });
+    const draw = () => {
+      relevel(); clouds.update(cam, lodCamera(), qualityRef.current, engineInBrowser); splats.update(cam, renderer, qualityRef.current, engineInBrowser); fitShadow(); placeLights();
+      // A few faces of the rooms' probes, before the frame that reads them (not while the path tracer draws).
+      const eye = (cam as THREE.PerspectiveCamera).isPerspectiveCamera ? cam.position : controls.target;
+      const baking = probes.on && !useRenderMode.getState().on && probes.step([eye.x, eye.y, eye.z], prepareCapture);
+      if (!traceFrame()) realism.render(cam, controls.target.distanceTo(cam.position));
+      if (host.current) {
+        host.current.dataset.cloudPoints = String(clouds.drawn());
+        host.current.dataset.splats = String(splats.drawn());
+        host.current.dataset.splatSh = String(splats.shDrawn());
+        const p = probes.stats();
+        host.current.dataset.probes = `${p.baked}/${p.slots}/${p.probes}/${p.waiting}`;
+      }
+      if (baking) invalidate.current();
+    };
+    invalidate.current = () => {
+      if (!frame) frame = requestAnimationFrame(() => { frame = 0; draw(); });
+    };
+    controls.addEventListener('change', invalidate.current);
+    controls.addEventListener('change', publish);
+    // A material's image arrives after its mesh: draw again then.
+    const unlisten = whenImagesLoad(() => invalidate.current());
+    const resize = () => {
+      const { clientWidth: w, clientHeight: h } = el;
+      renderer.setSize(w, h);
+      realism.resize(w, h);
+      persp.aspect = w / Math.max(h, 1);
+      persp.updateProjectionMatrix();
+      orthoFrustum(pose().distance);
+      // setSize clears the canvas: draw in this same callback (it runs before the paint), so a divider drag never shows a blank frame.
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
+      draw();
+    };
+    const ro = new ResizeObserver(resize);
+    ro.observe(el);
+    resize();
+    // The window moved to a screen of another density (a Retina display and a 1× one): drawn at that one's, not blurred or oversampled.
+    let dpr: MediaQueryList | null = null;
+    const onDensity = () => {
+      renderer.setPixelRatio(window.devicePixelRatio);
+      resize();
+      watchDensity();
+    };
+    const watchDensity = () => {
+      dpr?.removeEventListener('change', onDensity);
+      dpr = window.matchMedia?.(`(resolution: ${window.devicePixelRatio}dppx)`) ?? null;
+      dpr?.addEventListener('change', onDensity);
+    };
+    watchDensity();
+    publish();
+    const live = items.current;
+
+    // A click (not a drag): the element under it, and the point on the active storey's plane.
+    const ray = new THREE.Raycaster();
+    // What the ray meets first among the elements shown (decision 498: not those hidden, nor their hidden layers, nor what a
+    // section box, a section or the storeys' cut takes away).
+    const pickAt = () => {
+      const meshes: THREE.Object3D[] = [];
+      for (const { object } of live.values()) if (object.visible) meshes.push(object);
+      meshes.push(...layer.pickables());
+      // The reference planes' quads pick as elements (a click selects the plane) while no tool is on.
+      const refPlanes = s.getObjectByName('ref-planes');
+      if (refPlanes?.visible && !useUi.getState().tool) for (const c of refPlanes.children) if (c.userData.refPlane) meshes.push(c);
+      // The openings' voids pick as their openings (View → Opening voids, decision 289), while no tool is on.
+      const voids = s.getObjectByName(VOIDS_GROUP);
+      if (voids && !useUi.getState().tool) for (const c of voids.children) if (c.userData.openingVoid) meshes.push(c);
+      const planes = renderer.clippingPlanes ?? [];
+      // Lines are met within a few pixels of the cursor, as far off as the camera looks.
+      ray.params.Line = { threshold: lineThreshold(cam, ray) };
+      return ray.intersectObjects(meshes, true).find((h) => nodeOfHit(h) && seenHit(h, planes));
+    };
+    /** The element a hit is on: its own mesh's, or the instance's. */
+    const nodeOfHit = (h: THREE.Intersection | undefined) => (h ? (h.object.userData.nodeId as string | undefined) ?? layer.nodeOf(h) : undefined);
+    let down: { x: number; y: number } | null = null;
+    const onDown = (e: PointerEvent) => { down = { x: e.clientX, y: e.clientY }; };
+    const onUp = (e: PointerEvent) => {
+      const start = down;
+      down = null;
+      if (!start || e.button !== 0 || Math.hypot(e.clientX - start.x, e.clientY - start.y) > 4) return;
+      const r = renderer.domElement.getBoundingClientRect();
+      const ndc = new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+      ray.setFromCamera(ndc, cam);
+      const hit = pickAt();
+      // The Render dialog's focus picked: the distance to what was clicked, along the camera's axis; nothing selected.
+      if (useRenderMode.getState().pickingFocus) {
+        const along = (d: number) => d * ray.ray.direction.dot(new THREE.Vector3(0, 0, -1).applyQuaternion(cam.quaternion));
+        const d = tracer?.distanceAt(ndc) ?? (hit ? along(hit.distance) : null);
+        useRenderMode.setState({ pickingFocus: false });
+        if (d != null && d > 0) setRenderSettings({ dof: true, focus: Math.round(d * 100) / 100 });
+        return;
+      }
+      const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -elevationRef.current);
+      const g = ray.ray.intersectPlane(plane, new THREE.Vector3());
+      clickRef.current({
+        nodeId: nodeOfHit(hit) ?? null,
+        ground: g ? { x: Math.round(g.x * 20) / 20, y: Math.round(g.y * 20) / 20 } : null,
+        mods: modsOf(e),
+        face: hit ? faceHit(hit) : undefined,
+        part: partOfHit(hit),
+      });
+    };
+    /** The key of the element's part a hit is on (meshOf puts each keyed part in a group of its own). */
+    const partOfHit = (h: THREE.Intersection | undefined): string | undefined => {
+      for (let o: THREE.Object3D | null = h?.object ?? null; o; o = o.parent) if (typeof o.userData.part === 'string') return o.userData.part as string;
+      return undefined;
+    };
+    // A face tool: the face under the cursor, as the engine names it, lit up with its name beside the cursor.
+    const faceGroup = new THREE.Group();
+    faceGroup.name = 'face-hover';
+    s.add(faceGroup);
+    let hoverFrame = 0;
+    let hoverKey = '';
+    // Each face asked for is numbered: only the latest answer is shown, and none once the view is gone (-1).
+    let faceAsk = 0;
+    const showFace = (face: FaceDto | null) => {
+      for (const c of [...faceGroup.children]) { faceGroup.remove(c); dispose(c); }
+      if (face) faceGroup.add(faceMesh(face));
+      invalidate.current();
+    };
+    clearFace.current = () => { hoverKey = ''; showFace(null); };
+    const setHoverEl = (id: string | null) => { if (id !== hover3dRef.current) { hover3dRef.current = id; setHover3d(id); } };
+    let lastHover = 0;
+    const onMove = (e: PointerEvent) => {
+      const types = faceTypes.current;
+      if (down) { setHoverEl(null); return; }
+      if (hoverFrame) return;
+      const at = { x: e.clientX, y: e.clientY };
+      // No face tool: the reference plane under the cursor, if one is nearest, lights up; and, while no tool waits, the element.
+      if (!types) {
+        const planes = s.getObjectByName('ref-planes');
+        const planesOn = !!planes?.visible && !useUi.getState().tool;
+        const preOn = useHighlight.getState().preselect && !useUi.getState().tool;
+        if (!planesOn && planeHoverRef.current) { planeHoverRef.current = null; setPlaneHover(null); renderer.domElement.style.cursor = ''; }
+        if (!preOn) setHoverEl(null);
+        if (!planesOn && !preOn) return;
+        // The whole model is asked at most a dozen times a second: a heavy model is not walked on every move.
+        const now = performance.now();
+        if (preOn && !planesOn && now - lastHover < 80) return;
+        lastHover = now;
+        hoverFrame = requestAnimationFrame(() => {
+          hoverFrame = 0;
+          const r = renderer.domElement.getBoundingClientRect();
+          ray.setFromCamera(new THREE.Vector2(((at.x - r.left) / r.width) * 2 - 1, -((at.y - r.top) / r.height) * 2 + 1), cam);
+          // The quads first (few): only when one is under the cursor is the whole model asked whether it stands in front.
+          const onQuad = planesOn && ray.intersectObjects(planes!.children.filter((c) => c.userData.refPlane), false).length > 0;
+          const hit = onQuad || preOn ? pickAt() : undefined;
+          if (planesOn) {
+            const id = hit?.object.userData.refPlane ? nodeOfHit(hit) ?? null : null;
+            if (id !== planeHoverRef.current) { planeHoverRef.current = id; setPlaneHover(id); }
+            renderer.domElement.style.cursor = id ? 'pointer' : '';
+          }
+          if (preOn) setHoverEl(hit && !hit.object.userData.refPlane && !hit.object.userData.openingVoid ? nodeOfHit(hit) ?? null : null);
+        });
+        return;
+      }
+      hoverFrame = requestAnimationFrame(() => {
+        hoverFrame = 0;
+        const r = renderer.domElement.getBoundingClientRect();
+        ray.setFromCamera(new THREE.Vector2(((at.x - r.left) / r.width) * 2 - 1, -((at.y - r.top) / r.height) * 2 + 1), cam);
+        const hit = pickAt();
+        const id = nodeOfHit(hit);
+        const node = id ? useSession.getState().nodes.get(id) : undefined;
+        const ask = ++faceAsk;
+        if (!hit || !node || !takesType(types, node.type)) { if (hoverKey) { hoverKey = ''; showFace(null); setFaceLabel(null); } return; }
+        const f = faceHit(hit);
+        void engine.call<FaceDto | null>('doc.query', { name: faceQuery.current, args: { id: node.id, point: f.point, normal: f.normal } }).then((face) => {
+          if (ask !== faceAsk || faceTypes.current !== types) return;
+          // A named face keys by its role; a body's flat face (no role) by its plane and outline.
+          const key = face ? `${node.id}/${face.role ?? `${face.normal.map((v) => v.toFixed(4)).join(',')}:${face.outline.length}:${face.outline[0]?.map((v) => v.toFixed(4)).join(',')}`}` : '';
+          if (key !== hoverKey) { hoverKey = key; showFace(face); }
+          setFaceLabel(face ? { text: face.label ? `${node.name} · ${face.label}` : node.name, x: at.x, y: at.y } : null);
+        }).catch(() => undefined);
+      });
+    };
+    renderer.domElement.addEventListener('pointermove', onMove);
+    const onLeave = () => setHoverEl(null);
+    renderer.domElement.addEventListener('pointerleave', onLeave);
+    // A double click on a reference plane opens its view; on a group's member, the group for editing (docs/groups.md).
+    const onDouble = (e: MouseEvent) => {
+      if (e.button !== 0 || useUi.getState().tool || faceTypes.current) return;
+      const r = renderer.domElement.getBoundingClientRect();
+      ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), cam);
+      const hit = pickAt();
+      const id = hit?.object.userData.refPlane ? nodeOfHit(hit) : undefined;
+      if (id) useUi.setState({ view: 'drawing', drawingViewId: id, selection: id, selected: [id] });
+      else if (!openGroupOf(nodeOfHit(hit))) for (const h of doubleClickHandlers) if (h(nodeOfHit(hit) ?? null)) break;
+    };
+    renderer.domElement.addEventListener('dblclick', onDouble);
+
+    // Navigating (navigate3d.ts, report #89): the wheel zooms to the point under the cursor, a drag orbits round
+    // the selection or the point under the cursor, each kept where it is on the screen; View → Zoom to cursor and
+    // Orbit around selection turn them off. Listened to on the canvas's parent, capturing, so they come before
+    // the orbit controls' own (which then never see a wheel taken here, nor turn while an orbit about a point runs).
+    const ndc = (e: { clientX: number; clientY: number }) => {
+      const r = renderer.domElement.getBoundingClientRect();
+      return new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    };
+    const rigNow = (): Rig => ({ position: cam.position.clone(), target: controls.target.clone() });
+    const setRig = (r: Rig) => {
+      cam.position.set(r.position.x, r.position.y, r.position.z);
+      controls.target.set(r.target.x, r.target.y, r.target.z);
+      controls.update();
+      controls.dispatchEvent({ type: 'change' });
+    };
+    // The point a wheel zooms to: the model under the cursor, else the plane through the target across the view.
+    // Kept while the cursor stays put (the point stays under it), so a run of wheel steps asks the model once.
+    let zoomAt: { x: number; y: number; t: number; p: THREE.Vector3 } | null = null;
+    const zoomPoint = (e: WheelEvent) => {
+      const now = performance.now();
+      if (zoomAt && zoomAt.x === e.clientX && zoomAt.y === e.clientY && now - zoomAt.t < 600) { zoomAt.t = now; return zoomAt.p; }
+      ray.setFromCamera(ndc(e), cam);
+      const hit = pickAt();
+      let p = hit?.point.clone() ?? null;
+      if (!p) {
+        const dir = cam.getWorldDirection(new THREE.Vector3());
+        p = ray.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(dir, controls.target), new THREE.Vector3());
+      }
+      zoomAt = p ? { x: e.clientX, y: e.clientY, t: now, p } : null;
+      return p;
+    };
+    const onNavWheel = (e: WheelEvent) => {
+      if (e.target !== renderer.domElement || !controls.enabled || !controls.enableZoom || !zoomsToCursor(currentNavStyle(), useDisplay.getState().zoomToCursor)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const k = wheelFactor(currentNavStyle(), wheelZoom(e, renderer.domElement.clientHeight || 800));
+      const p = zoomPoint(e);
+      if (!p || k === 1) return;
+      cancelAnimationFrame(flight);
+      if (cam === orthoCam) {
+        const next = Math.max(1e-3, Math.min(1e4, orthoCam.zoom * k));
+        const shifted = orthoZoomShift(rigNow(), p, cam.getWorldDirection(new THREE.Vector3()), orthoCam.zoom, next);
+        orthoCam.zoom = next;
+        orthoCam.updateProjectionMatrix();
+        setRig(shifted);
+      } else setRig(zoomAbout(rigNow(), p, k));
+    };
+    el.addEventListener('wheel', onNavWheel, { capture: true, passive: false });
+    // The navigation style (app/navStyle.ts): in another program's way, each press tells the orbit controls what it does (or nothing),
+    // the modifiers it was pressed with taken off the event so the controls do not read them as their own; a region is drawn by the
+    // region code below. Lapin's own keeps the controls' mapping, and only its extra (Alt + left drag, a region) is taken here.
+    const middleTwice = middleDouble();
+    const noButton = -1 as THREE.MOUSE;
+    const shadow = (e: Event, keys: readonly string[]) => { for (const k of keys) Object.defineProperty(e, k, { value: false, configurable: true }); };
+    let restoreButtons = false;
+    const onStyleDown = (e: PointerEvent) => {
+      if (e.target !== renderer.domElement || e.pointerType === 'touch' || !controls.enabled) return;
+      const st = currentNavStyle();
+      const mods = modsOf(e);
+      const act = dragAction(st, e.button, mods);
+      if (st.fitDouble3d && middleTwice(e)) { useCamera.getState().api?.fit(true); e.preventDefault(); return; }
+      if (st.native && act !== 'region') return;
+      const to = act === 'orbit' ? THREE.MOUSE.ROTATE : act === 'pan' ? THREE.MOUSE.PAN : act === 'zoom' ? THREE.MOUSE.DOLLY : noButton;
+      controls.mouseButtons = { LEFT: noButton, MIDDLE: noButton, RIGHT: noButton, [e.button === 0 ? 'LEFT' : e.button === 1 ? 'MIDDLE' : 'RIGHT']: to };
+      shadow(e, ['shiftKey', 'ctrlKey', 'metaKey']);
+      restoreButtons = st.native;
+    };
+    const onStyleUp = () => { if (restoreButtons) { restoreButtons = false; buttons(); } };
+    el.addEventListener('pointerdown', onStyleDown, true);
+    window.addEventListener('pointerup', onStyleUp, true);
+    window.addEventListener('pointercancel', onStyleUp, true);
+    // An orbit about a point: from the button the orbit controls turn with, the selection's middle or the model under the cursor.
+    let orbit: { id: number; x: number; y: number; pivot: THREE.Vector3 } | null = null;
+    const rotateButton = (button: number) => (button === 0 ? controls.mouseButtons.LEFT : button === 1 ? controls.mouseButtons.MIDDLE : button === 2 ? controls.mouseButtons.RIGHT : -1) === THREE.MOUSE.ROTATE;
+    const onNavDown = (e: PointerEvent) => {
+      if (e.target !== renderer.domElement || e.pointerType === 'touch' || !controls.enabled || !useDisplay.getState().orbitSelection) return;
+      if (!rotateButton(e.button) || e.ctrlKey || e.metaKey || e.shiftKey || orbit) return;
+      const box = api.boxOf?.(useUi.getState().selected) ?? null;
+      let hit: THREE.Vector3 | null = null;
+      if (!box) { ray.setFromCamera(ndc(e), cam); hit = pickAt()?.point.clone() ?? null; }
+      const pivot = orbitPivot(box, hit);
+      if (!pivot) return;
+      // The orbit controls see the press but do not turn: this orbit does, about the pivot.
+      controls.enableRotate = false;
+      cancelAnimationFrame(flight);
+      orbit = { id: e.pointerId, x: e.clientX, y: e.clientY, pivot: new THREE.Vector3(pivot.x, pivot.y, pivot.z) };
+    };
+    const onNavMove = (e: PointerEvent) => {
+      if (!orbit || e.pointerId !== orbit.id) return;
+      const { dAzimuth, dPolar } = orbitAngles(e.clientX - orbit.x, e.clientY - orbit.y, renderer.domElement.clientHeight);
+      orbit.x = e.clientX; orbit.y = e.clientY;
+      if (dAzimuth || dPolar) setRig(orbitAbout(rigNow(), orbit.pivot, dAzimuth, dPolar));
+    };
+    const onNavUp = (e: PointerEvent) => {
+      if (!orbit || e.pointerId !== orbit.id) return;
+      orbit = null;
+      controls.enableRotate = true;
+    };
+    el.addEventListener('pointerdown', onNavDown, true);
+    window.addEventListener('pointermove', onNavMove, true);
+    window.addEventListener('pointerup', onNavUp, true);
+    window.addEventListener('pointercancel', onNavUp, true);
+    // Walking (walk.ts): the orbit controls off, the perspective camera at the eye, turned by a drag, moved by keys and the wheel;
+    // a body (walkPhysics.ts) against the shown elements' triangles, built on the walk's first step and again when the model changes;
+    // clipped by the planes the renderer cuts by (the storeys' cut, a section, the section box) and closed by their caps, so what is
+    // cut away stops nobody.
+    let walk: {
+      pos: THREE.Vector3; yaw: number; pitch: number; back: CameraPose; wasOrtho: boolean; keys: Set<string>; run: boolean; jump: boolean; loop: number; last: number; drag: { x: number; y: number } | null;
+      body: Walker | null; stale: boolean; acc: number;
+    } | null = null;
+    /** The walker's body, its world (re)built when stale; null while the model has nothing to stand on yet. */
+    const bodyOf = (w: NonNullable<typeof walk>): Walker | null => {
+      if (!w.stale) return w.body;
+      w.stale = false;
+      const planes = (renderer.clippingPlanes ?? []).map((p) => ({ normal: [p.normal.x, p.normal.y, p.normal.z] as const, constant: p.constant }));
+      // The instances too, placed: all of them in a small model, those within 60 m of the walker in a big one.
+      const looks = useLooks.getState().looks, meshes = useSession.getState().meshes;
+      const few = layer.count() <= 5000;
+      const near = [...layer.placed()]
+        .filter(({ item, at }) => !looks[item.nodeId]?.hidden && (few || Math.hypot(at[0] - w.pos.x, at[1] - w.pos.y) < 60))
+        .map(({ item }) => inWorld(item, meshes));
+      const world = worldOf([...Array.from(items.current.values()).filter((e) => e.object.visible).map((e) => e.item), ...near], undefined, {
+        planes, extra: capItems.current.flatMap((c) => c.parts),
+      });
+      if (w.body) { w.body.world = world; return w.body; }
+      if (!world.count) return null;
+      // Dropped onto the floor under the eye; the ground (where the model has none) at ±0.00, or lower under a basement.
+      const feet = { x: w.pos.x, y: w.pos.y, z: w.pos.z - EYE_HEIGHT + 0.3 };
+      w.body = new Walker(world, feet, Math.min(0, feet.z - 0.3));
+      w.body.drop();
+      w.pos.set(w.body.feet.x, w.body.feet.y, w.body.feet.z + EYE_HEIGHT);
+      return w.body;
+    };
+    const placeWalk = () => {
+      if (!walk) return;
+      const l = lookVector(walk.yaw, walk.pitch);
+      const t = new THREE.Vector3(walk.pos.x + l.x, walk.pos.y + l.y, walk.pos.z + l.z);
+      cam.position.copy(walk.pos);
+      controls.target.copy(t);
+      cam.lookAt(t);
+      publish();
+      invalidate.current();
+    };
+    const stepWalk = (now: number) => {
+      if (!walk) return;
+      const dt = Math.min(0.1, (now - walk.last) / 1000);
+      walk.last = now;
+      const body = useWalk.getState().fly ? null : bodyOf(walk);
+      if (body) {
+        const wish = walkWish(walk.yaw, walk.keys, walk.run);
+        walk.acc = Math.min(walk.acc + dt, 0.1);
+        while (walk.acc >= TICK) { body.step(TICK, wish, walk.jump); walk.jump = false; walk.acc -= TICK; }
+        walk.pos.set(body.feet.x, body.feet.y, easeEye(walk.pos.z, body.feet.z + EYE_HEIGHT, dt, body.grounded));
+      } else {
+        const p = walkStep(walk.pos, walk.yaw, walk.keys, dt, walk.run);
+        walk.pos.set(p.x, p.y, p.z);
+      }
+      placeWalk();
+      // On while a key is held, or the body still falls, slows down or eases up a step.
+      const settling = body != null && (!body.still || Math.abs(walk.pos.z - body.feet.z - EYE_HEIGHT) > 1e-3);
+      walk.loop = walk.keys.size || settling ? requestAnimationFrame(stepWalk) : 0;
+    };
+    const kickWalk = () => { if (walk && !walk.loop) { walk.last = performance.now(); walk.loop = requestAnimationFrame(stepWalk); } };
+    // Leaving a flight: the body falls from where the eye is.
+    const unFly = useWalk.subscribe((st, prev) => {
+      if (!walk || st.fly === prev.fly) return;
+      if (!st.fly && walk.body) { walk.body.feet = { x: walk.pos.x, y: walk.pos.y, z: walk.pos.z - EYE_HEIGHT }; walk.body.vel = { x: 0, y: 0, z: 0 }; walk.body.grounded = false; }
+      kickWalk();
+    });
+    let rebuild = 0;
+    walkApi.current = {
+      start: (w) => {
+        cancelAnimationFrame(flight);
+        // A walk into another room keeps the camera there was before the first.
+        const back = walk ? walk.back : pose();
+        const wasOrtho = walk ? walk.wasOrtho : cam === orthoCam;
+        if (walk) cancelAnimationFrame(walk.loop);
+        if (cam === orthoCam) api.setOrtho(false);
+        controls.enabled = false;
+        // A wider view inside a room, and nothing near the eye cut off.
+        persp.near = 0.05;
+        persp.fov = 65;
+        persp.updateProjectionMatrix();
+        walk = { pos: new THREE.Vector3(w.eye.x, w.eye.y, w.eye.z), yaw: w.yaw, pitch: clampPitch(w.pitch), back, wasOrtho, keys: new Set(), run: false, jump: false, loop: 0, last: 0, drag: null, body: null, stale: true, acc: 0 };
+        bodyOf(walk);
+        placeWalk();
+      },
+      // Rebuilt a moment after the last change (planes moved, caps come in after them), not on every one.
+      changed: () => {
+        clearTimeout(rebuild);
+        rebuild = window.setTimeout(() => { if (walk) { walk.stale = true; kickWalk(); } }, 120);
+      },
+      stop: () => {
+        if (!walk) return;
+        cancelAnimationFrame(walk.loop);
+        clearTimeout(rebuild);
+        const { back, wasOrtho } = walk;
+        walk = null;
+        controls.enabled = true;
+        persp.near = 0.1;
+        persp.fov = 45;
+        persp.updateProjectionMatrix();
+        applyPose(back);
+        if (wasOrtho) api.setOrtho(true);
+        publish();
+        invalidate.current();
+      },
+    };
+    const onWalkDown = (e: PointerEvent) => {
+      if (!walk || e.button !== 0) return;
+      walk.drag = { x: e.clientX, y: e.clientY };
+      renderer.domElement.setPointerCapture?.(e.pointerId);
+    };
+    const onWalkMove = (e: PointerEvent) => {
+      if (!walk?.drag) return;
+      walk.yaw -= (e.clientX - walk.drag.x) * 0.004;
+      walk.pitch = clampPitch(walk.pitch - (e.clientY - walk.drag.y) * 0.004);
+      walk.drag = { x: e.clientX, y: e.clientY };
+      placeWalk();
+    };
+    const onWalkUp = () => { if (walk) walk.drag = null; };
+    const onWalkWheel = (e: WheelEvent) => {
+      if (!walk) return;
+      e.preventDefault();
+      const l = lookVector(walk.yaw, 0);
+      const by = -Math.sign(e.deltaY) * (e.shiftKey ? 1.5 : 0.5);
+      const body = useWalk.getState().fly ? null : bodyOf(walk);
+      if (body) {
+        body.shove({ x: l.x * by, y: l.y * by, z: 0 });
+        walk.pos.set(body.feet.x, body.feet.y, walk.pos.z);
+        kickWalk();
+      } else {
+        walk.pos.x += l.x * by;
+        walk.pos.y += l.y * by;
+      }
+      placeWalk();
+    };
+    // Before the shortcuts (capture on the window): while walking, the letters walk instead of starting tools.
+    const onWalkKey = (e: KeyboardEvent) => {
+      if (!walk || e.ctrlKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.('input, select, textarea, [role="dialog"]')) return;
+      e.stopImmediatePropagation();
+      e.preventDefault();
+      if (e.type === 'keydown' && e.key === 'Escape') { exitWalk(); return; }
+      walk.run = e.shiftKey;
+      if (e.type === 'keydown' && e.code === 'KeyF' && !e.repeat) { toggleFly(); return; }
+      if (e.code === 'Space') { if (e.type === 'keydown' && !e.repeat) { walk.jump = true; kickWalk(); } return; }
+      if (!WALK_KEYS.has(e.code)) return;
+      if (e.type === 'keyup') { walk.keys.delete(e.code); return; }
+      walk.keys.add(e.code);
+      kickWalk();
+    };
+    const onWalkBlur = () => walk?.keys.clear();
+    renderer.domElement.addEventListener('pointerdown', onWalkDown);
+    renderer.domElement.addEventListener('pointermove', onWalkMove);
+    renderer.domElement.addEventListener('pointerup', onWalkUp);
+    // A drag the system takes away (a touch turned into a scroll, a lost capture) must not stay hooked to the cursor.
+    renderer.domElement.addEventListener('pointercancel', onWalkUp);
+    renderer.domElement.addEventListener('lostpointercapture', onWalkUp);
+    renderer.domElement.addEventListener('wheel', onWalkWheel, { passive: false });
+    window.addEventListener('keydown', onWalkKey, true);
+    window.addEventListener('keyup', onWalkKey, true);
+    window.addEventListener('blur', onWalkBlur);
+
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !e.defaultPrevented) { if (!(e.target as HTMLElement)?.closest('input, select, textarea, [role="dialog"]')) setTool(null); } };
+    renderer.domElement.addEventListener('pointerdown', onDown);
+    renderer.domElement.addEventListener('pointerup', onUp);
+    // A right-click that did not turn or move the view: the selection's menu (copy to storeys, move to storey).
+    let rightAt: { x: number; y: number } | null = null;
+    const onRightDown = (e: PointerEvent) => { if (e.button === 2) rightAt = { x: e.clientX, y: e.clientY }; };
+    const onMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      const still = rightAt && Math.hypot(e.clientX - rightAt.x, e.clientY - rightAt.y) < 5;
+      rightAt = null;
+      if (!still) return;
+      // What is under the cursor is selected first when it is not already (as the plan's menu does for drafting).
+      if (!useUi.getState().tool) {
+        const r = renderer.domElement.getBoundingClientRect();
+        ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), cam);
+        const id = nodeOfHit(pickAt());
+        const { selected } = useUi.getState();
+        const { nodes, relations } = useSession.getState();
+        if (id && pickable(nodes.get(id)) && !shownSelection(selected, nodes, relations).has(id)) pickByMods(id, modsOf(e), currentNavStyle());
+      }
+      const ui = useUi.getState();
+      // Near a point cloud's points (or a splat's centre): its own tools (G2 of docs/plan-gaussian-splats.md).
+      const cloud = ui.tool ? null : cloudAt({ camera: camRef, canvas: host, scene }, e.clientX, e.clientY);
+      const cloudItems = cloud ? [
+        { label: 'Calibrate scale…', onSelect: () => startCalibrate(cloud) },
+        { label: 'Crop point cloud…', onSelect: () => openCrop(cloud) },
+      ] : [];
+      openContextMenu(e.clientX, e.clientY, [...cloudItems, ...selectionItems(), ...temporaryItems(), ...viewSheetItems(ui.view === '3d' ? ui.view3dId ?? '3d' : null, useSession.getState().nodes)]);
+    };
+    renderer.domElement.addEventListener('pointerdown', onRightDown);
+    renderer.domElement.addEventListener('contextmenu', onMenu);
+
+    // Selecting by a region (select3d.ts): with Select region on, a left drag draws it (Space: a lasso);
+    // the right button turns the view, the middle one moves it.
+    const buttons = () => {
+      const on = useRegion3d.getState().on;
+      controls.mouseButtons = on
+        ? { LEFT: -1 as THREE.MOUSE, MIDDLE: THREE.MOUSE.PAN, RIGHT: THREE.MOUSE.ROTATE }
+        : { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
+    };
+    buttons();
+    const unregion = useRegion3d.subscribe(buttons);
+    // The style changed: the controls' own buttons again, and the wheel's direction where the controls zoom.
+    const styled = () => { buttons(); controls.zoomSpeed = currentNavStyle().wheel.invert ? -1 : 1; };
+    styled();
+    const unstyle = usePrefs.subscribe((p, before) => { if (p.navStyle !== before.navStyle) styled(); });
+    const local = (e: MouseEvent) => { const r = renderer.domElement.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; };
+    let regionFrom: { x: number; y: number } | null = null;
+    /** What a region takes: elements by their edges on the screen (their box when they have none), instances by their placed box. */
+    const regionSelect = (d: SelectDrag): string[] => {
+      const w = renderer.domElement.clientWidth, h = renderer.domElement.clientHeight;
+      cam.updateMatrixWorld();
+      const v = new THREE.Vector3();
+      const project: Project = (x, y, z) => {
+        v.set(x, y, z).applyMatrix4(cam.matrixWorldInverse);
+        if (cam === persp && v.z > -persp.near) return null;
+        v.applyMatrix4(cam.projectionMatrix);
+        return { x: ((v.x + 1) / 2) * w, y: ((1 - v.y) / 2) * h };
+      };
+      const test = regionTestOf(d, (x, y) => ({ x, y }));
+      const win = isWindow(d);
+      const nodes = useSession.getState().nodes;
+      const looks = useLooks.getState().looks;
+      const planes = renderer.clippingPlanes ?? [];
+      const ids: string[] = [];
+      for (const [id, { item, object }] of items.current) {
+        // Only what the view shows (decision 498): not hidden, not wholly cut away by a section box or a cut.
+        if (!object.visible || !pickable(nodes.get(id)) || clipped(item, planes)) continue;
+        const segs: Seg[] = [];
+        let behind = false;
+        const add = (flat: ArrayLike<number>) => { if (projectSegments(flat, project, segs).behind) behind = true; };
+        add(item.edges);
+        for (const p of item.parts ?? []) add(p.edges);
+        if (!segs.length && !behind) {
+          const all = [item.positions, ...(item.parts ?? []).map((p) => p.positions)].flatMap((a) => Array.from(a));
+          const b = boxOf(all);
+          if (b) add(boxEdges(b));
+        }
+        if (takes(test, win, { segs, behind })) ids.push(id);
+      }
+      for (const { item } of layer.placed()) {
+        const id = item.nodeId;
+        const mesh = useSession.getState().meshes.get(item.instance!.mesh);
+        if (!mesh || looks[id]?.hidden || !pickable(nodes.get(id))) continue;
+        const m = item.instance!.matrix;
+        if (planes.length && clippedAway(placedBox(mesh.box, m), planes)) continue;
+        const seen = projectSegments(boxEdges(mesh.box, (x, y, z) => place(m, x, y, z)), project);
+        if (takes(test, win, seen)) ids.push(id);
+      }
+      return pickRegion(ids);
+    };
+    const onRegionDown = (e: PointerEvent) => {
+      if (e.button !== 0 || useUi.getState().tool || faceTypes.current) return;
+      // Select region (SR) on, or this press is the navigation style's region (a left drag in most, Alt + left drag in Lapin's).
+      if (!useRegion3d.getState().on && dragAction(currentNavStyle(), e.button, modsOf(e)) !== 'region') return;
+      regionFrom = local(e);
+      renderer.domElement.setPointerCapture(e.pointerId);
+    };
+    const onRegionMove = (e: PointerEvent) => {
+      if (!regionFrom) return;
+      const p = local(e);
+      const d = useRegion3d.getState().drag;
+      if (!d && Math.hypot(p.x - regionFrom.x, p.y - regionFrom.y) < 4) return;
+      const forced = currentNavStyle().region;
+      useRegion3d.setState({ drag: d ? dragTo(d, p) : { a: regionFrom, b: p, mode: forced === 'direction' ? undefined : forced } });
+    };
+    const onRegionUp = (e: PointerEvent) => {
+      const d = useRegion3d.getState().drag;
+      regionFrom = null;
+      if (!d) return;
+      useRegion3d.setState({ drag: null });
+      const ids = regionSelect(d);
+      // How it joins the selection is the style's (Lapin: Shift adds; Revit: Ctrl adds, Shift removes).
+      const next = regionSelection(useUi.getState().selected, ids, regionMode(currentNavStyle(), modsOf(e)));
+      useUi.setState({ selected: next, selection: next[next.length - 1] ?? null });
+    };
+    /** A region the system took away (cancel, lost capture) is dropped, not selected. */
+    const onRegionCancel = () => { regionFrom = null; if (useRegion3d.getState().drag) useRegion3d.setState({ drag: null }); };
+    const onRegionKey = (e: KeyboardEvent) => {
+      if (e.key !== ' ' || e.repeat || !useRegion3d.getState().drag) return;
+      e.preventDefault();
+      e.stopPropagation();
+      useRegion3d.setState((st) => ({ drag: st.drag ? toggleLasso(st.drag) : null }));
+    };
+    renderer.domElement.addEventListener('pointerdown', onRegionDown);
+    renderer.domElement.addEventListener('pointermove', onRegionMove);
+    renderer.domElement.addEventListener('pointerup', onRegionUp);
+    renderer.domElement.addEventListener('pointercancel', onRegionCancel);
+    renderer.domElement.addEventListener('lostpointercapture', onRegionCancel);
+    window.addEventListener('keydown', onRegionKey, true);
+    window.addEventListener('keydown', onKey);
+    return () => {
+      unsunlight();
+      unprofile();
+      unlook();
+      unlights();
+      unrender();
+      unrenderSettings();
+      stillCancel = true;
+      tracer?.dispose();
+      disposeOwned(tracerScene);
+      traceMaterials.dispose();
+      plainGround.dispose();
+      if (useRenderApi.getState().api === renderApi) useRenderApi.setState({ api: null });
+      traceDirty.current = () => undefined;
+      repaintTrace.current = () => undefined;
+      clearTimeout(lightTimer);
+      rig.dispose();
+      clearTimeout(probeTimer);
+      probesDirty.current = () => undefined;
+      probes.dispose();
+      useLightBudget.setState({ total: 0, drawn: 0, shadowed: 0 });
+      realism.dispose();
+      cancelAnimationFrame(frame);
+      clearTimeout(trailing);
+      cancelAnimationFrame(flight);
+      unkeep();
+      if (useCamera.getState().api === api) useCamera.setState({ api: null });
+      unlisten();
+      invalidate.current = () => undefined;
+      ro.disconnect();
+      dpr?.removeEventListener('change', onDensity);
+      controls.dispose();
+      renderer.domElement.removeEventListener('pointerdown', onDown);
+      renderer.domElement.removeEventListener('pointerup', onUp);
+      renderer.domElement.removeEventListener('pointerdown', onRightDown);
+      renderer.domElement.removeEventListener('contextmenu', onMenu);
+      renderer.domElement.removeEventListener('dblclick', onDouble);
+      el.removeEventListener('wheel', onNavWheel, { capture: true });
+      el.removeEventListener('pointerdown', onNavDown, true);
+      el.removeEventListener('pointerdown', onStyleDown, true);
+      window.removeEventListener('pointerup', onStyleUp, true);
+      window.removeEventListener('pointercancel', onStyleUp, true);
+      window.removeEventListener('pointermove', onNavMove, true);
+      window.removeEventListener('pointerup', onNavUp, true);
+      window.removeEventListener('pointercancel', onNavUp, true);
+      renderer.domElement.removeEventListener('pointerdown', onRegionDown);
+      renderer.domElement.removeEventListener('pointermove', onRegionMove);
+      renderer.domElement.removeEventListener('pointerup', onRegionUp);
+      renderer.domElement.removeEventListener('pointercancel', onRegionCancel);
+      renderer.domElement.removeEventListener('lostpointercapture', onRegionCancel);
+      window.removeEventListener('keydown', onRegionKey, true);
+      unregion();
+      unstyle();
+      renderer.domElement.removeEventListener('pointermove', onMove);
+      renderer.domElement.removeEventListener('pointerleave', onLeave);
+      cancelAnimationFrame(hoverFrame);
+      faceAsk = -1;
+      clearFace.current = () => undefined;
+      window.removeEventListener('keydown', onKey);
+      if (walk) cancelAnimationFrame(walk.loop);
+      clearTimeout(rebuild);
+      unFly();
+      useClip3d.setState({ planes: [] });
+      walkApi.current = { start: () => undefined, stop: () => undefined, changed: () => undefined };
+      renderer.domElement.removeEventListener('pointerdown', onWalkDown);
+      renderer.domElement.removeEventListener('pointermove', onWalkMove);
+      renderer.domElement.removeEventListener('pointerup', onWalkUp);
+      renderer.domElement.removeEventListener('pointercancel', onWalkUp);
+      renderer.domElement.removeEventListener('lostpointercapture', onWalkUp);
+      renderer.domElement.removeEventListener('wheel', onWalkWheel);
+      renderer.domElement.removeEventListener('wheel', clampWheel, { capture: true });
+      window.removeEventListener('keydown', onWalkKey, true);
+      window.removeEventListener('keyup', onWalkKey, true);
+      window.removeEventListener('blur', onWalkBlur);
+      clouds.dispose();
+      cloudLayer.current = null;
+      splats.dispose();
+      splatLayer.current = null;
+      // The elements, the lights, the ground grid and the grid's axes.
+      shadowOnly.dispose();
+      meadow.dispose();
+      dispose(s);
+      s.clear();
+      live.clear();
+      layer.batches.clear();
+      layer.known.clear();
+      instances.current = null;
+      scene.current = null;
+      rendererRef.current = null;
+      renderer.dispose();
+      renderer.forceContextLoss();
+      el.removeChild(renderer.domElement);
+    };
+  }, []);
+
+  // The view clears to the theme's paper or graphite; the grid lies on the active storey, shown or hidden by View → Grid (F7) as in plans.
+  const theme = useViewTheme();
+  const profileNow = useRenderProfile((st) => st.profile);
+  const gridShown = useDisplay((st) => st.grid);
+  const elevation = elevationRef.current;
+  const gridFixed = usePrefs((st) => (st.gridMode === 'fixed' ? st.gridStep : 0));
+  const ucs3d = useLocation((st) => st.loc.ucs ? `${st.loc.ucs.x},${st.loc.ucs.y},${st.loc.ucs.angle}` : '');
+  useEffect(() => {
+    rendererRef.current?.setClearColor(profileNow === 'diagram' ? DIAGRAM_BACKGROUND : CLEAR[theme]);
+    const s = scene.current;
+    const old = s?.getObjectByName('ground-grid');
+    if (!s) return;
+    if (old) { s.remove(old); dispose(old); }
+    const u = ucsOf(useLocation.getState().loc);
+    const grid = groundGrid(theme, elevation, gridFixed || 1, u ? { x: u.origin.x, y: u.origin.y, angle: u.angle } : null);
+    grid.visible = gridShown;
+    s.add(grid);
+    invalidate.current();
+  }, [theme, profileNow, elevation, gridShown, gridFixed, ucs3d]);
+
+  // The grid's axes, on the lowest storey: dash-dot lines with their labels at both ends.
+  // Keyed on the grids and the lowest storey only, not on every diff.
+  const grids = useSession(useShallow((st) => gridsOf(st.nodes)));
+  const gridHidden = useLooks(useShallow((st) => grids.map((g) => !!st.looks[g.id]?.hidden)));
+  const base = useSession((st) => gridBase(st.nodes));
+  useEffect(() => {
+    const s = scene.current;
+    if (!s) return;
+    const old = s.getObjectByName('grid-axes');
+    if (old) { s.remove(old); dispose(old); }
+    const group = new THREE.Group();
+    group.name = 'grid-axes';
+    for (let i = 0; i < grids.length; i++) {
+      if (gridHidden[i]) continue;
+      const g = grids[i];
+      for (const ax of (g.props.axes as { tag: string; a: number[]; b: number[] }[] | undefined) ?? []) {
+        const geo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(ax.a[0], ax.a[1], base + 0.01), new THREE.Vector3(ax.b[0], ax.b[1], base + 0.01)]);
+        const line = new THREE.Line(geo, new THREE.LineDashedMaterial({ color: 0x8a5a44, dashSize: 0.6, gapSize: 0.25 }));
+        line.computeLineDistances();
+        underlayLines(line);
+        group.add(line);
+        for (const end of [ax.a, ax.b]) {
+          const cv = document.createElement('canvas');
+          cv.width = cv.height = 64;
+          const c = cv.getContext('2d')!;
+          c.strokeStyle = '#8a5a44'; c.lineWidth = 4; c.beginPath(); c.arc(32, 32, 28, 0, Math.PI * 2); c.stroke();
+          c.fillStyle = '#8a5a44'; c.font = 'bold 30px sans-serif'; c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillText(ax.tag, 32, 34);
+          const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(cv), depthTest: false }));
+          sprite.position.set(end[0], end[1], base + 0.3);
+          sprite.scale.set(0.7, 0.7, 1);
+          group.add(sprite);
+        }
+      }
+    }
+    s.add(group);
+    invalidate.current();
+  }, [grids, gridHidden, base]);
+
+  // Keep the scene in step with the engine's render items (rebuild only what changed).
+  const render = useSession((st) => st.render);
+  const lightBudget = useLightBudget();
+  const renderMode = useRenderMode();
+  const renderProfile = useRenderProfile((st) => st.profile);
+  const diagram = useDiagram();
+  const meshes = useSession((st) => st.meshes);
+
+  // The reference planes (docs/plan-studio-thick.md): a translucent quad each, as large as the model on it, with its name;
+  // the selected ones and the one under the cursor stronger; the one being dragged drawn where it is going. View → Reference planes hides them.
+  const planesKeyNow = useSession((st) => refPlanesKey(st.nodes));
+  const refPlanesShown = useUi((st) => st.refPlanes);
+  const selectedNow = useUi((st) => st.selected);
+  const planeDrag = useRefPlaneDrag();
+  useEffect(() => {
+    const s = scene.current;
+    if (!s) return;
+    const old = s.getObjectByName('ref-planes');
+    if (old) { s.remove(old); dispose(old); }
+    const planes = refPlanesOf(useSession.getState().nodes).map((p) => p.id === planeDrag.id ? { ...p, origin: planePoint(p, 0, 0, planeDrag.along) } : p);
+    if (planes.length > 0) {
+      const group = refPlanesGroup(planes, modelBounds(render.values(), 0.5, 0, meshes), new Set(selectedNow), planeHover);
+      group.visible = refPlanesShown;
+      s.add(group);
+    }
+    invalidate.current();
+  }, [planesKeyNow, render, meshes, selectedNow, planeHover, refPlanesShown, planeDrag]);
+  // The reinforcement as tubes (docs/plan-rebar.md, decision 221), while View → Bars in 3D is on.
+  useRebar3d(scene, invalidate);
+  // The openings' voids, translucent, while View → Opening voids is on (decision 289).
+  useVoids3d(scene, invalidate);
+  // A saved 3D view opened: its camera (where it looks from, perspective or orthographic).
+  const view3dId = usePaneField('view3dId');
+  keyRef.current = key3d(view3dId);
+  useEffect(() => {
+    if (!view3dId) return;
+    // What this view had in this session (the viewport was away, or another 3D view was in front) comes before the saved camera.
+    const mine = recall3d(key3d(view3dId))?.pose;
+    if (mine) { const a = useCamera.getState().api; a?.setOrtho(Boolean(recall3d(key3d(view3dId))?.ortho)); a?.orbitTo(mine, false); return; }
+    const cam = useSession.getState().nodes.get(view3dId)?.props.camera as { azimuth?: number; pitch?: number; distance?: number; target?: number[]; ortho?: boolean } | undefined;
+    const api = useCamera.getState().api;
+    if (!cam || !api) return;
+    api.setOrtho(Boolean(cam.ortho));
+    api.orbitTo({ azimuth: cam.azimuth ?? 0, pitch: cam.pitch ?? -0.5, distance: cam.distance ?? 30, target: { x: cam.target?.[0] ?? 0, y: cam.target?.[1] ?? 0, z: cam.target?.[2] ?? 0 } }, false);
+  }, [view3dId]);
+
+  // A saved 3D view's section box: shown when the view opens, and again when an undo brings it back; {3D} starts without one.
+  const keptBox = useSession((st) => (view3dId && view3dId !== '3d' ? JSON.stringify(st.nodes.get(view3dId)?.props.sectionBox ?? null) : 'none'));
+  useEffect(() => {
+    // {3D}'s box is the session's (viewState3d.ts): it comes back with the tab, instead of starting without one each time.
+    const changed = changed3d(key3d(view3dId));
+    if (keptBox === 'none') { if (changed) useSectionBox.setState({ box: recall3d('3d')?.box ?? null }); return; }
+    const kept = JSON.parse(keptBox) as SectionBox | null;
+    if (JSON.stringify(useSectionBox.getState().box) !== keptBox) useSectionBox.setState({ box: kept });
+  }, [view3dId, keptBox]);
+
+  const selected = useUi((st) => st.selected);
+  // What the modules draw with it (a task's elements) moves with its own version.
+  const expansion = useExpansion((st) => st.version);
+  const regionOn = useRegion3d((st) => st.on);
+  const regionDrag = useRegion3d((st) => st.drag);
+  const hiding = useTemporary(temporaryOn);
+  const walkStart = useWalk((st) => st.start);
+  const walking = walkStart != null;
+  const flying = useWalk((st) => st.fly);
+  const looks = useLooks((st) => st.looks);
+  const visualStyle = useUi((st) => st.visualStyle);
+  const drafts3d = useDisplay((st) => st.drafts3d);
+  const fog = useUi((st) => st.fog);
+  // The layers this 3D view shows (its style's or its own): the parts the others are drawn without, picked through, walked through.
+  const layers = useSession((st) => layers3dOf(st.nodes, view3dId).mode);
+  // At LOD 400 members draw their real section (decision 415), in the maquette style plants their maquette bodies (decision 818),
+  // fetched then: everyone else's meshes stay as they are.
+  const fineBodies = useFineBodies(view3dId, render, useSession((st) => st.nodes));
+  // Fog: the model fades into the background with distance (a display rule for linked context, big sites).
+  useEffect(() => { const s = scene.current; if (s) s.fog = fog ? new THREE.FogExp2(CLEAR[theme], 0.012) : null; }, [fog, theme]);
+  useEffect(() => {
+    const s = scene.current;
+    if (!s) return;
+    const live = items.current;
+    for (const [id, entry] of live) {
+      const now = render.get(id);
+      if (now && !now.instance && shownIn(fineShown(now, fineBodies.on), layers) === entry.item) continue;
+      s.remove(entry.object);
+      dispose(entry.object);
+      live.delete(id);
+    }
+    for (const [id, whole] of render) {
+      if (live.has(id) || whole.instance) continue;
+      const item = shownIn(fineShown(whole, fineBodies.on), layers);
+      const object = meshOf(item);
+      s.add(object);
+      live.set(id, { item, object });
+    }
+    // What the selection draws highlighted: a group's members with it.
+    const shown = shownSelection(selected);
+    for (const [id, object] of caps.current) {
+      highlight(object, shown.has(id));
+      look(object, looks[id]);
+      object.visible = object.visible && visualStyle !== 'wireframe' && !(walking && live.get(id)?.item.type === 'IfcSpace');
+    }
+    // X-ray: every element but the selection see-through, over its own look.
+    // The diagram display: its colours under the elements' own looks, then X-ray over them.
+    const nodesNow = useSession.getState().nodes;
+    const coloured = renderProfile === 'diagram' ? diagramLooks(looks, [...render.values()].map((r) => ({ id: r.nodeId, type: r.type, predefinedType: nodesNow.get(r.nodeId)?.props.predefinedType })), diagram) : looks;
+    const seen = visualStyle === 'xray' ? xrayLooks(coloured, render.keys(), shown) : coloured;
+    for (const [id, { item, object }] of live) {
+      highlight(object, shown.has(id));
+      look(object, seen[id]);
+      // Inside a room, its own volume is not drawn round the eye.
+      if (walking && item.type === 'IfcSpace') object.visible = false;
+      // The visual style: faces, edges, or both.
+      object.traverse((c) => {
+        if (c.userData.pickOnly) c.visible = true;
+        else if ((c as THREE.Mesh).isMesh) c.visible = visualStyle !== 'wireframe';
+        else if (typeof c.userData.linework === 'string') c.visible = true;
+        else if ((c as THREE.LineSegments).isLineSegments) c.visible = visualStyle !== 'shaded';
+      });
+      // Drafted shapes (View → Drafts in 3D).
+      if (!drafts3d && item.type === 'IfcAnnotation') object.visible = false;
+    }
+    // A part selected on its own (owner#tag: a stair's railing, its bars and glass): that part lit, not its owner.
+    for (const id of selected) {
+      const hash = id.indexOf('#');
+      const owner = hash > 0 ? live.get(id.slice(0, hash)) : undefined;
+      if (!owner) continue;
+      const tag = id.slice(hash + 1);
+      owner.object.traverse((c) => { if (typeof c.userData.part === 'string' && partSelected(c.userData.part as string, tag)) highlight(c, true); });
+    }
+    // The instances of shared meshes: added, moved, taken out; drawn as their looks and the selection say.
+    const layer = instances.current;
+    if (layer) { layer.sync(render, meshes); layer.restyle(seen, [...shown], visualStyle, layers); }
+    // New materials (a rebuilt element) lose their pictures too in the diagram display.
+    flatTextures(s, renderProfile === 'diagram');
+    boxDirty.current();
+    traceDirty.current();
+    invalidate.current();
+  }, [render, meshes, layers, selected, expansion, looks, visualStyle, walking, capsShown, drafts3d, fineBodies.on, fineBodies.version, selColour, renderProfile, diagram]);
+  // The rooms' reflection probes again when the model or its looks change, not the selection (docs/plan-render.md, S3).
+  useEffect(() => { probesDirty.current(); }, [render, meshes, layers, expansion, looks, visualStyle, capsShown, drafts3d, fineBodies.on, fineBodies.version]);
+
+  // The element a command waiting for one would take (Match properties' targets, decision 490), lit as the selection is
+  // while the cursor is on it; its own look back when the cursor leaves (an instanced one is not lit).
+  const hovered = useTagHover((st) => st.element);
+  useEffect(() => {
+    const entry = hovered ? items.current.get(hovered) : undefined;
+    if (!hovered || !entry) return;
+    highlight(entry.object, true);
+    invalidate.current();
+    return () => { highlight(entry.object, shownSelection(useUi.getState().selected).has(hovered)); invalidate.current(); };
+  }, [hovered, render, selected]);
+
+  // Preselection: the element under the cursor lit in the user's preselection colour (an instanced one is not lit, as above).
+  useEffect(() => {
+    if (!preselect && hover3dRef.current) { hover3dRef.current = null; setHover3d(null); }
+    const ids = hover3d && preselect ? [...shownSelection([hover3d])].filter((id) => !shownSelection(selected).has(id)) : [];
+    const objects = ids.map((id) => items.current.get(id)?.object).filter((o) => !!o) as THREE.Object3D[];
+    if (!objects.length) return;
+    for (const o of objects) highlight(o, true, preselectionColour(), 0.3);
+    invalidate.current();
+    return () => {
+      const now = shownSelection(useUi.getState().selected);
+      for (const id of ids) { const o = items.current.get(id)?.object; if (o) highlight(o, now.has(id)); }
+      invalidate.current();
+    };
+  }, [hover3d, preselect, preColour, selColour, render, selected, looks, visualStyle]);
+
+  // A walk asked for (a plan's right-click on a room), or ended; the model changed or shown otherwise under a walker.
+  useEffect(() => { if (walkStart) walkApi.current.start(walkStart); else walkApi.current.stop(); }, [walkStart]);
+  useEffect(() => walkApi.current.changed(), [render, looks, layers]);
+
+  // The storeys the 3D view shows: where they are cut (capped with the section's caps below).
+  const nodes = useSession((st) => st.nodes);
+
+  // An imported DXF's drawing on its view's plane (decision 382): asked of the engine again only when what it is made of changes.
+  const dxf3d = useDisplay((st) => st.dxf3d);
+  const underlaySrc = useRef<{ refs: NodeDto[]; any: boolean }>({ refs: [], any: false });
+  const [underlayRev, setUnderlayRev] = useState(0);
+  useEffect(() => {
+    const now = underlaySources(nodes);
+    if (sameSources(now.refs, underlaySrc.current.refs)) return;
+    underlaySrc.current = now;
+    setUnderlayRev((v) => v + 1);
+  }, [nodes]);
+  useEffect(() => {
+    const s = scene.current;
+    if (!s) return;
+    let stale = false;
+    const put = (batches: UnderlayBatch[]) => {
+      const old = s.getObjectByName('cad-underlays');
+      if (old) { s.remove(old); disposeUnderlays(old as THREE.Group); }
+      if (batches.length) { const g = underlayGroup(batches, theme === 'graphite'); g.visible = useDisplay.getState().dxf3d; s.add(g); }
+      invalidate.current();
+      // How many batches are drawn, for the guide's scenes to see.
+      if (host.current) host.current.dataset.underlays = String(batches.length);
+    };
+    if (!underlaySrc.current.any) { put([]); return; }
+    // A moment after the last change (an import, a layer turned off), the newest answer kept.
+    const timer = setTimeout(() => {
+      void engine.call<UnderlayBatch[]>('doc.query', { name: 'drafting.underlays3d', args: {} }).then((b) => { if (!stale) put(Array.isArray(b) ? b : []); }).catch(() => undefined);
+    }, 60);
+    return () => { stale = true; clearTimeout(timer); };
+  }, [underlayRev, theme]);
+  useEffect(() => {
+    const g = scene.current?.getObjectByName('cad-underlays');
+    if (g) { g.visible = dxf3d; invalidate.current(); }
+  }, [dxf3d]);
+
+  // The clouds as their links and the 3D view's graphics say (its Point clouds tab, its set's or its style's: the engine resolves them).
+  const [cloudRows, setCloudRows] = useState<Record<string, ViewCloud>>({});
+  const hasClouds = [...nodes.values()].some(isCloudLink);
+  useEffect(() => {
+    if (!hasClouds) { setCloudRows({}); return; }
+    let live = true;
+    const timer = setTimeout(() => void query<{ graphics?: { pointClouds?: Record<string, ViewCloud> } | null }>('view.visibility', { id: view3dId ?? '3d' })
+      .then((v) => { if (live) setCloudRows(v?.graphics?.pointClouds ?? {}); }), 80);
+    return () => { live = false; clearTimeout(timer); };
+  }, [nodes, view3dId, hasClouds]);
+  const cloudKey = JSON.stringify(cloudSpecs(nodes, cloudRows));
+  cloudKeyRef.current = cloudKey;
+  useEffect(() => { cloudLayer.current?.sync(JSON.parse(cloudKey)); splatLayer.current?.sync(JSON.parse(cloudKey)); }, [cloudKey]);
+
+  const storeySetting = settingOf(nodes, view3dId);
+  const storeyList = storeysOf({ nodes, relations: useSession.getState().relations });
+  const activeId = storey?.id ?? null;
+  const cut = cutZ(storeySetting, storeyList, activeId);
+  const storeysChip = chipText(storeySetting, storeyList, activeId);
+  const layerSetting = layers3dOf(nodes, view3dId);
+  const layersText = layersChip(layerSetting);
+
+  // A section shown in 3D: the model cut by its plane (and its depth), its drawing on the cut; an elevation only turns the camera.
+  const sectionId = useSection3d((st) => st.viewId);
+  const sectionNode = useSession((st) => (sectionId ? st.nodes.get(sectionId) : undefined));
+  const sectionDrawing = useDrawing(sectionId);
+  const sectionNotes = useSection3d((st) => st.annotations);
+  const capStyle = useSection3d((st) => st.caps);
+  const box = useSectionBox((st) => st.box);
+  const boxHidden = useSectionBox((st) => st.hidden);
+  useEffect(() => { remember3d(keyRef.current, { box }); }, [box]);
+  const shown = sectionId && sectionDrawing?.frame && sectionDrawing.kind === 'section' ? sectionDrawing : null;
+  // What cuts the model: the section shown (its plane, and its depth) and the section box's faces.
+  const planes: ClipPlane[] = [...(shown ? sectionPlanes(shown.frame!, shown.depth) : []), ...(box ? boxPlanes(box) : [])];
+  const clipKey = planesKey(planes);
+  // Closed by caps in their materials; with the drawing's hatches instead, the section's own drawing closes its cut
+  // and the box's faces are capped as a sheet draws a cut, at the section's scale (1:50 without one).
+  // The cut above the storeys shown is capped too, so a storey seen alone reads as its plan cuts it.
+  const storeyCap: ClipPlane[] = cut === null ? [] : [{ normal: [0, 0, -1], constant: cut }];
+  const capPlanes = [...(capStyle === 'drawing' ? (box ? boxPlanes(box) : []) : planes), ...storeyCap];
+  const capScale = shown?.scale ?? 50;
+  const capKey = `${planesKey(capPlanes)}|${capStyle}|${capScale}|${layers}`;
+  useEffect(() => {
+    // The view deleted: nothing to show any more.
+    if (sectionId && !sectionNode) useSection3d.setState({ viewId: null });
+  }, [sectionId, sectionNode]);
+  useEffect(() => {
+    const s = scene.current;
+    if (!s) return;
+    let stale = false;
+    const put = (items: CapItem[]) => {
+      for (const g of caps.current.values()) { s.remove(g); dispose(g); }
+      caps.current.clear();
+      capItems.current = items;
+      walkApi.current.changed();
+      for (const it of items) { const g = capsOf(it); s.add(g); caps.current.set(it.nodeId, g); }
+      setCapsShown((v) => v + 1);
+      traceDirty.current();
+      invalidate.current();
+    };
+    if (!capPlanes.length) { put([]); return; }
+    // Asked a moment after the last change (a face dragged asks once it rests), the newest answer kept.
+    const timer = setTimeout(() => {
+      void engine.call<CapItem[]>('view.caps', { planes: capPlanes, style: capStyle, scale: capScale, layers, fine: fineBodies.fine, maquette: fineBodies.maquette }).then((items) => { if (!stale) put(items ?? []); }).catch(() => undefined);
+    }, 60);
+    return () => { stale = true; clearTimeout(timer); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- capKey stands for capPlanes
+  }, [capKey, render, fineBodies.on, fineBodies.version, fineBodies.fine, fineBodies.maquette]);
+  useEffect(() => {
+    const s = scene.current, renderer = rendererRef.current;
+    if (!s || !renderer) return;
+    const old = s.getObjectByName('section-overlay');
+    if (old) { s.remove(old); dispose(old); }
+    sectionClip.current = planes.map((p) => new THREE.Plane(new THREE.Vector3(...p.normal), p.constant));
+    const d = sectionId ? sectionDrawing : null;
+    if (d?.frame && d.kind === 'section') s.add(sectionOverlay(d, sectionNotes, Math.min(8, renderer.capabilities.getMaxAnisotropy()), capStyle === 'drawing'));
+    applyClip();
+    walkApi.current.changed();
+    if (!sectionId) framedSection.current = null;
+    else if (d?.frame && framedSection.current !== sectionId && !useWalk.getState().start) {
+      framedSection.current = sectionId;
+      const api = useCamera.getState().api;
+      if (api && d.kind === 'section') { api.setOrtho(false); api.orbitTo(sectionPose(d.frame, d.bounds, useCamera.getState().fov)); }
+      // An elevation: looking its way, level, the whole model framed.
+      else if (api) { api.setOrtho(false); api.orbitTo({ azimuth: Math.atan2(d.frame.dir[1], d.frame.dir[0]), pitch: -0.05 }, false); api.fit(); }
+    }
+    invalidate.current();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- clipKey stands for planes
+  }, [sectionId, sectionDrawing, sectionNotes, capStyle, clipKey]);
+
+  // The storeys the 3D view shows (report #29): the others hidden by their looks (Storeys3DLooks); here the cut above them, and the chip.
+  useEffect(() => {
+    // Keeps what lies under the height: −z + cut ≥ 0.
+    storeyClip.current = cut === null ? [] : [new THREE.Plane(new THREE.Vector3(0, 0, -1), cut)];
+    applyClip();
+    walkApi.current.changed();
+    invalidate.current();
+  }, [cut]);
+
+  // What this 3D view hides (decision 498): hidden by a look (Visibility / Graphics, Hide / Isolate, a phase, a storey or a link
+  // put away) or wholly cut away; Properties says so of an element selected from a list. Set again whenever what it shows changes.
+  const paneActive = usePaneActive();
+  const paneKey = useRef(`3d:${Math.random().toString(36).slice(2)}`).current;
+  useEffect(() => {
+    if (!paneActive) { clearShown(paneKey); return; }
+    publishShown(paneKey, (id) => {
+      const planes = rendererRef.current?.clippingPlanes ?? [];
+      const e = items.current.get(id);
+      if (e) return !e.object.visible || clipped(e.item, planes);
+      const whole = render.get(id);
+      return !!whole?.instance && !!useLooks.getState().looks[id]?.hidden;
+    });
+  }, [paneActive, paneKey, render, looks, visualStyle, walking, drafts3d, layers, cut, clipKey]);
+  useEffect(() => () => clearShown(paneKey), [paneKey]);
+
+  return (
+    <>
+      <div ref={host} className={`viewport${tool?.gesture ? ' picking' : ''}`} data-testid="view3d" />
+      {lightBudget.total > 0 && (
+        <div className="lights-budget" data-testid="lights-budget" title="The lights drawn now: the nearest and brightest first, a few with shadows; a rendered image takes them all">
+          <Lightbulb size={12} /><span>{`${lightBudget.drawn} / ${lightBudget.total} lights, ${lightBudget.shadowed} with shadows`}</span>
+        </div>
+      )}
+      {renderProfile !== 'drawing' && renderProfile !== 'diagram' && !walkStart && !renderMode.on && (
+        <button type="button" className="render-button" data-testid="render-button" onClick={() => setRendering(true)}
+          title="Render this view as a photograph: light traced as it bounces, refining while the camera rests">
+          <Aperture size={13} /><span>Render</span>
+        </button>
+      )}
+      {regionDrag &&<svg className="region-3d">{<SelectRegion d={regionDrag} />}</svg>}
+      {(sectionId || walkStart || box || storeysChip || layersText || regionOn || hiding || renderMode.on) && (
+        <div className="view3d-modes">
+          {renderMode.on && (
+            <span className="mode-chip render" data-testid="render-chip">
+              <span>Render</span>
+              <span className="mode-hint">{renderMode.phase === 'loading' ? 'Preparing the renderer…' : renderMode.phase === 'building' ? 'Building the scene…'
+                : renderMode.phase === 'still' && renderMode.still ? `Image ${renderMode.still.width} × ${renderMode.still.height}: ${Math.round(renderMode.still.progress * 100)} %`
+                : renderMode.phase === 'denoising' ? 'Denoising…' : readout(renderMode.samples, renderMode.seconds)}</span>
+              {renderMode.pickingFocus && <span className="mode-hint">Click what should be in focus</span>}
+              {renderMode.phase === 'still'
+                ? <button type="button" onClick={() => useRenderApi.getState().api?.cancel()} title="Stop the image">Stop</button>
+                : <button type="button" onClick={() => useUi.setState({ dialog: 'render' })} title="Resolution, samples, denoising, depth of field, exposure; save the image">Settings…</button>}
+              <button type="button" className="mode-close" title="Back to the live view" aria-label="Back to the live view" onClick={toggleRendering}><X size={12} /></button>
+            </span>
+          )}
+          {regionOn && (
+            <span className="mode-chip select-region">
+              <span>Select region</span>
+              <span className="mode-hint">Drag: right a window, left crossing · Space a lasso · right button turns, middle moves</span>
+              <button type="button" className="mode-close" title="Select region off (SR)" aria-label="Select region off" onClick={toggleRegion3d}><X size={12} /></button>
+            </span>
+          )}
+          {hiding && (
+            <span className="mode-chip hidden-temp">
+              <span>Temporary hide/isolate</span>
+              <button type="button" className="mode-close" title="Show everything again (HR)" aria-label="Show everything again" onClick={resetTemporary}><X size={12} /></button>
+            </span>
+          )}
+          {sectionId && (
+            <span className="mode-chip section">
+              <span>{sectionNode?.props.kind === 'elevation' ? 'Elevation' : 'Section'}</span><span data-no-i18n>{sectionNode?.name ?? ''}</span>
+              {sectionNode?.props.kind !== 'elevation' && (
+                <button type="button" className="mode-toggle" aria-pressed={sectionNotes} title="Show the section's dimensions, levels, tags and texts on the cut"
+                  onClick={() => useSection3d.setState({ annotations: !sectionNotes })}>Annotations</button>
+              )}
+              {sectionNode?.props.kind !== 'elevation' && (
+                <button type="button" className="mode-toggle" aria-pressed={capStyle === 'drawing'} title="Close the cut with the section's drawing (its cut fills and hatches, as sheets print it) instead of the materials"
+                  onClick={() => useSection3d.setState({ caps: capStyle === 'drawing' ? 'material' : 'drawing' })}>Hatches</button>
+              )}
+              <button type="button" className="mode-close" title="Stop showing the section in 3D" aria-label="Stop showing the section in 3D" onClick={() => useSection3d.setState({ viewId: null })}><X size={12} /></button>
+            </span>
+          )}
+          {box && !walkStart && (
+            <span className="mode-chip section">
+              <span>Section box</span>
+              {!boxHidden && <span className="mode-hint">Drag a face's arrow to move it</span>}
+              <button type="button" onClick={fitSectionBox} title="The box round the whole model">Fit</button>
+              <button type="button" onClick={() => void cutAtPlan()} title="The box's top at the active storey's plan cut">Cut at plan</button>
+              <button type="button" onClick={alignSectionBox} title="Turn the box the way the selected element runs (a wall's axis)">Align</button>
+              <button type="button" className="mode-toggle" aria-pressed={capStyle === 'drawing'} title="Draw the box's cuts as a sheet does (each material's cut fill and hatch) instead of the materials"
+                onClick={() => useSection3d.setState({ caps: capStyle === 'drawing' ? 'material' : 'drawing' })}>Hatches</button>
+              <button type="button" className="mode-toggle" aria-pressed={boxHidden} title="Hide the section box frame and handles while keeping the cut active"
+                onClick={toggleSectionBoxHidden}>{boxHidden ? 'Show box' : 'Hide box'}</button>
+              <button type="button" className="mode-close" title="Section box off" aria-label="Section box off" onClick={() => { useSectionBox.setState({ box: null, hidden: false }); commitBox(); }}><X size={12} /></button>
+            </span>
+          )}
+          {storeysChip && (
+            <span className="mode-chip storeys" title="Which storeys this 3D view shows: View → Storeys shown, or its properties">
+              <span>Storeys</span>
+              {storeysChip.name && <span data-no-i18n>{storeysChip.name}</span>}
+              <span>{storeysChip.text}</span>
+              {storeysChip.cut && <span className="mode-hint">{storeysChip.cut}</span>}
+              <button type="button" className="mode-close" title="Show every storey" aria-label="Show every storey" onClick={() => void showAllStoreys3d(view3dId ?? '3d')}><X size={12} /></button>
+            </span>
+          )}
+          {layersText && (
+            <span className="mode-chip layers" title="Which layers of walls, floors and footings this 3D view shows: View → View settings, or its properties">
+              <span>Layers shown</span>
+              <span>{layersText}</span>
+              <button type="button" className="mode-close" title="Show every layer" aria-label="Show every layer"
+                onClick={() => void execute('view.setStyle', { id: view3dId ?? '3d', ...everyLayerPatch(layerSetting) })}><X size={12} /></button>
+            </span>
+          )}
+          {walkStart && (
+            <span className="mode-chip walk">
+              <span>{flying ? 'Flying' : 'Walking'}</span><span data-no-i18n>{walkStart.name}</span>
+              <span className="mode-hint">{flying ? 'Drag to look · W A S D to fly · E/Q up and down · Shift faster' : 'Drag to look · W A S D to walk · Space jumps · Shift runs'}</span>
+              <button type="button" className={`toggle${flying ? ' active' : ''}`} aria-pressed={flying} onClick={toggleFly} title="Fly through walls and floors, without gravity (F)">Fly</button>
+              <button type="button" onClick={exitWalk} title="Back to the camera there was (Esc)">Exit walk</button>
+            </span>
+          )}
+        </div>
+      )}
+      {faceLabel && !onCanvasEdit && <div className="face-label" style={{ left: faceLabel.x + 14, top: faceLabel.y + 14 }}>{faceLabel.text}</div>}
+      <Grips3D camera={camRef} canvas={host} scene={scene} />
+      {!walkStart && <SectionBox3D camera={camRef} canvas={host} />}
+      {!walkStart && <AxisDrag3D camera={camRef} canvas={host} />}
+      {!walkStart && <FaceSketch3D camera={camRef} canvas={host} />}
+      {!walkStart && <Draft3D camera={camRef} canvas={host} scene={scene} />}
+      {!walkStart && <Move3D camera={camRef} canvas={host} scene={scene} invalidate={invalidate} />}
+      {!walkStart && <Place3D camera={camRef} canvas={host} scene={scene} />}
+      {!walkStart && <Drop3D camera={camRef} canvas={host} scene={scene} />}
+      {!walkStart && <Sketch3D camera={camRef} canvas={host} scene={scene} />}
+      {!walkStart && <Guides3D camera={camRef} canvas={host} />}
+      {!walkStart && <SketchGrips3D camera={camRef} canvas={host} scene={scene} />}
+      {!walkStart && <RefPlanes3D camera={camRef} canvas={host} />}
+      {!walkStart && <Location3D camera={camRef} canvas={host} />}
+      {!walkStart && overlays3d().map((Overlay, k) => <Overlay key={k} camera={camRef} canvas={host} scene={scene} invalidate={invalidate} />)}
+      <KeyPlan mode="3d" />
+    </>
+  );
+}

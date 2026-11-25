@@ -1,0 +1,376 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Drawing.Views;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Drafting.Cad;
+
+/// <summary>
+/// A drafting layer: its colour, pen width (paper mm), line type, and whether it shows and can be edited; the standards' layer
+/// group it is in (<see cref="Group"/>), which shows and locks its layers together (<see cref="Shows"/>, <see cref="Held"/>).
+/// One list, the project's <c>draftLayers</c> (<see cref="DraftLayers"/>, decision 714), whichever way it was made.
+/// </summary>
+public sealed record CadLayer(string Name, string Color = "#18181b", double Weight = 0.25, string LineType = "continuous", bool Visible = true, bool Locked = false, string? Group = null)
+{
+    /// <summary>Its group hidden (read from the standards; never written with the layer).</summary>
+    public bool GroupHidden { get; init; }
+    /// <summary>Its group locked (read from the standards; never written with the layer).</summary>
+    public bool GroupLocked { get; init; }
+    /// <summary>Whether it shows: its own switch and its group's.</summary>
+    public bool Shows => Visible && !GroupHidden;
+    /// <summary>Whether its shapes are held from editing: by itself or its group.</summary>
+    public bool Held => Locked || GroupLocked;
+
+    public static readonly string[] LineTypes = ["continuous", "dashed", "dotted", "dashdot", "dashdotdot"];
+
+    /// <summary>The line type's dashes on paper (mm), Lapin's own only.</summary>
+    public double[]? Dash => Dashes.Of(LineType) is { Length: > 0 } d ? d : null;
+
+    /// <summary>The line type's dashes on paper (mm): the project's own of that name (docs/plan-user-extensibility.md §3.6), else Lapin's.</summary>
+    public double[]? DashIn(StyleBook book) => Standards.DashOf(book, LineType) is { Length: > 0 } d ? d : null;
+
+    public JsonObject ToJson()
+    {
+        var o = new JsonObject { ["name"] = Name, ["color"] = Color, ["weight"] = Weight, ["lineType"] = LineType, ["visible"] = Visible, ["locked"] = Locked };
+        if (Group != null) o["group"] = Group;
+        return o;
+    }
+
+    public static CadLayer? From(JsonNode? n)
+    {
+        if (n is not JsonObject o || ((string?)o["name"])?.Trim() is not { Length: > 0 } name) return null;
+        static bool B(JsonNode? x, bool d) => x is JsonValue v && v.TryGetValue<bool>(out var b) ? b : d;
+        // Lapin's line types, or one of the project's own by its name (an unknown one draws continuous).
+        var lt = (string?)o["lineType"] is { Length: > 0 and <= 64 } l ? l : "continuous";
+        var group = o["group"] is JsonValue gv && gv.TryGetValue<string>(out var g) && g.Length > 0 ? g : null;
+        return new CadLayer(name, (string?)o["color"] ?? "#18181b", Math.Clamp(Json.Number(o["weight"]) ?? 0.25, 0.05, 2), lt, B(o["visible"], true), B(o["locked"], false), group);
+    }
+}
+
+/// <summary>
+/// CAD drafting on a view: lines, polylines, circles, arcs and hatches as
+/// IfcAnnotation (DRAFT) on a view, each on a drafting layer (the project's
+/// <c>draftLayers</c>; "0" always there). They draw over the view's drawing
+/// and on its sheets, and export with it (DXF on their layer).
+/// </summary>
+public static class Drafts
+{
+    public const string Predefined = "DRAFT";
+    /// <summary>What a drafted shape's own pen may be (paper mm), as a layer's.</summary>
+    public const double MinWeight = 0.05, MaxWeight = 2;
+
+    /// <summary>A drafted shape's pen (paper mm): its own (issue #89, decision 715), else its layer's.</summary>
+    public static double WeightOf(Entity e, CadLayer layer) => e.NumOrNull("weight") is double w && w > 0 ? Math.Clamp(w, MinWeight, MaxWeight) : layer.Weight;
+
+    /// <summary>A drafted shape's dashes on paper (mm): its own line type's (continuous: none), else its layer's.</summary>
+    public static double[]? DashOf(Entity e, CadLayer layer, StyleBook book) =>
+        e.Str("lineType") is { Length: > 0 } lt ? (Standards.DashOf(book, lt) is { Length: > 0 } d ? d : null) : layer.DashIn(book);
+    /// <summary>The mark layer of construction lines: drawn on screen, left out of sheets, PDF and DXF.</summary>
+    public const string ConstructionLayer = Views.ConstructionLayer;
+
+    public static IReadOnlyList<CadLayer> Layers(IModelView m)
+    {
+        var project = Spatial.Project(m);
+        var list = (project?.Attrs[DraftLayers.Key] as JsonArray)?.Select(CadLayer.From).OfType<CadLayer>().ToList() ?? [];
+        if (list.All(l => l.Name != "0")) list.Insert(0, new CadLayer("0"));
+        // The standards' layer groups show and lock their layers together.
+        if (list.Any(l => l.Group != null) && project?.Attrs["drafting"]?["layerGroups"] is JsonArray groups)
+            for (var i = 0; i < list.Count; i++)
+                if (list[i].Group is { } gid && groups.OfType<JsonObject>().FirstOrDefault(x => (string?)x["id"] == gid) is { } g)
+                    list[i] = list[i] with { GroupHidden = g["visible"] is JsonValue v && v.TryGetValue<bool>(out var vis) && !vis, GroupLocked = g["locked"] is JsonValue lv && lv.TryGetValue<bool>(out var lk) && lk };
+        return list;
+    }
+
+    public static CadLayer LayerOf(IModelView m, string? name) => Layers(m).FirstOrDefault(l => l.Name == name) ?? Layers(m)[0];
+
+    public static void WriteLayers(ICommandContext ctx, IEnumerable<CadLayer> layers)
+    {
+        var project = Spatial.Project(ctx.Model) ?? throw new CommandException("The model has no project.");
+        var attrs = project.CloneAttrs();
+        attrs[DraftLayers.Key] = new JsonArray(layers.Select(l => (JsonNode)l.ToJson()).ToArray());
+        ctx.Replace(project.With(attrs: attrs));
+    }
+
+    public static IEnumerable<Entity> On(IModelView m, string viewId) =>
+        m.OfClass(IfcClass.Annotation).Where(e => e.PredefinedType == Predefined && e.Str("viewId") == viewId);
+
+    public static Shape? ShapeOf(Entity e) => Shape.From(e.Attrs["shape"]);
+
+    /// <summary>
+    /// A drafted shape as lines in space, what the 3D view draws of it (decision 312), in its own colour or its layer's:
+    /// a line or polyline with heights (a DXF's 3D lines, kept as <c>heights</c>, one a vertex) at those heights; any
+    /// other shape drawn by hand on its view's plane (<see cref="Views.PlaneOf"/>: a plan's at its storey's level, a
+    /// section's, an elevation's once fixed, a reference plane's), circles and arcs in chords. Construction lines
+    /// (role draft) and a DXF's flat drawing (<c>dxf</c>, from an import) stay on their views; dimensions, texts and
+    /// tags are other annotations and have no geometry. A placed symbol stands there too (<see cref="SymbolInstances.Geometry3d"/>).
+    /// View → Drafts in 3D hides them all in the interface.
+    /// </summary>
+    public static ElementGeometry? Geometry3d(Entity e, IModelView m, IServices services)
+    {
+        if (e.PredefinedType == SymbolInstances.Predefined) return SymbolInstances.Geometry3d(e, m, services);
+        if (e.PredefinedType != Predefined) return null;
+        var shape = ShapeOf(e);
+        var color = e.Str("color") ?? RoleColor(e.Str("role")) ?? LayerOf(m, e.Str("layer")).Color;
+        if (e.Attrs["heights"] is JsonArray za)
+        {
+            var pts = shape switch { Line l => new List<Vec2> { l.A, l.B }, Polyline p => [.. p.Pts, .. p.Closed ? new[] { p.Pts[0] } : []], _ => null };
+            if (pts == null) return null;
+            var zs = za.Select(z => Json.Number(z) ?? 0).ToList();
+            if (zs.Count == pts.Count - 1 && pts.Count >= 3) zs.Add(zs[0]); // a closed polyline's return to its start
+            if (zs.Count != pts.Count) return null;
+            return new ElementGeometry([], Lines: [pts.Select((p, i) => new Vec3(p.X, p.Y, zs[i])).ToList()], LineColor: color);
+        }
+        if (shape == null || e.Str("role") == "draft" || e.Bool("dxf")) return null;
+        if (Views.Find(m, e.Str("viewId") ?? "") is not { } view || view.Str("kind") is "3d") return null;
+        var (lo, hi) = Geo.Bounds(shape);
+        if (Views.PlaneOf(m, services, view, (lo.X + hi.X) / 2) is not { } plane) return null;
+        var flat = Flatten(shape);
+        return flat.Count == 0 ? null : new ElementGeometry([], Lines: flat.Select(run => (IReadOnlyList<Vec3>)run.Select(plane.World).ToList()).ToList(), LineColor: color);
+    }
+
+    /// <summary>
+    /// A drafted shape in the model for a graph (decision 534), placed as <see cref="Geometry3d"/> places it but whatever its
+    /// role or origin (construction lines and a DXF's flat linework too: the user picked them): on its view's plane, a
+    /// DXF's 3D lines at their heights; a closed shape without its start repeated. Null: not a drafted shape, or on a 3D view.
+    /// </summary>
+    public static IReadOnlyList<DraftedRun>? Runs(Entity e, IModelView m, IServices services)
+    {
+        if (e.Class != IfcClass.Annotation || e.PredefinedType != Predefined || ShapeOf(e) is not { } shape) return null;
+        var closed = shape is Circle || shape is Polyline { Closed: true } || shape is Ellipse { Whole: true };
+        static List<T> Open<T>(List<T> run, bool closed) => closed && run.Count > 2 ? run[..^1] : run;
+        if (e.Attrs["heights"] is JsonArray && Geometry3d(e, m, services) is { Lines: { Count: > 0 } lines })
+            return [.. lines.Select(l => new DraftedRun(Open(l.ToList(), closed), closed))];
+        if (Views.Find(m, e.Str("viewId") ?? "") is not { } view || view.Str("kind") is "3d") return null;
+        var (lo, hi) = Geo.Bounds(shape);
+        if (Views.PlaneOf(m, services, view, (lo.X + hi.X) / 2) is not { } plane) return null;
+        Vec3? centre = shape switch { Circle c => plane.World(c.C), Arc a => plane.World(a.C), Ellipse el => plane.World(el.C), _ => null };
+        return [.. Flatten(shape).Select(run => new DraftedRun(Open(run.Select(plane.World).ToList(), closed), closed, centre))];
+    }
+
+    /// <summary>A shape's runs of points on its view: a polyline closed back to its start, a circle and an arc in chords (decision 203: at most 1 mm off).</summary>
+    public static List<List<Vec2>> Flatten(Shape s)
+    {
+        static List<Vec2> Round(Vec2 c, double r, double start, double sweep)
+        {
+            var n = Chords.Count(r, sweep, 3);
+            return Enumerable.Range(0, n + 1).Select(i => { var a = start + sweep * i / n; return new Vec2(c.X + r * Math.Cos(a), c.Y + r * Math.Sin(a)); }).ToList();
+        }
+        return s switch
+        {
+            Line l => [[l.A, l.B]],
+            Polyline { Pts.Count: >= 2 } p => [[.. p.Pts, .. p.Closed ? new[] { p.Pts[0] } : []]],
+            Circle c when c.R > 1e-9 => [Round(c.C, c.R, 0, 2 * Math.PI)],
+            Arc a when a.R > 1e-9 => [Round(a.C, a.R, a.Start, a.Sweep)],
+            // An ellipse by the one rule for curves (audit S4).
+            Ellipse el => [el.Points()],
+            _ => [],
+        };
+    }
+
+    public static Entity Require(IModelView m, string? id, bool editable = true)
+    {
+        var e = m.Get(id ?? "") is { Class: IfcClass.Annotation, PredefinedType: Predefined } x ? x : throw new CommandException("Not a drafted shape.");
+        if (editable && LayerOf(m, e.Str("layer")).Held) throw new CommandException($"The layer „{e.Str("layer")}” is locked.");
+        return e;
+    }
+
+    /// <summary>
+    /// What a drafted shape is for, so Studio's operations find their parts:
+    /// construction lines (draft: shown, never printed), a profile, a hole, a
+    /// path, a second rail, an axis, the profile a sweep ends with; a stair's sketch's sides and risers (its path is a path).
+    /// </summary>
+    public static readonly string[] Roles = ["draft", "profile", "hole", "path", "rail", "axis", "endProfile", "boundary", "riser"];
+
+    /// <summary>The colour a shape of a stair's sketch is drawn in when it has none of its own (as Revit's: the sides green, the path blue).</summary>
+    public static string? RoleColor(string? role) => role switch { "boundary" => "#16a34a", "riser" => "#18181b", _ => null };
+
+    public static string? CheckRole(JsonNode? role) => (string?)role switch
+    {
+        null or "" => null,
+        { } r when Roles.Contains(r) => r,
+        { } r => throw new CommandException($"„{r}” is not a role ({string.Join(", ", Roles)})."),
+    };
+
+    public static Entity Add(ICommandContext ctx, string viewId, string? layer, Shape shape, string? role = null)
+    {
+        var attrs = new JsonObject { ["viewId"] = viewId, ["layer"] = layer ?? "0", ["shape"] = shape.ToJson() };
+        if (role != null) attrs["role"] = role;
+        var e = new Entity(ctx.NewId(), IfcClass.Annotation, UniqueName(ctx.Model, viewId, role != null && role != "draft" ? Title(role) : Name(shape)), attrs, Predefined);
+        ctx.Add(e);
+        return e;
+    }
+
+    /// <summary>A shape's outline changed: its name stays (a name given, or the unique one it was born with).</summary>
+    public static void Set(ICommandContext ctx, Entity e, Shape shape)
+    {
+        var attrs = e.CloneAttrs();
+        attrs["shape"] = shape.ToJson();
+        ctx.Replace(e.With(attrs: attrs));
+    }
+
+    static string Name(Shape s) => s switch { Line => "Line", Polyline { Closed: true } => "Polygon", Polyline => "Polyline", Circle => "Circle", Arc => "Arc", Ellipse { Whole: true } => "Ellipse", Ellipse => "Elliptical arc", _ => "Shape" };
+    static string Title(string role) => role switch { "endProfile" => "End profile", _ => char.ToUpperInvariant(role[0]) + role[1..] };
+
+    /// <summary>A name no other drafted shape on the view has: the word and the next number (Line 12, Profile 3).</summary>
+    public static string UniqueName(IModelView m, string viewId, string word)
+    {
+        var taken = On(m, viewId).Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var next = 1 + taken.Select(n => n.StartsWith(word + " ", StringComparison.OrdinalIgnoreCase) && int.TryParse(n[(word.Length + 1)..], out var k) ? k : 0).DefaultIfEmpty(0).Max();
+        while (taken.Contains($"{word} {next}")) next++;
+        return $"{word} {next}";
+    }
+
+    /// <summary>What drafting edits cut against on a view: its other shapes and the lines of its drawing.</summary>
+    public static List<Shape> Boundaries(ICommandContext ctx, Entity view, string exceptId)
+    {
+        var o = On(ctx.Model, view.Id).Where(e => e.Id != exceptId).Select(ShapeOf).OfType<Shape>().ToList();
+        if (Views.Generate(ctx.Query, view).Drawing is { } d)
+        {
+            o.AddRange(d.Lines.Select(l => (Shape)new Line(l.A, l.B)));
+            o.AddRange(d.Cuts.SelectMany(c => c.Loops).Select(l => (Shape)new Polyline(l, true)));
+        }
+        return o;
+    }
+
+    /// <summary>The loops a hatch can fill on a view: closed shapes and the drawing's cut areas.</summary>
+    public static List<IReadOnlyList<Vec2>> Loops(ICommandContext ctx, Entity view)
+    {
+        var loops = new List<IReadOnlyList<Vec2>>();
+        foreach (var s in On(ctx.Model, view.Id).Where(e => e.Attrs["hatch"] == null).Select(ShapeOf))
+            switch (s)
+            {
+                case Polyline { Closed: true } p when p.Pts.Count >= 3: loops.Add(p.Pts); break;
+                case Circle c: loops.Add(Geo.Polylines(c)[0].SkipLast(1).ToList()); break;
+                case Ellipse { Whole: true } el: loops.Add(el.Points().SkipLast(1).ToList()); break;
+            }
+        if (Views.Generate(ctx.Query, view).Drawing is { } d) loops.AddRange(d.Cuts.SelectMany(c => c.Loops).Select(l => (IReadOnlyList<Vec2>)l));
+        return loops;
+    }
+
+    /// <summary>A drafted hatch's own size (report #157): "paper" or "model"; null, its pattern's.</summary>
+    public static HatchUnits? UnitsOf(JsonObject hatch) => HatchScale.Parse((string?)hatch["units"]);
+
+    public static IReadOnlyList<IReadOnlyList<Vec2>> HatchLoops(Entity e) =>
+        (e.Attrs["hatch"]?["loops"] as JsonArray)?.OfType<JsonArray>()
+            .Select(l => (IReadOnlyList<Vec2>)Args.StoredPoints(l)).ToList() ?? [];
+
+    /// <summary>The view's drafted shapes, on their layers' pens.</summary>
+    public static IEnumerable<ViewMark> Marks(ViewContext c)
+    {
+        var layers = Layers(c.Model).ToDictionary(l => l.Name);
+        var hidden = (c.View.Attrs["hiddenLayers"] as JsonArray)?.Select(x => (string?)x).ToHashSet() ?? [];
+        var patterns = DraftingResources.Patterns(c.Model);
+        var vg = VisibilityGraphics.Of(c.Model, c.View);
+        foreach (var e in On(c.Model, c.View.Id))
+        {
+            var layer = layers.GetValueOrDefault(e.Str("layer") ?? "0") ?? layers["0"];
+            if (!layer.Shows || hidden.Contains(layer.Name)) continue;
+            var color = e.Str("color") ?? RoleColor(e.Str("role")) ?? layer.Color;
+            // A link's shapes: out when it is hidden, grey when it is halftone.
+            if (e.Str(Links.Key) is { } linkId)
+            {
+                var link = c.Model.Get(linkId);
+                if (link is not { Class: Links.Class } || !Links.Visible(link)) continue;
+                if (Links.IsHalftone(link)) color = Links.Halftone;
+            }
+            // Halftone in this view: its link's row, or its DXF import's (Visibility / Graphics, decision 391).
+            if (vg.Halftone(e)) color = Links.Halftone;
+            var mk = new ViewMark(e.Id);
+            if (e.Attrs["hatch"] is JsonObject h)
+            {
+                var loops = HatchLoops(e);
+                if (loops.Count == 0) continue;
+                var pattern = HatchLibrary.Find((string?)h["pattern"] ?? "LINES45", patterns);
+                var bg = HexColor.IsColour((string?)h["background"]) ? ((string)h["background"]!).Trim() : null;
+                if (bg != null && pattern is { Solid: false }) mk.Fills.Add((loops, bg));
+                if (pattern == null || pattern.Solid) mk.Fills.Add((loops, color));
+                else if (BattHatch.Is(pattern))
+                {
+                    foreach (var s in BattHatch.Segments(loops, 1.2 * c.Mm, 20_000)) mk.Line(s.A, s.B, layer.Name, Pens.Default.Hatch, color);
+                }
+                else
+                {
+                    var scale = Json.Number(h["scale"]) ?? 1;
+                    var origin = Args.TryPoint(h["origin"]);
+                    // Its size: on paper (the same at every scale) or real (following the view's scale), as the hatch says, else
+                    // as its pattern is (report #157); a real-size one too dense on paper at this scale is left out, as an element's.
+                    if (HatchScale.Lay(pattern, c.Scale, scale, Json.Number(h["angle"]) ?? 0, origin, 20_000, UnitsOf(h), ViewStyles.Of(c.Model, c.View).MinHatchSpacing) is { } laid)
+                        foreach (var s in HatchFill.Segments(loops, pattern, laid).Segments) mk.Line(s.A, s.B, layer.Name, Pens.Default.Hatch, color);
+                }
+                foreach (var l in loops) mk.Shapes.Add(new Polyline(l, true).ToJson().Also(j => j["hatch"] = true));
+                // A hatch is taken by its outline and by a click inside it: a solid one has no lines to click (report #122, decision 429).
+                foreach (var l in loops) for (var i = 0; i < l.Count; i++) mk.Edges.Add((l[i], l[(i + 1) % l.Count]));
+                mk.Hit = (loops, pattern == null || pattern.Solid || bg != null);
+                mk.Snaps.AddRange(loops.SelectMany(l => l));
+                yield return mk;
+                continue;
+            }
+            if (ShapeOf(e) is not { } shape) continue;
+            // Construction lines: thin, dashed, grey, on a layer of their own that sheets and exports leave out.
+            var construction = e.Str("role") == "draft";
+            // A revision cloud (decision 620): a closed shape drawn as scallops about as long as its arc (paper mm), bulging outwards.
+            var cloud = e.NumOrNull("cloud") is double arc && arc > 0 && shape is Polyline { Closed: true } or Circle ? arc : 0;
+            foreach (var line in Geo.Polylines(shape))
+                if (construction) mk.Polyline(line, false, ConstructionLayer, Pens.Default.Hatch, "#8f98a3", [2, 1.5]);
+                else if (cloud > 0) mk.Polyline(Cloud(line, cloud * c.Mm), false, layer.Name, WeightOf(e, layer), color, DashOf(e, layer, c.Book));
+                else mk.Polyline(line, false, layer.Name, WeightOf(e, layer), color, DashOf(e, layer, c.Book));
+            if (cloud == 0 && CurveOf(shape) is { } curve) mk.Curves.Add(curve);
+            var k = Geo.Keys(shape);
+            mk.Snaps.AddRange([.. k.Endpoints, .. k.Midpoints, .. k.Centers, .. k.Quadrants]);
+            mk.Shapes.Add(shape.ToJson());
+            yield return mk;
+        }
+    }
+
+    static JsonObject Also(this JsonObject o, Action<JsonObject> f) { f(o); return o; }
+
+    /// <summary>A circle, an arc or an ellipse as the exact curve DXF writes it as (its chords draw it everywhere else); null for the others.</summary>
+    public static PenCurve? CurveOf(Shape s) => s switch
+    {
+        Circle c when c.R > 1e-9 => PenCurve.Circle(c.C, c.R),
+        Arc a when a.R > 1e-9 => PenCurve.Arc(a.C, a.R, a.Start, a.Sweep),
+        Ellipse e when e.A > 1e-9 && e.Ratio > 0 => PenCurve.Ellipse(e.C, e.M, e.Ratio, e.Whole ? 0 : e.Start, e.Sweep),
+        _ => null,
+    };
+
+    /// <summary>
+    /// A closed ring drawn as a revision cloud: each side cut into scallops about <paramref name="arc"/> long (view units), each
+    /// a half circle bulging outwards (away from the ring's inside), laid in chords.
+    /// </summary>
+    public static List<Vec2> Cloud(IReadOnlyList<Vec2> ring, double arc)
+    {
+        var pts = ring.Count > 1 && (ring[0] - ring[^1]).Length < 1e-12 ? ring.Take(ring.Count - 1).ToList() : ring.ToList();
+        if (pts.Count < 3 || arc <= 0) return [.. ring];
+        var area = 0.0;
+        for (var i = 0; i < pts.Count; i++) area += Vec2.Cross(pts[i], pts[(i + 1) % pts.Count]);
+        var outwards = area >= 0 ? -1.0 : 1.0; // anticlockwise: the outside is on each side's right
+        var o = new List<Vec2> { pts[0] };
+        for (var i = 0; i < pts.Count; i++)
+        {
+            var (a, b) = (pts[i], pts[(i + 1) % pts.Count]);
+            var side = b - a;
+            var len = side.Length;
+            if (len < 1e-12) continue;
+            var n = Math.Max(1, (int)Math.Round(len / arc));
+            var d = side * (1 / len);
+            var normal = new Vec2(-d.Y, d.X) * outwards;
+            for (var k = 0; k < n; k++)
+            {
+                var (p, q) = (a + side * ((double)k / n), a + side * ((double)(k + 1) / n));
+                var mid = (p + q) * 0.5;
+                var h = (q - p) * 0.5;
+                var r = h.Length;
+                const int steps = 8;
+                for (var j = 1; j <= steps; j++)
+                {
+                    var t = Math.PI * j / steps;
+                    o.Add(mid - h * Math.Cos(t) + normal * (r * Math.Sin(t)));
+                }
+            }
+        }
+        return o;
+    }
+}

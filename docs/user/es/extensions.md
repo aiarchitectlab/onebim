@@ -1,0 +1,92 @@
+---
+title: Extensiones
+order: 126
+summary: Añade mobiliario, plantillas de proyecto, perfiles, patrones de sombreado, cajetines y listas de precios hechos por otros desde el catálogo Lapin Extensions, y quítalos de nuevo.
+---
+
+## El catálogo
+
+**Lapin Extensions** es un catálogo gratuito de cosas hechas para Lapin por sus usuarios y por nosotros: paquetes de mobiliario, plantillas de proyecto, bibliotecas de perfiles, patrones de sombreado, cajetines y listas de precios. Cada una va a la biblioteca que Lapin ya tiene para ella, así que la usas como si la hubieras hecho tú.
+
+Abre **Archivo → Extensiones…**. **Explorar** muestra el catálogo: busca por nombre, etiqueta o por lo que contiene una extensión, o elige una categoría.
+
+![Extensiones: Explorar, los detalles de un paquete de mobiliario](shots/extensions-browse.webp)
+
+Haz clic en una extensión para ver sus detalles antes de instalarla:
+
+- **Autor** y **Licencia**. Cada extensión tiene una licencia, elegida por su autor. Una *permisiva* (MIT, CC-BY, CC0…) te deja usar lo que contiene en cualquier proyecto; con otra, *lee sus condiciones* antes.
+- **No comercial**: una extensión cuya licencia prohíbe el uso comercial (CC-BY-NC, PolyForm Noncommercial…) se marca así en la lista y en sus detalles. Puedes instalarla y aprender de ella, pero no usarla en trabajos remunerados.
+- **Funciona con**: las versiones de Lapin para las que se hizo. Si no encaja con tu Lapin, lo dice en lugar de ofrecer **Instalar**.
+- **Tamaño**, el archivo y su **SHA-256**: la huella del archivo que revisó el catálogo.
+- **Qué contiene**: sus elementos, cuando el autor los enumera.
+- **Página web** y **Tema del foro**: dónde preguntar a su autor.
+
+## Instalar, actualizar, desinstalar
+
+Haz clic en **Instalar**. Lapin descarga el archivo, comprueba que su tamaño y su SHA-256 son exactamente los que indica el catálogo (un archivo cambiado por el camino se rechaza y no se instala nada) y lo incorpora a su biblioteca:
+
+| Tipo | Adónde va |
+|---|---|
+| Mobiliario | **Interiores → Mi mobiliario…** |
+| Plantillas de proyecto | **Archivo → Nuevo desde plantilla…** |
+| Perfiles | las bibliotecas de perfiles de este ordenador |
+| Patrones de sombreado | Mis patrones, que ofrece **Gestionar → Materiales** |
+| Cajetines | los cajetines de este ordenador |
+| Listas de precios | **Ejecución → Listas de precios…**, marcadas como orientativas: los precios son del autor, compáralos con los tuyos |
+| Tipos | el proyecto abierto cuando la instalas, en un paso para deshacer (**Gestionar → Paquetes de tipos…** exporta los tuyos) |
+
+Si tu biblioteca ya tiene una lista de precios, una biblioteca de perfiles o un archivo de tramas con el mismo nombre que difiere, la **Vista previa de la importación** ofrece conservar ambos (con (2) tras el nombre), sustituirlo u omitirlo; para una plantilla de proyecto del mismo nombre, Lapin pregunta antes de sustituirla. Nada de lo que trae una extensión se ejecuta jamás: las extensiones son contenido.
+
+El catálogo de Lapin también está **firmado** por Lapin Extensions: el catálogo y cada uno de sus archivos llevan una firma que Lapin comprueba antes de leer la lista o instalar un archivo, de modo que una copia cambiada por el camino se rechaza. Una línea sobre la lista dice **Firmado por Lapin Extensions** cuando lo está.
+
+**Instaladas** muestra lo que tiene este ordenador. Cada fila abre el lugar adonde fue a parar (**Mi mobiliario…**, **Plantillas de proyecto…**), ofrece **Actualizar** cuando el catálogo tiene una versión más nueva, y **Desinstalar**.
+
+![Instaladas: el paquete de mobiliario, con el botón que abre Mi mobiliario](shots/extensions-installed.webp)
+
+![Los tipos de mobiliario del paquete en Mi mobiliario](shots/extensions-my-furniture.webp)
+
+**Desinstalar** quita de tus bibliotecas lo que añadió la extensión, y solo eso. Lo que ya pusiste en tus proyectos se queda en ellos: un tipo de mobiliario insertado en un proyecto, un proyecto iniciado desde una plantilla.
+
+## Tipos
+
+Una extensión de **tipos** trae tipos de muros, forjados, puertas, ventanas, pilares, vigas o escaleras con aquello de lo que están hechos: sus capas, materiales, perfiles y parámetros. Instalada, sus tipos entran en el proyecto abierto ahora, en un paso para deshacer: un material del mismo nombre ya en el proyecto se usa, cualquier otro se crea; un tipo ya presente exactamente igual se reutiliza, y uno del mismo nombre que difiere se añade a su lado con (2) tras el nombre. **Instaladas → Añadir sus tipos a este proyecto** los lleva a otro proyecto.
+
+![Los detalles de una extensión de tipos: su licencia marcada como no comercial](shots/extensions-types.webp)
+
+Tus propios tipos van a un paquete desde **Gestionar → Paquetes de tipos…**: marca los tipos, da un nombre al paquete y **Exportar tipos…** guarda un archivo `.lapintypes`. **Importar tipos…** en el mismo diálogo lee uno, te deja elegir sus tipos y los añade del mismo modo.
+
+![Gestionar → Paquetes de tipos…: un tipo de muro elegido para exportar](shots/type-packs-export.webp)
+
+## Scripts
+
+El catálogo también incluye **scripts de Python**. En la aplicación de escritorio ya puedes instalar uno; se ejecuta cuando Lapin tenga su consola de Python, y solo cuando tú lo ejecutes. Antes de instalarlo, sus detalles dicen qué pide (leer o cambiar el proyecto abierto, acceder a archivos o a internet). Un script puede hacer en tu ordenador lo que puedes hacer tú, así que instala scripts de autores en quienes confíes. El navegador solo admite paquetes de contenido.
+
+![Los detalles de un script: qué pide, y que aún no se puede ejecutar](shots/extensions-script.webp)
+
+## Extensiones de pago
+
+Algunas extensiones las **venden sus autores** en su propia tienda (hoy Gumroad). Aparecen como **De pago** en la lista, con su precio; el precio es *orientativo*: el que cuenta es el del vendedor, al pagar. Lapin Extensions no cobra comisión y no es parte de la venta: el vendedor cobra el pago, emite la factura y gestiona los reembolsos, según las condiciones que abre **Condiciones del vendedor**.
+
+![Los detalles de una extensión de pago: la vende su autor, Comprar, la clave de licencia](shots/extensions-paid.webp)
+
+1. Pulsa **Comprar**: la página de pago del vendedor se abre en tu navegador. Tras pagar recibes una **clave de licencia** (por correo o en la página del recibo).
+2. De vuelta en **Archivo → Extensiones…**, pega la clave en **Clave de licencia** y pulsa **Instalar**. Lapin envía la clave a la tienda, que la comprueba con la tienda del vendedor y luego da el archivo a Lapin; Lapin comprueba su tamaño, SHA-256 y firma como con cualquier otro.
+
+La clave se guarda **en este equipo** (en los ajustes de Lapin), así que la escribes una vez: las actualizaciones la usan. Lapin la comprueba de nuevo cuando se ofrece una actualización, o una vez a la semana; sin internet no se bloquea nada y lo instalado sigue funcionando.
+
+Si el vendedor reembolsa la compra o desactiva la clave, la extensión **no recibe más actualizaciones** e Instaladas lo dice; lo instalado **se queda**. **Olvidar la clave de licencia** en Instaladas quita la clave guardada (la próxima actualización la vuelve a pedir). Una extensión de pago también se instala en el navegador, desde la tienda, con la misma clave.
+
+## Otro catálogo
+
+**Catálogo…**, al pie del diálogo, fija la dirección del catálogo: una dirección https, o la ruta de un `index.json` en este ordenador o en una carpeta compartida (el catálogo propio de una empresa). Déjalo vacío para usar el de Lapin. La flecha de al lado vuelve a leer el catálogo. Un catálogo propio no necesita estar firmado: Lapin dice entonces sobre la lista que **no está firmado por Lapin Extensions**, así que instala desde él solo si confías en quien lo mantiene. Un catálogo cuya firma no es válida no se lee nunca.
+
+## Publicar las tuyas
+
+El catálogo tiene su propio sitio, **[store.lapinbim.com](https://store.lapinbim.com)**: una página para cada extensión, con sus imágenes, versiones, licencia y descargas, y una página para cada autor.
+
+Cualquiera puede publicar una extensión. Expórtala desde Lapin (Mi mobiliario → Exportar, Guardar como plantilla…, una biblioteca de perfiles, un cajetín) y después:
+
+- **En la tienda**: inicia sesión en store.lapinbim.com con tu cuenta del [foro](https://forum.lapinbim.com), abre **Your extensions** (tus extensiones), rellena el formulario y sube el archivo y unas capturas de pantalla. La tienda comprueba el archivo como lo hará Lapin y lo envía a revisión; tu página muestra la revisión y, una vez publicada, cuántas veces se ha descargado. Una versión nueva va del mismo modo.
+- **En GitHub**: adjunta el archivo a una release de un repositorio tuyo y añade su manifiesto con un pull request en [Ciuntuc-BIM-Studio/lapin-extensions](https://github.com/Ciuntuc-BIM-Studio/lapin-extensions). Su README explica cómo, y qué miran las comprobaciones automáticas.
+
+Un paquete de tipos sale de **Gestionar → Paquetes de tipos… → Exportar tipos…**; una lista de precios de **Listas de precios…**, con el botón de exportar de una lista de este ordenador (un archivo `.lapinprices`, con sus precios marcados como orientativos).

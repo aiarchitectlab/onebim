@@ -1,0 +1,63 @@
+---
+title: Bois
+order: 54
+summary: Murs à ossature bois depuis le configurateur : montants sur trame, lisses, entretoises, et chaque porte et fenêtre encadrée selon ses règles.
+---
+
+## Murs à ossature bois
+
+Un type de mur peut être construit en ossature bois : **Wood → Timber frame** ouvre le configurateur, avec les types de murs du projet à gauche. Cochez **Timber frame** et le noyau du type est fait de pièces au lieu d’une seule couche : les lisses, les montants sur leur trame, les rangs d’entretoises et, autour de chaque porte et fenêtre, les montants principaux, les montants d’appui, le linteau et l’appui. Les autres couches restent telles quelles, et l’isolant remplit les vides entre les pièces.
+
+![Le configurateur d’ossature bois](shots/wood-frame.webp)
+
+- **Préréglages** : **nordique** (45 × 145 à 600 mm, C24) ou **roumain** (50 × 150 à 625 mm, C24, un rang d’entretoises à 1,25 m). Chaque champ peut ensuite être changé.
+- **Montants, entraxe, classe, lisses, montants d’extrémité, rangs d’entretoises**. **Trame depuis** fixe où commence la trame : le début de chaque mur ou l’origine du projet, pour que les murs d’une façade la partagent.
+- **Porteur** : une cloison ne porte rien et reçoit au-dessus de ses baies une pièce à plat au lieu d’un linteau.
+
+## Portes et fenêtres
+
+Les portes et fenêtres restent celles de l’architecte : déplacez-en une ou changez son type, son encadrement suit. L’ossature se mesure depuis la **baie brute** : la porte ou la fenêtre plus les jeux de pose (sur les côtés, en haut, sous la fenêtre ; la porte descend jusqu’au sol).
+
+Chaque baie prend la règle de sa **tranche de largeur** (le tableau sous **Openings** : jusqu’à 900 mm, jusqu’à 1800 mm, au-delà, par défaut) : ses montants principaux et d’appui par côté, son linteau (aucun, massif, LVL ou lamellé-collé, sa section et ses plis) et ses plis d’appui. Aucun montant ne se trouve dans une baie brute ; les courts au-dessus du linteau et sous l’appui gardent la trame, pour que les joints des panneaux tombent sur des montants. Deux baies plus proches que le **trumeau minimal** partagent un linteau et leurs montants principaux extérieurs. Une baie trop près de l’extrémité du mur est signalée dans les propriétés du mur, jamais déplacée.
+
+Sélectionnez une porte ou une fenêtre : sa section **Wood** montre la baie brute, la règle prise et ce qu’elle reçoit. Cochez **Règle propre** pour donner à cette baie seule d’autres montants, un autre linteau ou un autre appui.
+
+## Angles, panneaux et élévation d’ossature
+
+- **Angles** : là où un autre mur s’arrête contre l’extrémité de celui-ci (angle bout à bout), le mur qui passe reçoit **trois montants** (un au-delà de la face intérieure de l’autre), un angle **Californie** (un montant à plat contre la face intérieure, pour le parement) ou **seulement ses montants d’extrémité**. Un angle à onglet garde les montants d’extrémité des deux murs.
+- **Jonctions en T** : là où un mur s’arrête contre celui-ci dans sa longueur, celui-ci reçoit **un montant de chaque côté** ou **des montants et des entretoises en échelle** entre eux.
+- **Panneaux** : cochez une couche (OSB, fibre de bois, plaque de plâtre) et donnez le format de la plaque : la couche est posée en plaques verticales, les joints sur la trame des montants, découpées aux baies brutes et le long du haut. **Wood → Boards schedule** compte les plaques de chaque mur, leur surface nette et les chutes.
+- **Élévation d’ossature** : dans la section **Wood** d’un mur à ossature, le bouton crée une coupe le long du mur par le milieu de son noyau, à 1:20, toutes les pièces coupées, avec une chaîne de cotes par les baies brutes, la trame des montants dessous et la taille de chaque baie brute. Elle se place sur une feuille comme toute vue.
+
+**Montants d’un mur.** L’ossature est la règle de son type, recalculée à chaque modification du mur ; un mur peut toutefois s’en écarter. Sélectionnez le mur dans son élévation d’ossature : chaque montant a une poignée. Faites-en glisser une le long du mur pour déplacer le montant, Ctrl/⌘-clic pour le retirer ; le montant principal extérieur et le montant d’appui extérieur de chaque baie ont aussi une poignée, tirée vers l’extérieur ou l’intérieur pour en avoir plus ou moins (la baie garde alors sa propre règle, comme dans sa section **Wood**). Un montant qui se trouverait sur un autre élément est refusé. **Reset studs** dans la section **Wood** du mur remet ses montants sur le module du type. Un mur scindé en deux garde ses propres montants sur ses parties.
+
+![Une élévation d’ossature avec le mur sélectionné : une poignée sur chaque montant, un montant déplacé hors du module](shots/wood-frame-grips.webp)
+
+## Panneaux préfabriqués
+
+Cochez **Prefabricated panels** pour fabriquer l'ossature en atelier : donnez le **panneau le plus long** (aussi long que la table de l'atelier et le camion le permettent) et le **plus court**. Chaque mur est découpé en panneaux au joint le plus long dans cette longueur, sur la trame des montants quand c'est possible, jamais à travers les montants de rive, les poteaux d'appui, le linteau ou l'appui d'une baie, ni à travers le renfort d'une jonction en T. Chaque panneau est ossaturé seul, avec ses montants d'extrémité et ses lisses aux joints. Un panneau qui ne peut tenir dans la longueur (une baie trop large) reste entier et le mur le signale.
+
+![Un mur préfabriqué dans le configurateur](shots/wood-panels.webp)
+
+Les panneaux portent le nom du mur et leur numéro le long de celui-ci (W3-P1, W3-P2…). La section **Wood** du mur montre leurs longueurs, l'élévation d'ossature dessine les joints et les repères au-dessus du mur, et **Wood → Wall panels** liste chaque panneau avec son mur, sa longueur, sa hauteur, ses baies, ses pièces, son volume de bois et sa masse, pour les commander, les fabriquer et les lever dans l'ordre. Les panneaux de parement d'un panneau portent aussi son repère. En IFC chaque panneau est un IfcElementAssembly (Timber frame panel) avec ses pièces et ses plaques.
+
+## CLT
+
+Dans le même configurateur, un type de mur ou de plancher peut être construit **en panneaux CLT** : les plis (l’épaisseur de chacun, 3, 5, 7 ou 9), la classe, le panneau le plus long et le plus haut (ou large) que fait la presse, le joint entre panneaux (bout à bout, mi-bois, languette), la distance d’une baie au bord du panneau et le jeu de pose. Un mur est découpé en panneaux sur sa longueur, les joints écartés des baies ; chaque panneau est le corps même du noyau, ses baies brutes découpées. Un plancher est découpé sur sa portée (le sens court, ou selon x ou y). **Wood → CLT panels** liste chaque panneau avec son repère, ses dimensions, ses plis, sa classe, son joint, sa surface et son volume ; en IFC chacun est un IfcBuildingElementPart nommé CLT panel.
+
+- **Joints** : dans un **mi-bois** (half lap) les deux moitiés se recouvrent de la valeur donnée ; un joint à **fausse languette** (spline) a une feuillure sur une face et une bande de contreplaqué dedans, pièce à part. Les deux sont modélisés dans les panneaux : les volumes et la nomenclature sont ce que l'atelier découpe.
+- **Angles des baies** : une fraise ne coupe pas un angle intérieur vif. **Le rayon de la fraise** le laisse dans chaque angle ; le **dégagement en os de chien** coupe un cercle à chaque angle pour qu'un cadre droit entre. Le configurateur dessine la découpe.
+- **Élévation des panneaux** : la section **Wood** d'un mur CLT crée une coupe le long du mur au 1:20, avec les joints et repères des panneaux et les dimensions des baies brutes.
+- **Toitures CLT** : sélectionnez une toiture en pente et cochez **CLT panels** dans sa section **Wood** : ses pans sont faits de plaques CLT à la place des chevrons ou fermes (sablières et couverture restent), fenêtres de toit et lucarnes découpées, en bandes de la largeur d'un panneau le long de l'égout, aboutées là où un pan est plus long qu'un panneau.
+
+## Planchers sur solives
+
+Un type de plancher peut être construit **sur solives** : choisissez-le dans le configurateur puis **on joists**. Donnez la section, l'entraxe et la classe des solives, leur sens de portée (le petit côté, ou selon x ou y), si une **solive de rive** ferme les bords, les **rangs d'entretoises** et, autour de chaque trémie (un escalier, une gaine), les **solives d'enchevêtrure** de chaque côté et les **plis du chevêtre** à ses extrémités. Les solives coupées par la trémie s'arrêtent au chevêtre, et une solive s'ajoute là où les enchevêtrures laissent un vide plus grand que l'entraxe. **Fill the cavities** met le matériau de l'âme entre les solives. Le configurateur montre un plancher d'exemple avec une trémie d'escalier.
+
+![Un type de plancher sur solives](shots/wood-joists.webp)
+
+Les solives remplacent l'âme du plancher ; les couches au-dessus et au-dessous restent. Leurs pièces sont dans la liste de bois, et en IFC chacune est un IfcBeam (JOIST, solive de rive ou chevêtre par son nom) sous le plancher.
+
+## La liste de bois
+
+**Wood → Timber schedule** fait la liste de débit de tout le bois du projet, les pièces des murs et des charpentes : pièce, section, classe, longueur, nombre, longueur totale et volume, avec les totaux par section. En IFC chaque pièce est un IfcMember (STUD, PLATE, le linteau et l’appui par leur nom) sous son mur, et l’isolant un IfcCovering INSULATION.

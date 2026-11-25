@@ -1,0 +1,282 @@
+namespace Lapin.Geometry;
+
+/// <summary>
+/// Booleans between solids, whatever computes them. The kernel builds most
+/// elements constructively (exact, no boolean); this is for what cannot be:
+/// any solid through any other. A missing implementation is a missing service,
+/// not a crash — callers degrade with a diagnostic.
+/// </summary>
+public interface ISolidBooleans
+{
+    /// <summary><paramref name="a"/> less every cutter; null when nothing is left.</summary>
+    Solid? Difference(Solid a, IReadOnlyList<Solid> cutters, string? tag = null);
+    Solid? Union(IReadOnlyList<Solid> solids, string? tag = null);
+    Solid? Intersection(Solid a, Solid b, string? tag = null);
+
+    /// <summary>
+    /// The union of <paramref name="solids"/> less every cutter, in one go: what a body made of pieces and cut (a wall's part, its
+    /// joints and ends) asks, so no result of one boolean goes into the next as its faces (a warped face's merged facets may not).
+    /// </summary>
+    Solid? UnionLess(IReadOnlyList<Solid> solids, IReadOnlyList<Solid> cutters, string? tag = null)
+    {
+        var u = Union(solids, tag);
+        return u == null || cutters.Count == 0 ? u : Difference(u, cutters, tag);
+    }
+}
+
+/// <summary>
+/// A closed triangle mesh back into a B-rep with planar faces: triangles that
+/// touch and lie in one plane become one face, its boundary loops the outer
+/// ring and the holes. Coplanar faces of different inputs that meet become one
+/// face too — after a union, one body reads as one body.
+/// </summary>
+public static class SolidFromMesh
+{
+    public static Solid? Build(IReadOnlyList<Vec3> vertices, IReadOnlyList<(int A, int B, int C)> triangles, string? tag = null,
+        double angleTol = 1e-6, double distTol = 1e-7)
+    {
+        // Plain loops and edges packed in a long, not LINQ and tuple keys: the browser's AOT build interprets those.
+        if (triangles.Count < 4) return null;
+        var tris = SplitNeedles(vertices, triangles);
+        var normals = new Vec3[tris.Length];
+        for (int i = 0; i < tris.Length; i++)
+        {
+            var t = tris[i];
+            normals[i] = Vec3.Cross(vertices[t.B] - vertices[t.A], vertices[t.C] - vertices[t.A]);
+        }
+
+        // Triangles sharing an edge, by the undirected edge.
+        var byEdge = new Dictionary<long, List<int>>(EdgeKeys.Comparer);
+        for (int i = 0; i < tris.Length; i++)
+            for (int e = 0; e < 3; e++)
+            {
+                var k = Undirected(Edge(tris[i], e));
+                if (!byEdge.TryGetValue(k, out var l)) byEdge[k] = l = [];
+                l.Add(i);
+            }
+
+        // Faces: flood fill across edges whose two triangles share a plane.
+        var faceOf = new int[tris.Length];
+        Array.Fill(faceOf, -1);
+        var groups = new List<List<int>>();
+        for (int seed = 0; seed < tris.Length; seed++)
+        {
+            if (faceOf[seed] >= 0 || normals[seed].Length < 1e-20) continue;
+            var n = normals[seed].Normalized();
+            var d = Vec3.Dot(n, vertices[tris[seed].A]);
+            var group = new List<int>();
+            var stack = new Stack<int>();
+            stack.Push(seed);
+            faceOf[seed] = groups.Count;
+            while (stack.Count > 0)
+            {
+                var t = stack.Pop();
+                group.Add(t);
+                for (int e = 0; e < 3; e++)
+                    foreach (var o in byEdge[Undirected(Edge(tris[t], e))])
+                    {
+                        if (faceOf[o] >= 0 || normals[o].Length < 1e-20) continue;
+                        var on = normals[o].Normalized();
+                        if (Vec3.Dot(on, n) < 1 - angleTol) continue;
+                        var tri = tris[o];
+                        if (Math.Abs(Vec3.Dot(n, vertices[tri.A]) - d) > distTol || Math.Abs(Vec3.Dot(n, vertices[tri.B]) - d) > distTol
+                            || Math.Abs(Vec3.Dot(n, vertices[tri.C]) - d) > distTol) continue;
+                        faceOf[o] = groups.Count;
+                        stack.Push(o);
+                    }
+            }
+            groups.Add(group);
+        }
+
+        var faces = new List<FaceInput>();
+        foreach (var group in groups)
+        {
+            var sum = Vec3.Zero;
+            foreach (var t in group) sum += normals[t];
+            var n = sum.Normalized();
+            // The group's boundary: directed edges whose reverse is not in the group.
+            var inGroup = new HashSet<long>(EdgeKeys.Comparer);
+            foreach (var t in group) for (int e = 0; e < 3; e++) inGroup.Add(Edge(tris[t], e));
+            var boundary = new List<long>();
+            foreach (var e in inGroup) if (!inGroup.Contains(Pack(To(e), From(e)))) boundary.Add(e);
+            var (u, v) = VecMath.PlaneBasis(n);
+            var plane = new Plane(vertices, u, v);
+            var loops = Loops(boundary, plane);
+            var flat = new List<Vec2[]>(loops.Count);
+            foreach (var l in loops) flat.Add(plane.Of(l));
+            var outers = new List<int>();
+            var holes = new List<int>();
+            var area = new double[loops.Count];
+            for (int i = 0; i < loops.Count; i++) { area[i] = Polygon2.SignedArea(flat[i]); (area[i] > 0 ? outers : holes).Add(i); }
+            // Each hole belongs to the innermost outer round it: the smallest that holds a point just inside it.
+            // Smallest first, each outer's box tried before its polygon: a face of thousands of holes (a grating,
+            // a mesh exported whole) was every outer against every hole against every outer again.
+            outers.Sort((x, y) => area[x].CompareTo(area[y]));
+            var boxes = new (Vec2 Min, Vec2 Max)[loops.Count];
+            foreach (var o in outers) boxes[o] = BoxOf(flat[o]);
+            var mine = new Dictionary<int, List<int[]>>();
+            foreach (var h in holes)
+            {
+                var inside = Inside(flat[h]);
+                foreach (var o in outers)
+                {
+                    var (lo, hi) = boxes[o];
+                    if (inside.X < lo.X || inside.X > hi.X || inside.Y < lo.Y || inside.Y > hi.Y || !Polygon2.Contains(flat[o], inside)) continue;
+                    (mine.TryGetValue(o, out var l) ? l : mine[o] = []).Add([.. loops[h]]);
+                    break;
+                }
+            }
+            // In the loops' order, as before.
+            foreach (var outer in outers.Order())
+                faces.Add(new FaceInput([.. loops[outer]], [.. mine.GetValueOrDefault(outer) ?? []], n));
+        }
+        if (faces.Count < 4) return null;
+        return SolidBuilder.Make(vertices, faces, tag, 1e-9);
+    }
+
+    /// <summary>
+    /// The mesh with its needles taken out: a triangle whose three corners lie on one line (a boolean leaves one where two
+    /// cutters' edges meet on a face, a window's sill and its reveal on a bare wall face) has no plane, so it joined no face
+    /// and its three edges were left open. The corner between the other two is put on the long edge's other triangle instead,
+    /// split in two there, and the needle dropped: the same surface, closed, every triangle with a plane.
+    /// </summary>
+    static (int A, int B, int C)[] SplitNeedles(IReadOnlyList<Vec3> v, IReadOnlyList<(int A, int B, int C)> triangles)
+    {
+        const double tol = 1e-9;
+        var tris = new List<(int A, int B, int C)>(triangles.Count);
+        for (int i = 0; i < triangles.Count; i++) tris.Add(triangles[i]);
+        // A needle turned to start on its long edge, (a, b, c), with c inside a–b and off it by less than the tolerance.
+        bool Needle((int A, int B, int C) t, out (int A, int B, int C) turned)
+        {
+            turned = t;
+            var best = (v[t.B] - v[t.A]).Length;
+            var bc = (v[t.C] - v[t.B]).Length;
+            var ca = (v[t.A] - v[t.C]).Length;
+            if (bc > best) { best = bc; turned = (t.B, t.C, t.A); }
+            if (ca > best) { best = ca; turned = (t.C, t.A, t.B); }
+            if (best < tol) return false;
+            var (pa, pb, pc) = (v[turned.A], v[turned.B], v[turned.C]);
+            var ab = pb - pa;
+            var s = Vec3.Dot(pc - pa, ab) / best;
+            return Vec3.Cross(ab, pc - pa).Length / best < tol && s > tol && best - s > tol;
+        }
+        var owner = new Dictionary<long, int>(tris.Count * 3, EdgeKeys.Comparer);
+        var todo = new Queue<int>();
+        for (int i = 0; i < tris.Count; i++)
+        {
+            for (int e = 0; e < 3; e++) owner[Edge(tris[i], e)] = i;
+            if (Needle(tris[i], out _)) todo.Enqueue(i);
+        }
+        if (todo.Count == 0) return [.. tris];
+        var dead = new HashSet<int>();
+        // Each split takes one needle away; the guard stops an input that is not a closed mesh from going round.
+        for (int guard = 0; todo.Count > 0 && guard < 4 * triangles.Count + 16; guard++)
+        {
+            var i = todo.Dequeue();
+            if (dead.Contains(i) || !Needle(tris[i], out var n)) continue;
+            var (a, b, c) = n;
+            if (!owner.TryGetValue(Pack(b, a), out var j) || j == i || dead.Contains(j)) continue;
+            var other = tris[j];
+            var d = other.A != a && other.A != b ? other.A : other.B != a && other.B != b ? other.B : other.C;
+            if (d == c || d == a || d == b) continue;
+            for (int e = 0; e < 3; e++) { owner.Remove(Edge(tris[i], e)); owner.Remove(Edge(other, e)); }
+            dead.Add(i);
+            // The other triangle (b, a, d) becomes (b, c, d) and (c, a, d): b→c and c→a take the needle's place beside its neighbours.
+            tris[j] = (b, c, d);
+            tris.Add((c, a, d));
+            var k = tris.Count - 1;
+            for (int e = 0; e < 3; e++) { owner[Edge(tris[j], e)] = j; owner[Edge(tris[k], e)] = k; }
+            todo.Enqueue(j);
+            todo.Enqueue(k);
+        }
+        var o = new List<(int A, int B, int C)>(tris.Count - dead.Count);
+        for (int i = 0; i < tris.Count; i++) if (!dead.Contains(i)) o.Add(tris[i]);
+        return [.. o];
+    }
+
+    /// <summary>A directed edge as one number: its start in the high half, its end in the low.</summary>
+    static long Pack(int a, int b) => ((long)a << 32) | (uint)b;
+    static int From(long e) => (int)(e >> 32);
+    static int To(long e) => (int)e;
+    static long Edge((int A, int B, int C) t, int i) => i switch { 0 => Pack(t.A, t.B), 1 => Pack(t.B, t.C), _ => Pack(t.C, t.A) };
+    static long Undirected(long e) => From(e) < To(e) ? e : Pack(To(e), From(e));
+
+    /// <summary>The mesh's vertices projected on a face's plane.</summary>
+    sealed class Plane(IReadOnlyList<Vec3> vertices, Vec3 u, Vec3 v)
+    {
+        public Vec2 At(int i) => VecMath.Project(vertices[i], u, v);
+
+        public Vec2[] Of(List<int> ids)
+        {
+            var o = new Vec2[ids.Count];
+            for (int i = 0; i < o.Length; i++) o[i] = At(ids[i]);
+            return o;
+        }
+    }
+
+    static (Vec2 Min, Vec2 Max) BoxOf(Vec2[] loop)
+    {
+        double x0 = double.MaxValue, y0 = double.MaxValue, x1 = double.MinValue, y1 = double.MinValue;
+        foreach (var p in loop) { x0 = Math.Min(x0, p.X); y0 = Math.Min(y0, p.Y); x1 = Math.Max(x1, p.X); y1 = Math.Max(y1, p.Y); }
+        return (new Vec2(x0, y0), new Vec2(x1, y1));
+    }
+
+    /// <summary>A point just inside a loop's first edge, on its left (holes run the other way: inside the hole).</summary>
+    static Vec2 Inside(Vec2[] loop)
+    {
+        var (a, b) = (loop[0], loop[1]);
+        var d = (b - a).Normalized();
+        return (a + b) * 0.5 - d.Perp * 1e-6;
+    }
+
+    /// <summary>
+    /// Chain directed boundary edges into closed loops. Where a vertex has more
+    /// than one way on (two loops touching at a point), the sharpest left turn is
+    /// taken, which keeps every loop simple.
+    /// </summary>
+    static List<List<int>> Loops(List<long> edges, Plane p)
+    {
+        var from = new Dictionary<int, List<int>>();
+        foreach (var e in edges) { if (!from.TryGetValue(From(e), out var l)) from[From(e)] = l = []; l.Add(To(e)); }
+        var used = new HashSet<long>(EdgeKeys.Comparer);
+        var loops = new List<List<int>>();
+        var options = new List<int>();
+        foreach (var start in edges)
+        {
+            if (used.Contains(start)) continue;
+            var loop = new List<int> { From(start) };
+            used.Add(start);
+            int prev = From(start), cur = To(start);
+            for (int guard = 0; cur != From(start) && guard < edges.Count + 1; guard++)
+            {
+                loop.Add(cur);
+                options.Clear();
+                // An open mesh (a shell with gaps): a boundary may end where no edge goes on; that loop is left open, and dropped.
+                if (!from.TryGetValue(cur, out var outs)) break;
+                foreach (var n in outs) if (!used.Contains(Pack(cur, n))) options.Add(n);
+                if (options.Count == 0) break;
+                var next = options[0];
+                if (options.Count > 1)
+                {
+                    var dIn = (p.At(cur) - p.At(prev)).Normalized();
+                    double Turn(int n)
+                    {
+                        var dOut = (p.At(n) - p.At(cur)).Normalized();
+                        return Math.Atan2(Vec2.Cross(dIn, dOut), Vec2.Dot(dIn, dOut));
+                    }
+                    // The first of the sharpest, as MaxBy.
+                    var best = Turn(next);
+                    for (int i = 1; i < options.Count; i++)
+                    {
+                        var turn = Turn(options[i]);
+                        if (turn.CompareTo(best) > 0) { best = turn; next = options[i]; }
+                    }
+                }
+                used.Add(Pack(cur, next));
+                (prev, cur) = (cur, next);
+            }
+            if (loop.Count >= 3) loops.Add(loop);
+        }
+        return loops;
+    }
+}

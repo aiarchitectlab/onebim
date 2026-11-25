@@ -1,0 +1,199 @@
+---
+title: Wände
+order: 20
+summary: Zeichnen Sie Wände Ecke für Ecke, ändern Sie sie im Eigenschaftenbereich und legen Sie Wandtypen mit ihren Schichten an.
+---
+
+<!-- video walls -->
+
+## Wände zeichnen
+
+Öffnen Sie die Registerkarte **Architektur** und wählen Sie **Wand**, oder geben Sie <kbd>WA</kbd> ein.
+
+Solange das Werkzeug aktiv ist, zeigt der Eigenschaftenbereich **Neues Bauteil**: den Typ, mit dem die Wände gezeichnet werden. Wählen Sie dort vor dem ersten Klick einen anderen und sehen Sie seine Schichten, seine Dicke und wie viele Wände ihn schon verwenden; **Typen bearbeiten…** öffnet Wall types. Tür, Fenster, Decke, abgehängte Decke und Vorhangfassade zeigen ihre Typen ebenso.
+
+![Die Registerkarte Architektur](shots/ribbon-architecture.webp)
+
+Klicken Sie dort, wo die Wand beginnt, und dann an jeder Ecke. Die nächste Wand folgt der Maus. Während Sie zeichnen, können Sie statt zu klicken eine Länge und einen Winkel in die Felder über der Ansicht eingeben. Drücken Sie <kbd>Enter</kbd> oder <kbd>Esc</kbd>, um aufzuhören.
+
+![Wände zeichnen: die nächste Wand folgt der Maus, Länge und Winkel werden angezeigt](shots/wall-drawing.webp)
+
+Wo zwei Wände aufeinandertreffen, verbindet Lapin sie selbst. Ihre Schichten laufen so ineinander, wie sie gebaut würden.
+
+- **Gebogene Wand** (<kbd>WC</kbd>) zeichnet eine Wand entlang eines Bogens.
+- **Vorhangfassade** (<kbd>CW</kbd>) zeichnet eine verglaste Wand mit Pfosten, Riegeln und Paneelen; ihr Typ kann deren wirkliche Form aus einer [Profilbibliothek](profiles.md) nehmen.
+- Wände verbinden sich von selbst, wo sie aufeinandertreffen: eine Ecke als Gehrung, eine Wand, die auf einer anderen endet, als T, eine, die eine andere kreuzt, als X. An einem T oder X laufen die Schichten ineinander, wie gebaut: Der Kern der endenden Wand läuft durch die Bekleidungen der anderen bis zu deren Kern, und seine Bekleidungen enden an der Fläche der anderen, wo sie auf ihresgleichen treffen, sodass der Grundriss einen Aufbau ohne Linie hindurch zeigt. **Verbinden** (<kbd>JW</kbd>), **Gehrung** und **Stumpf** ändern, wie zwei Wände aufeinandertreffen, wenn das nicht gewollt ist; **Neue Ecken auf Gehrung** macht Stumpf zur Vorgabe auf diesem Rechner. In beiden Fällen läuft jede Schicht für sich um die Ecke: die Bekleidungen treffen auf ihresgleichen und laufen ungebrochen weiter, die Kerne treffen sich auf der Diagonale (Gehrung) oder ein Kern läuft bis zur Außenseite des anderen (Stumpf), so zeigt der Grundriss mehrschichtiger Wände saubere Ecken. Jede Schicht läuft in die andere Wand durch deren Schichten mit niedrigerer **Priorität** und endet an der ersten mit gleicher oder höherer (siehe **Wandtypen** unten); so treffen standardmäßig Kerne auf Kerne und Bekleidungen enden an den Oberflächen. An einer Ecke läuft ein Kern mit höherer Priorität durch den anderen, ob Gehrung oder Stumpfstoß. Die **Schnittpriorität** einer Wand führt sie nie in eine Wand, mit der sie verbunden ist: Zwischen verbundenen Wänden entscheidet sie nur, welcher Kern durchläuft, wenn beide Kerne dieselbe Priorität haben (an einer stumpfen Ecke oder einer Kreuzung).
+- **Tauschen** ändert, welche der beiden Wände durchläuft.
+
+**Die Linie, auf der Sie zeichnen.** Solange das Werkzeug Wall aktiv ist, wählt die Liste in der Leiste der Befehlszeile die Linie, auf die Sie klicken: **Kernmitte** (die Achse, wie bisher), **Kern, Außenseite**, **Kern, Innenseite**, **Außenseite** oder **Innenseite**. Außen ist rechts der Wand in Zeichenrichtung (zeichnen Sie gegen den Uhrzeigersinn um das Gebäude, damit es außen liegt). Die Achse der Wand bleibt auf ihrem Kern, von der Linie versetzt, und nacheinander auf derselben Seite gezeichnete Wände treffen sich an der Ecke dieser Seite.
+
+## Eine Wand ändern
+
+Klicken Sie auf eine Wand, um sie auszuwählen. Ihre Griffe erscheinen. Ziehen Sie die Enden, um sie zu verlängern oder zu verkürzen, oder ziehen Sie das Kreuz in der Mitte, um sie zu verschieben.
+
+In der 3D-Ansicht hat eine ausgewählte Wand drei weitere Griffe: einen an der Oberkante, um ihre Höhe zu ziehen (oder den Versatz der Oberkante, wenn sie bis zu einem Geschoss reicht), und einen an jeder Fläche, um sie seitlich zu verschieben (bei einer gekrümmten Wand den Radius). Siehe [Griffe und Bauteile in 3D](views.md#griffe-und-bauteile-in-3d).
+
+![Eine ausgewählte Wand mit ihren Griffen](shots/wall-selected.webp)
+
+Der Eigenschaftenbereich zeigt die ausgewählte Wand. Oben im Bereich stehen ihr Typ und ihre Schichten. Darunter folgen Länge, Höhe, Versatz unten, Geschoss und Bauphase. Ändern Sie einen beliebigen Wert, und das Modell folgt. Die Werte jeder Wand sind ihre eigenen. Ihre **Dicke** (Thickness) ergibt sich aus den Schichten ihres Typs: Geben Sie eine neue ein, und die gewählten Wände erhalten den Typ mit demselben Aufbau und dieser Dicke, der Kern angepasst und die Bekleidungen beibehalten. Lapin nimmt den Typ des Projekts, wenn einer genau diesen Aufbau hat, sonst legt es einen an, nach ihrem benannt (*Partition wall 130mm* wird *Partition wall 150mm*). Die anderen Wände des alten Typs bleiben, wie sie sind, und <kbd>Ctrl</kbd> <kbd>Z</kbd> macht es in einem Schritt rückgängig.
+
+![Die Eigenschaften einer Wand](shots/wall-properties.webp)
+
+Weiter unten zeigt **Abhängigkeiten**, was aus der Wand aufgebaut ist und woraus die Wand aufgebaut ist. **Verwendet von** listet die Elemente, die sich mit der Wand ändern: die Wände, an die sie anschließt, ihre Türen und Fenster, eine an ihr befestigte Wand. Ein Klick auf einen Namen wählt das Element aus. **Aufgebaut aus** listet die Elemente, von denen die Wand abhängt, dann ihren Typ und ihre Materialien. Wenn Sie ein Element löschen, von dem andere abhängen, nennt eine Meldung die neu aufgebauten; <kbd>Ctrl</kbd> <kbd>Z</kbd> holt alles zurück.
+
+**Umkehren** dreht die Schichten der Wand auf die andere Seite. Sie können auch auf die kleinen Pfeile klicken, die im Grundriss neben einer ausgewählten Wand angezeigt werden.
+
+Eine aus einem importierten IFC erkannte Wand, deren Ende die Datei schräg schneidet, behält diesen Schnitt: **Schnittwinkel am Anfang** und **Schnittwinkel am Ende** in ihren Eigenschaften, in Grad gegenüber dem rechten Winkel. Ein Anschluss an diesem Ende tritt an seine Stelle.
+
+**Schraffurausrichtung** legt fest, wie die Schichten dieser Wand im Grundriss schraffiert werden. **material** folgt der Einstellung jedes Materials. **axis** legt die Schraffur jeder Schicht entlang der Wandachse, vom Anfang der Achse aus, sodass eine schräge Ziegelwand ihre Lagen entlang der Wand zeigt und sie von Schicht zu Schicht durchlaufen. **view** beginnt jede Schraffur am Ursprung der Ansicht, ungedreht.
+
+### Eine Ecke abrunden oder abschrägen
+
+**Architecture → Abrunden** (FILLET in der Befehlszeile, <kbd>F</kbd>) rundet die Ecke zwischen zwei Wänden mit einer gebogenen Wand ab: Radius eingeben (Enter behält den letzten), dann die erste Wand und die zweite anklicken. Beide werden bis dorthin gekürzt, wo der Bogen sie berührt, oder bis zu ihm verlängert, wenn sie die Ecke noch nicht erreichen, wie das Abrunden im CAD zwei Linien behandelt. Die gebogene Wand ist wieder die erste Wand (ihr Typ, ihre Höhe, Basis, Oberkante und Schichten, auf derselben Seite) und ist mit beiden verbunden. Jede Wand auf dem Teil anklicken, der bleiben soll: wo sich zwei Wände kreuzen, fallen die anderen Teile weg. Ein Radius von 0 ergibt eine scharfe Ecke, beide Wände bis zum Treffpunkt verlängert. **Architecture → Fase** (CHAMFER) schneidet die Ecke stattdessen mit einer geraden Wand ab, der Abstand entlang jeder Wand von der Ecke gemessen. Rechtsklick auf den Endgriff einer ausgewählten Wand, wo sie auf eine andere trifft, für **Ecke abrunden…** und **Ecke abfasen…**, Radius oder Abstand eingegeben. Jedes ist ein Rückgängig-Schritt.
+
+Der Radius ist der der Wandachsen, der Mitte ihres Kerns. **I** (Inside) oder **O** (Outside) vor dem Auswählen eingeben, um den Radius der inneren oder äußeren Fläche der Biegung anzugeben; **A** kehrt zur Achse zurück. Die beiden Wände behalten ihre IDs (ihre GlobalIds in IFC), und ihre Türen, Fenster und Öffnungen bleiben im Grundriss, wo sie sind; eine, die in den weggeschnittenen Teil fiele, verhindert das Abrunden (ein kleinerer Radius, oder sie zuerst verschieben). Wände verschiedener Typen, Höhen oder Basen werden nur abgerundet, wenn **Yes** die Werte der ersten Wand übernimmt. Gebogene Wände und Wände mit eigenem Profil werden nicht abgerundet.
+
+![Zwei Wände abgerundet: eine gebogene Wand dazwischen](shots/wall-fillet.webp)
+
+### Eine Wand nach ihrem Profil
+
+**Profil…** in den Eigenschaften einer Wand öffnet ihre Oberkante auf der Skizzenfläche: eine eigene Ansicht, auf die Achse der Wand gestellt, vom Anfang zum Ende gesehen, die Wand dort ausgeblendet und ihr Fuß und ihre Enden als Konstruktionslinien gezeichnet. Die Oberkante ist eine einzige Linie vom Anfang zum Ende: ein Giebel, eine Schräge, Stufen, eine Wand, die einer Treppe folgt. Zeichnen Sie sie mit den Werkzeugen von **Zeichnen** in der Leiste (**Linie**, **Polylinie**, **Bogen**, **Stutzen**, **Dehnen**, **Abrunden**…), verschieben Sie ihre Punkte an den Griffen, fangen Sie an den Ebenen und den anderen Wänden der Ansicht und halten Sie sie mit Zwangsbedingungen und Bemaßungen wie jede Skizze. Das Seitenformular daneben beginnt mit einem **Giebel**, einer **Neigung** oder **Stufen** bis zu der Höhe, die Sie eintippen, listet die Punkte der Oberkante in Millimetern zum Überschreiben auf und hat **Gerade Oberkante**. Eine Stufe sind zwei Punkte übereinander; ein Bogen wird in kurzen geraden Stücken gelegt. **Skizze beenden** formt die Wand in einem Rückgängig-Schritt; eine Oberkante, die zurückläuft, in Stücken vorliegt oder über die Enden der Wand hinausreicht, wird mit der Begründung abgelehnt, und die Skizze bleibt offen. **Abbrechen** lässt die Wand, wie sie war.
+
+Die Wand bleibt eine Wand: ihre Dicke, ihre Schichten, ihre Anschlüsse und ihre Türen und Fenster bleiben, wie sie waren, und sie wird mit ihrer Form nach IFC exportiert.
+
+![Ein Giebel auf der Skizze der Wand gezeichnet, sein First im Seitenformular eingetippt](shots/wall-profile-editor.webp)
+
+![Die Westwand des Hauses als Giebel, ihr Fenster erhalten](shots/wall-profile-3d.webp)
+
+### Rand und Stäbe einer Vorhangfassade
+
+**Profil…** in den Eigenschaften einer Vorhangfassade zeichnet ihren Rand auf dieselbe Weise, auf einer eigenen Skizze: einen Giebel, eine Schräge, Stufen oder einen beliebigen Umriss, mit demselben Seitenformular (eine gekrümmte Vorhangfassade behält den Profildialog, mit Punkten zum Ziehen und einer Tabelle in Millimetern). Die Fassade reicht bis zu ihrem höchsten Punkt. Ihr Raster bekommt eine Linie dort, wo der Rand knickt (ein Knick innerhalb von anderthalb Pfostenbreiten einer Rasterlinie wird auf sie verschoben); jedes Feld behält die Riegel, die unter seinen tiefsten Punkt passen; das Paneel über dem letzten füllt bis zum Rand, und ein Randstab folgt ihm, geneigt; die Pfosten werden auf ihn geschnitten. Die Einstellungen des Typs bleiben, und **Profil…** öffnet den Rand wieder zum Ändern, ohne Neuaufbau; **Gerade Oberkante** gibt das Rechteck zurück. Es zeigt sich in 3D, Ansichten und Schnitten, die Listen messen Paneele und Stäbe wie gezeichnet, und das IFC trägt sie als Teile.
+
+![Ein Giebel als Rand einer Vorhangfassade gezeichnet, auf ihrer Skizze](shots/curtain-boundary-editor.webp)
+
+![Die Vorhangfassade unter ihrem Giebel, in 3D](shots/curtain-boundary-3d.webp)
+
+**Stäbe…** gibt ausgewählten Pfosten und Riegeln ein eigenes Profil. Die Ansicht der Fassade zeigt jeden Stab: Klicken Sie einen an (<kbd>Umschalt</kbd> oder <kbd>Strg</kbd>/<kbd>⌘</kbd> fügt weitere hinzu, oder nehmen Sie alle Pfosten oder alle Riegel), wählen Sie ein Profil aus den [Profilbibliotheken](profiles.md) oder einen einfachen Quader, seine **Drehung** und **Spiegelung**, seine Ausrichtung quer zum Stab (Vorder- oder Rückseite auf seiner Ebene) und entlang (Anfangs- oder Endkante auf der Rasterlinie oder Höhe) und seine Versätze quer und aus dem Gebäude heraus; das Bild daneben zeigt den Querschnitt, wie er sitzt. **Auf die gewählten anwenden** gibt ihnen den Stil, **Zurück zu dem des Typs** nimmt ihn weg. Das eigene Profil eines Typs hat dieselben Lagefelder in **Vorhangfassaden…**, für jede Fassade des Typs. Das Profil bleibt eine Kopie im Projekt: **Aus der Bibliothek aktualisieren** ändert jeden daraus gemachten Stab, in dieser Fassade und in anderen.
+
+![Stäbe: ein Profil auf den gewählten Pfosten](shots/curtain-members-dialog.webp)
+
+![Zwei Pfosten mit eigenem Profil, in 3D](shots/curtain-members-3d.webp)
+
+**Paneele und Türen…** gibt gewählten Feldern ein eigenes Paneel oder eine Tür. Die Ansicht der Wand zeigt jedes Feld, wie der Kern es baut: klicke auf eines (<kbd>Shift</kbd> oder <kbd>Strg</kbd>/<kbd>⌘</kbd> fügt weitere hinzu). Ein **Paneeltyp** wird einmal im Projekt gespeichert und Feldern jeder Vorhangfassade gegeben: Glas, massiv, eine **gerahmte Füllung** (ein Rahmen seiner Breite und Tiefe um das Feld, die Glas- oder Massivfüllung um den Rücksprung hinter seiner Außenfläche) oder **offen** (kein Paneel); seine Dicke, sein Versatz aus der Achse und seine Materialien (die des Vorhangfassadentyps, wenn keines gewählt ist). **Den gewählten geben** wendet ihn an, **Das Paneel des Typs** nimmt ihn weg; ein geänderter Paneeltyp ändert jedes seiner Felder. **Tür in die gewählten** ersetzt jedes gewählte Feld durch eine Tür: eine neue Tür für Vorhangfassaden (ein- oder zweiflügelig, Dreh- oder Schiebetür, Breite und Höhe, verglaste oder massive Flügel, Rahmenprofil aus den [Profilbibliotheken](profiles.md)) oder einen beliebigen Türtyp des Projekts. **Feld füllen** gibt ihr die Größe des Feldes; sonst behält sie die ihres Typs, steht links, mittig oder rechts im Feld mit einem Versatz und bekommt einen Riegel darüber und einen Pfosten daneben, wo Glas bleibt, verglast mit dem Paneel des Feldes. In der untersten Reihe steht die Tür auf dem Boden, der untere Riegel ist unter ihr weggeschnitten. Die Einstellungen gehören zum Feld und folgen daher, wenn sich das Raster ändert: eine Tür, die ihr Feld füllt, wächst oder schrumpft mit ihm, und eine, deren Feld fehlt, sagt es und kommt mit ihm zurück. Die Tür ist eine Tür: wähle sie aus, um Anschlag oder Seite zu wechseln, ihren Typ zu ändern oder sie in ein anderes Feld zu verschieben (entlang der Wand verschieben); Beschriftungen, Türlisten (in der Größe, in der sie steht) und der IFC-Export (eine IfcDoor als Teil ihrer IfcCurtainWall) zählen sie.
+
+![Paneele und Türen: eine gerahmte Brüstung und eine Tür in den gewählten Feldern](shots/curtain-cells-dialog.webp)
+
+![Eine Vorhangfassade mit einer Tür und gerahmten Brüstungen, in 3D](shots/curtain-cells-3d.webp)
+
+Unter einer mit **Profil…** gezeichneten Kontur kommt eine Tür in ein angeschnittenes Feld, wo immer ihr Rechteck unter die Kontur passt: die Pfosten neben ihr reichen bis zur Kontur, die Scheiben daneben füllen bis zu ihr, ein Riegel überspannt ihren Kopf, und das Glas darüber folgt der Neigung. Füllt sie ein solches Feld, endet ihr Kopf einen Riegel unter der niedrigeren Seite der Kontur. Wo sie nicht passt, sagt Lapin, um wie viel und was zu tun ist (sie niedriger machen, zur höheren Seite schieben oder ein höheres Feld wählen). Ein gerahmtes Paneel in einem angeschnittenen Feld ist entlang seiner Kontur gerahmt, auch an der schrägen Seite. Eine Ansicht auf die Außenseite einer Tür zeichnet ihre Öffnungssymbole gestrichelt, wie bei jeder Tür und jedem Fenster.
+
+![Eine Tür unter der schrägen Kontur einer Vorhangfassade, mit gerahmten Paneelen entlang der Neigung, in 3D](shots/curtain-cells-gable.webp)
+
+![Das Öffnungssymbol der Tür in der Ansicht](shots/curtain-cells-elevation.webp)
+
+### Schichtverlängerungen
+
+Eine Schicht einer Wand oder einer Decke kann über die Kante des Elements hinausgehen oder vor ihr enden, ohne das Element zu teilen: ein Bodenbelag, der 2 cm unter die Wand läuft, bis zu der die Decke gezeichnet wurde, ein Putz, der unter den Wandfuß in den Belag der Decke hinabreicht, ein Außenputz, der 10 cm unter dem Wandkopf endet. Wählen Sie die Wand oder die Decke und öffnen Sie **Schichtverlängerungen** in ihren Eigenschaften. **Schichtverlängerung hinzufügen** fügt eine Zeile hinzu: wählen Sie die **Schicht** (nummeriert wie in ihrem Typ), die **Kante** und den **Abstand**, positiv über die Kante hinaus, negativ davor (höchstens 1 m in jede Richtung). Die Kanten einer Wand sind **Anfang**, **Ende**, **Unten** und **Oben**, gerade oder gebogen (über das Ende einer gebogenen Wand hinaus läuft die Schicht auf der Tangente des Endes weiter, wie die Wand selbst über ihre Achse hinaus); die einer Decke sind **Rundum** oder eine Kante ihres Umrisses, ab seiner ersten Ecke nummeriert (die eigene Verlängerung einer Kante geht der rundum vor). Das × entfernt die Verlängerung; ein Abstand von 0 ebenso. Jede Änderung ist ein Rückgängig-Schritt.
+
+Die letzte Wahl einer Zeile sagt, was das Stück jenseits der Kante tut, wo es auf ein anderes Element trifft: **Überlappt** (beide überlappen, jedes behält sein Volumen), **Schneidet andere** (es wird aus der Wand, Decke, Stütze, dem Träger oder Fundament herausgenommen, auf das es trifft: die Wand verliert die 2 cm, die der Bodenbelag nimmt) oder **Nach Schnittreihenfolge** (es schneidet nur die Elemente, vor denen sein eigenes in **Verwalten → Schnittreihenfolge** kommt: der Belag einer Decke schneidet die Wand, der hinabreichende Putz einer Wand lässt die Decke ganz). Grundrisse, Schnitte, die 3D-Ansicht, die Mengen und der IFC-Export zeigen das Element, wie es gebaut ist, Schichtaufbauten erhalten; die Verlängerungen reisen in Lapins eigenem Eigenschaftssatz (*Lapin_Intent*), so bringt eine IFC-Datei von Lapin sie zurück. Verschieben Sie eine Ecke der Decke, folgt die Verlängerung einer Kante ihrer Kante; sie geht mit einer Kante, die Sie entfernen. Referenzen aus einer IFC-Datei haben keine Schichtverlängerungen: ihre Körper sind die der Datei.
+
+**Schichten bearbeiten** (die Schaltfläche unter den Zeilen, oder **Architektur → Schichten bearbeiten**) zieht die Kanten, statt sie einzutippen. In diesem Modus zeigt eine gewählte Wand oder Decke den Umriss jeder Schicht gestrichelt und an jeder Kante einen Griff: im Grundriss die Enden einer Wand und die Kanten einer Decke, im Schnitt die Kanten, die der Schnitt kreuzt (Fuß und Kopf einer Wand, die Kanten einer Decke; die Enden einer Wand, wenn der Schnitt an ihr entlang läuft). Ziehen Sie einen Griff aus dem Element heraus oder hinein: er rastet wie jeder Griff ein, und beim Ziehen können Sie den Abstand eintippen. Jedes Loslassen ist ein Rückgängig-Schritt. **Fertig** (oder Esc) verlässt den Modus.
+
+Unter einem Dach reichen die Schichten einer Wand bis zum Dach; eine Verlängerung **Oben** verschiebt die Schicht entlang der Dachlinie, 10 cm darunter oder 5 cm hinein, der Rest der Wand bleibt vom Dach geschnitten. Auch ein Wandtyp oder ein Deckentyp kann Verlängerungen haben (wählen Sie den Typ im Projektbrowser, seine **Schichtverlängerungen** in den Eigenschaften): jede Wand oder Decke des Typs beginnt damit, bei einem Deckentyp rundum. Ein Element zeigt die Zeilen seines Typs als *Vom Typ*; dort geändert, wird eine Zeile die eigene des Elements, die vorgeht (eine eigene 0 lässt die Schicht an ihrer Kante), und ↺ gibt die Stelle dem Typ zurück.
+
+![Die Schichtverlängerungen einer Decke: ihr Belag 50 mm über die dritte Kante des Umrisses hinaus, die Wand schneidend](shots/layer-extents.webp)
+
+![Im Schnitt läuft der Belag der Decke 5 cm in die Wand, auf die er trifft](shots/layer-extents-section.webp)
+
+![Schichten bearbeiten im Grundriss: die Schichten der Decke gestrichelt, ein Griff an jeder Kante, die erste Kante des Belags 30 cm herausgezogen](shots/layer-edit-plan.webp)
+
+![Schichten bearbeiten im Schnitt: die Griffe der Deckenschichten, wo der Schnitt ihre Kanten kreuzt](shots/layer-edit-section.webp)
+
+### Wände stutzen, dehnen, teilen und versetzen
+
+**Ändern → Elemente stutzen/dehnen** (TRIMEXTEND oder TE in der Befehlszeile) arbeitet wie in Revit. Wählen Sie zuerst die Grenze: eine Wand, einen Träger oder ein Streifenfundament (seine Achse oder seine Fläche: antworten Sie **N** für die nahe oder **F** für die ferne Fläche, **A** geht zurück zur Achse) oder eine gezeichnete Linie, ein Polylinien-Segment, einen Bogen oder einen Kreis. Klicken Sie dann die Wände nacheinander an, jede auf dem Teil, der bleiben soll: Das Ende jenseits der Grenze wird zurückgeschnitten, und bei einer Wand, die zu kurz ist, wird das nähere Ende bis zur Grenze verlängert. Eine gekrümmte Wand läuft auf ihrem Kreis weiter. Eine Wand, die bis zur Achse einer anderen Wand geführt wird, wird dort mit ihr verbunden. Türen, Fenster und Öffnungen behalten ihren Platz im Grundriss; eine, die in den weggeschnittenen Teil fiele, wird abgelehnt. <kbd>Enter</kbd> beendet, <kbd>Esc</kbd> bricht ab. Jede Wand ist ein Rückgängig-Schritt. TRIM und EXTEND der Befehlszeile nehmen auch eine im Grundriss angeklickte Wand.
+
+**Ändern → Element teilen** (SPLITELEMENT oder SPLIT) schneidet eine Wand dort durch, wo Sie klicken: zwei Wände. Die erste behält die ID (ihre GlobalId in IFC) und den Teil ab dem Wandanfang; die zweite ist eine Kopie davon (Typ, Geschoss, Schichten, Eigenschaften, Gruppen) und übernimmt die Verbindungen am fernen Ende. Beide treffen sich in einer geraden Verbindung. Türen, Fenster und Öffnungen gehen an den Teil, in dem sie liegen; eine über dem Schnitt wird abgelehnt (*lies across the cut*). Geben Sie **I** (Schnittpunkt) ein, um die Wand und dann das, was sie kreuzt, zu wählen, ein anderes Element oder eine gezeichnete Linie oder einen Bogen, und dort zu schneiden; **P** geht zurück zum Punkt.
+
+**Ändern → Element versetzen** (OFFSET der Befehlszeile, das jetzt Elemente nimmt): Geben Sie den Abstand in der Einheit des Projekts ein, klicken Sie eine Wand im Grundriss an und dann die Seite, auf die die Kopie kommt. Die Kopie liegt parallel zur Wand, bei einer gekrümmten Wand konzentrisch, mit demselben Typ, denselben Schichten und Öffnungen. **A** (Achse, Standard) misst von der Achse, **F** (Flächen) von der Wandfläche, sodass die Fläche der Kopie den Abstand von ihr hat; **T** (Durch) nimmt einen Punkt, durch den die Kopie geht.
+
+Was an der Wand hängt, geht an den Teil, auf den es fällt. Ein Anstrich auf der Seite einer geraden Wand bleibt, wo er auf der Fläche war; einer, dessen Bereich über den Schnitt hinausläuft, streicht auch den anderen Teil, es sei denn, eine Teilungslinie der Fläche hält ihn auf, und einer über die ganze Fläche deckt jeden Teil. Ein Sonnenschutz entlang der Wand geht an den Teil, an dem er entlangläuft (einer quer über dem Schnitt wird abgelehnt, wie eine Tür); ein Balkon geht an den Teil, auf dem seine Mitte liegt, oder steht frei dort, wo er ist, wenn sein Teil weggeschnitten wird. In der Wand gezeichnete Stäbe gehören dem Teil, auf dem ihr Punkt liegt, die Schalung schalt jeden Teil, und die eigenen Ständer einer Holzrahmenwand (siehe [Holz](wood.md)) gehen mit ihrem Teil. Die Anstriche einer gekrümmten Wand bleiben auf ihrem ersten Teil.
+
+![Zwei Wände an eine Grenze gestutzt und eine Wand mit Tür in zwei geteilt](shots/wall-split-trim.webp)
+
+## Wandtypen
+
+Ein Wandtyp ist eine Folge von Schichten, von der Seite rechts der Richtung, in der die Wand gezeichnet wird (die Außenseite, wenn Sie gegen den Uhrzeigersinn um ein Gebäude zeichnen), zur Seite links davon. Jede Schicht hat ein Material und eine Dicke, und eine Schicht ist der **Kern**. Die Achse der Wand verläuft entlang des Kerns. Um die Typen zu bearbeiten, wählen Sie **Architektur → Wandtypen**. Eine Schicht außer dem Kern kann eine eigene Höhe haben: **Von** und **Bis** legen fest, wie hoch sie über dem Wandfuß reicht (ein Fliesensockel bis 1500, eine Bekleidung ab 300); leer läuft sie über die ganze Höhe.
+
+Die Spalte **Priorität** (0 bis 100) gibt an, wie die Schicht auf die Schichten einer anderen Wand trifft, wo die Wände sich verbinden: Sie läuft durch deren Schichten mit niedrigerer Priorität und endet an der ersten mit gleicher oder höherer. Leer nimmt die Schicht die Priorität ihres Materials unter **Verwalten → Schnittreihenfolge**, sonst 50 für den Kern und 0 für die übrigen Schichten (die grau angezeigte Zahl). So wird ein Betonkern mit 100 von einem Ständerkern mit 99 nicht unterbrochen und läuft durch die Ständerwand, und ein harter Putz mit 60 hält den Kern einer Wand auf, die an ihm endet. Der IFC-Export schreibt sie als Priority der Schicht, der Import liest sie wieder ein.
+
+Die Spalte **Notiz** sagt, wie die Schicht in diesem Typ verlegt wird (*als durchgehende Schicht, Baumit SupraFix*): sie gehört zum Typ, nicht zum Material, und ein Schichtaufbau-Etikett schreibt sie nach der Schicht; IFC trägt sie als Description der Schicht. Hat das Material der Schicht Katalogdicken (**Verwalten → Materialien → Daten**), bietet der kleine Pfeil neben der Dicke sie an, und ein Warnzeichen markiert eine Schicht anderer Dicke.
+
+Eine Schicht außer dem Kern kann auch über ihre Höhe das Material wechseln: Die Schaltfläche **Schichten** am Ende ihrer Zeile fügt ein Stück hinzu (Fliesen, standardmäßig 2100), von der Unterkante der Schicht aufwärts; fügen Sie weitere für ein Band hinzu (Anstrich bis 900, Fliesen bis 1500), und über dem letzten Stück läuft die Schicht in ihrem eigenen Material bis oben weiter. Jedes Stück wird gezeichnet, in Grundriss und Schnitten geschnitten und in seinem eigenen Material gemessen.
+
+Eine Schicht außer dem Kern kann die Dicke 0 haben, für ein Material, das zu dünn zum Modellieren ist, aber gemessen werden muss: eine Abdichtung, eine Dampfsperre, ein Anstrich. Sie bildet keinen Körper; Grundrisse und Schnitte zeichnen sie als kräftige gestrichelte Linie, wo sie zwischen zwei Schichten liegt (an einer Außenfläche ist die Linie der Fläche ihre eigene), die Zeichnung der Typenaufbauten benennt sie wie die anderen, und sie wird nach Fläche gemessen: die Fläche der Schicht, auf der sie liegt, abzüglich der Öffnungen, in den Mengen der Wand und in der Mengenermittlung nach Material.
+
+Die Spalte **Kategorie** sagt, was die Schicht in diesem Typ ist: **Tragwerk**, **Bekleidung**, **Dämmung**, **Folie** oder **Andere**. Leer (*des Materials*) nimmt die Schicht die Kategorie ihres Materials (**Verwalten → Materialien**). Ein Ansichtsstil lässt die Beläge danach weg, sodass eine als **Bekleidung** markierte Zementplatte mit dem Putz geht und ein als **Andere** markierter Putz bleibt (siehe [Ansichten](views.md)). IFC trägt sie als Category der Schicht.
+
+Die Spalte **In Decken** lässt eine Schicht in die Schichten der Decken weiterlaufen, wie an Wandanschlüssen. Mit **↓** läuft die Schicht vom Wandfuß nach unten durch die Schichten der Decke, auf der die Wand steht, mit niedrigerer Priorität, bis zur Oberseite der ersten Schicht mit gleicher oder höherer Priorität. Standardmäßig geht der Ziegelkern (50) durch Bodenbelag und Estrich (0) und steht auf der Betondecke (50). Mit **↑** läuft die Schicht nach oben durch die unteren Schichten der Decke darüber (einen Deckenputz) bis zur Unterseite der ersten Schicht mit gleicher oder höherer Priorität. Die Decke verliert, was die Wand nimmt, und die Mengen beider folgen. Die Priorität einer Deckenschicht wird in **Deckentypen** gesetzt. Damit ein Putz bis auf den Estrich geht, geben Sie ihm eine Priorität über der des Bodenbelags und unter der des Estrichs (z. B. Putz 10, Bodenbelag 0, Estrich 20). Der Kern eines neuen Wandtyps geht standardmäßig nach unten, ebenso beim Standardwandtyp, den ein neues Projekt für seine erste Wand anlegt, sodass sie auf der tragenden Decke steht. Früher angelegte Typen bleiben, wie sie waren, bis Sie die Kästchen ankreuzen. Nur gerade Wände laufen in die Decken; gebogene stehen wie bisher auf der Decke. Der IFC-Export schreibt die Körper wie gebaut, behält die Schichtsätze und markiert jede solche Schicht (Lapin_LayerJoins: ExtendToFloorBelow, ExtendToFloorAbove). Der Import liest die Markierungen zurück.
+
+![Ein Ziegelkern durch Bodenbelag und Estrich auf dem Beton, im Schnitt](shots/wall-into-floor-section.webp)
+
+![Eine Putzschicht mit Fliesen bis 2100 und dem Putz darüber](shots/wall-layer-parts.webp)
+
+**Schraffuren zur Hand.** Neben dem Material jeder Schicht zeigt ein Muster, wie das Material geschraffiert ist, wo es geschnitten wird. Ein Klick darauf stellt die Schraffuren des Materials gleich dort ein, ohne Umweg über **Verwalten → Materialien**: seine Schraffur, wo ein Schnitt es schneidet, wo ein Grundriss es schneidet und wo eine Ansicht es sieht, jede mit Maßstab, Winkel, Ausrichtung, Füllung und Stift, wie auf der Registerkarte **2D-Grafik** der Materialien. Sie gehören dem Material, also ändert sich auch jeder Typ und jedes Element daraus, und jede Änderung ist ein Schritt zum Rückgängigmachen. **Deckentypen** haben dasselbe Muster. Ein Klick daneben oder <kbd>Esc</kbd> schließt es.
+
+![Das Schraffurmuster einer Schicht, geöffnet in Wandtypen: die Schnitt- und Ansichtsschraffuren des Materials](shots/layer-hatch.webp)
+
+![Wandtypen: die Schichten einer Ziegelwand](shots/wall-types.webp)
+
+Die Legende über den Schichten zeigt die Wand im Grundriss so, wie eine ausgewählte Wand sie zeigt: die gestrichelte Achse mit einer Pfeilspitze in der Richtung, in der sie gezeichnet wurde, **R** auf ihrer rechten und **L** auf ihrer linken Seite. Die Schichten sind von 1 auf der Seite R bis zur letzten auf der Seite L nummeriert, mit denselben Nummern wie die Zeilen der Tabelle; der Kern, auf dem die Wandlinie liegt, ist hervorgehoben. Eine mit **Umkehren** gedrehte Wand hat ihre Schichten andersherum, von L nach R. Die Meldung einer abgelehnten Speicherung verschwindet, sobald Sie den Typ wieder ändern.
+
+- **+ Schicht** fügt eine Schicht hinzu. Die Pfeile verschieben eine Schicht nach oben oder unten.
+- **Zonen in der Höhe** teilt den Kern von unten nach oben, zum Beispiel in eine erste Steinlage, das Mauerwerk und einen Ringbalken.
+- **Stürze** wählt die Stürze über Türen und Fenstern: Fertigteil oder Ortbeton, mit ihrem Auflager und ihrer Höhe.
+- **Damit zeichnen** schließt den Dialog und beginnt, Wände dieses Typs zu zeichnen.
+
+Eine Änderung an einem Typ ändert jede Wand dieses Typs.
+
+**Import…**, **Export CSV** und **Export JSON** unter der Typenliste bringen die Wand- und Deckentypen aus einem Projekt in ein anderes oder in eine Tabellenkalkulation und zurück: die CSV hat eine Zeile je Schicht (Kind, Type, Mark, Layer, Material, Thickness (mm), Core, From, To), die Zeilen eines Typs hintereinander, und auch Excels Semikolons und Dezimalkommas werden gelesen. Beim Import bekommt ein gleichnamiger Typ die Schichten der Datei, die übrigen werden angelegt, in einem Schritt rückgängig zu machen; ein Material, das dem Projekt fehlt, wird nach seinem Namen angelegt. Die Liste **Typenaufbauten** (Schedules → + → Type assemblies) zeigt jeden Wand- und Deckentyp mit Kennzeichen, Gesamtdicke, der Zahl der Bauteile, die ihn verwenden, und seinen Schichten der Reihe nach.
+
+## Wandprofile und Wandnuten
+
+**Architektur → Wandprofil** (<kbd>WB</kbd>) führt ein Profil an der Fläche einer Wand entlang: ein Gesims, ein Band, einen Sockel, eine Fensterbank. **Wandnut** (<kbd>RV</kbd>) schneidet es in die Wand: eine Nut, eine Schattenfuge. Wählen Sie Profil und Höhe in der Leiste der Befehlszeile und klicken Sie dann auf die Wandfläche. In 3D sitzt das Profil in der angeklickten Höhe; im Grundriss in der eingegebenen Höhe, auf der angeklickten Seite. **von oben** misst die Höhe von der Wandkrone nach unten, für ein Gesims unter der Traufe. **Profil an den ausgewählten Wänden** und **Nut in den ausgewählten Wänden** setzen dasselbe an jede ausgewählte Wand, auf ihre Außenseite.
+
+Ein Profil läuft über die ganze Länge der Fläche und ist an den Türen und Fenstern unterbrochen, die es kreuzen würde. Wo zwei Wände in einer Ecke zusammentreffen und beide auf den zusammentreffenden Flächen ein Profil gleicher Form in gleicher Höhe tragen, werden die beiden auf Gehrung ineinandergeführt, ein Gesims um die Ecke. Wählen Sie ein Profil aus, um es in den Eigenschaften zu ändern: sein Profil, sein Material, seine Fläche (**Seite wechseln**), seine Höhe, seinen Abstand von der Fläche, wo es entlang der Wand beginnt und endet und ob es an Öffnungen unterbrochen ist. Die Eigenschaften einer Wand zeigen die Profile und Nuten, die sie trägt.
+
+Profile und Nuten gehen mit ihrer Wand, wenn sie kopiert, in ein anderes Geschoss verschoben oder gelöscht wird. Sie werden nach Länge und Volumen gemessen (bei einer Nut das herausgenommene Volumen). In IFC ist ein Profil eine IfcCovering MOLDING und eine Nut ein IfcOpeningElement RECESS in seiner Wand; beide kommen so zurück, wie sie waren.
+
+![Gesimse, Bänder und eine Nut an den Außenwänden eines Hauses](shots/wall-sweeps-3d.webp)
+
+### Profile am Wandtyp
+
+Ein Profil, das jede Wand eines Typs tragen soll (ein Sockelband, ein Gesims, eine Schattenfuge), gehört zum Typ. In **Architektur → Wandtypen** zeigt **Profile und Nuten** unter den Schichten sie an, eine Zeile je Profil: das Profil, **Wandprofil** oder **Wandnut**, die Seite (R, die Seite der ersten Schicht des Typs, oder L, wie die Legende sie nennt), die Höhe über dem Wandfuß (oder mit **Von oben** unter der Wandkrone), den Versatz von der Wandseite nach außen, das Material eines Profils und seine Rückläufe. **Wandprofil** und **Wandnut** unter der Tabelle fügen eine Zeile hinzu. Speichern Sie den Typ: Jede Wand des Typs erhält sie, ebenso eine Wand, die mit dem Typ gezeichnet oder auf ihn umgestellt wird. Es sind Profile wie die anderen: gemessen, in der Wandprofilliste aufgeführt, an den Ecken, an denen Wände des Typs zusammentreffen, auf Gehrung geführt, in IFC geschrieben. Die Profile einer umgedrehten Wand wechseln mit ihren Schichten die Seite. **JSON exportieren** unter der Typenliste nimmt sie mit, mit den Umrissen der Profile und den Materialien nach Namen (die CSV enthält nur die Schichten).
+
+Wählen Sie eines an einer Wand aus: Die Eigenschaften zeigen **Vom Typ**. Ändern Sie seine Höhe, seinen Versatz oder ein anderes Feld, wird dieses Feld zum eigenen der Wand (**Eigene:** Höhe): spätere Änderungen am Typ lassen es, wie es ist. **Zurück zum Typ** gibt ihm wieder die Werte des Typs. **An dieser Wand ausschalten**, oder das Löschen, lässt das Profil des Typs an dieser Wand aus; **Profile des Typs wieder einschalten** unter **Profile und Nuten** der Wand holt sie zurück.
+
+![Ein Profil am Wandtyp, im Dialog Wandtypen](shots/wall-type-sweeps.webp)
+
+### Rückläufe
+
+Ein Profil, das ein freies Ende seiner Wand erreicht (dort ist keine Wand angeschlossen), läuft zurück: Am Ende auf Gehrung geschnitten, führt es sein Profil um die Ecke auf die Stirnseite der Wand und endet in der Ebene der Wandseite, sodass das Profil geschlossen ist, statt seinen Schnitt zu zeigen. **Rückläufe an freien Enden** in den Eigenschaften wählt beide (Vorgabe für ein Profil), am Anfang, am Ende oder keine, für gerade Enden. Eine Nut läuft nie zurück. An einer Ecke, die an eine andere Wand angeschlossen ist, läuft ein Profil nicht zurück: Es führt bis zur Ecke oder in ein gleiches Profil auf der anderen Wand. An Türen und Fenstern endet es gerade; aktivieren Sie **Rückläufe an Öffnungen**, damit es auch um die Leibungen zurückläuft. **Rücksprung vom Anfang** und **Rücksprung vom Ende** lassen es vor den Enden der Wandseite enden (dort gerade), und **Profil umgekehrt** stellt sein Profil auf den Kopf.
+
+### Ein Profil verschieben und kopieren
+
+Wählen Sie ein Profil aus und verwenden Sie **MOVE** oder **COPY** wie bei jedem Element; seine Wand bleibt stehen. Was die Verschiebung entlang der Wand zurücklegt, schiebt das Profil an ihr entlang (ein Profil über die ganze Wandseite erhält dann einen eigenen Anfang und ein eigenes Ende); was sie quer zur Wand zurücklegt, bleibt unberücksichtigt. In einer Ansicht oder einem Schnitt nach oben oder unten verschoben, ändert sich seine Höhe. Eine Kopie landet auf derselben Wand, versetzt, oder auf einer anderen Wand, wenn sie in ihr landet, auf der Seite, auf der sie landet. **ROTATE** und **MIRROR** lassen es an seiner Wand: an der Wandachse gespiegelt, wechselt es auf die andere Seite. Ein Profil des Typs, das Sie verschieben, behält seinen neuen Platz als eigenen; auf eine andere Wand verschoben, wird es ein eigenes Profil dieser Wand, und das des Typs bleibt an der ersten ausgeschaltet.
+
+### Profile
+
+**Verwalten → Profile** enthält die Profile des Projekts, die Umrisse, mit denen Wandprofile, Nuten und Streifenfundamente geführt werden. **Neues Profil** beginnt mit einem Katalogprofil und seinen Maßen: ein Rechteck, ein gefastes Band, ein Gesims, ein Halbrund, eine Fensterbanknase, ein Band mit Tropfnase; eine V-Nut, eine Rechteck- oder eine Rundnut; für Fundamente rechteckig, in 2 oder 3 Stufen, mit geneigter Oberseite, exzentrisch, mit Sockelwand. Oder wählen Sie **Eingegebene Eckpunkte**: jeder Eckpunkt u v in Millimetern, dazwischen ein Semikolon, eine dritte Zahl macht die Seite ab diesem Eckpunkt zu einem Bogen. **Aus einer gezeichneten Kontur** liest eine geschlossene Polylinie oder ein Rechteck, mit Zeichnen gezeichnet und in seiner Ansicht ausgewählt. Der Kreis in der Vorschau ist der Einfügepunkt: bei einem Wandprofil liegt er auf der Wandfläche in der Höhe des Profils, u zeigt aus der Fläche heraus (bei einer Nut in die Wand hinein). Ändern Sie ein Profil, folgt alles, was es verwendet.
+
+![Der Dialog Profile](shots/profiles.webp)
+
+### Bekleidungen
+
+Bekleidungen modellieren Sie mit den Schichten der Wand selbst, nicht mit Profilen. Fügen Sie dem Wandtyp außen eine Ausbauschicht hinzu (Naturstein, Holzschalung, Faserzement, ein WDVS), mit ihrer Dicke und ihrem Material. **Von** und **Bis** geben ihr eine eigene Höhe (ein Natursteinsockel bis 600, darüber Putz), und die Schaltfläche **Schichten** der Schicht wechselt ihr Material in Bändern über die Höhe. Für eine Bekleidung, die von der Wand absteht, zeichnen Sie eine eigene Wand auf die Fläche (die Linienoption **Außenseite** des Wandwerkzeugs), mit einem Typ aus den Schichten der Bekleidung. Eine Schalung, Brett für Brett verlegt (senkrechte oder waagerechte Bretter, Latten), wird noch nicht modelliert.
+
+## Wände unter einem Dach
+
+Wände auf derselben Ebene wie ein Dach enden von selbst unter ihm und steigen bis zu seinen Giebeln. Bei einer Wand auf einer anderen Ebene wählen Sie sie aus und wählen **Architektur → An Dach anbinden** (<kbd>AR</kbd>), dann klicken Sie auf das Dach – oder auf einen anderen Körper, bis zu dem die Wand reichen soll: einen Studio-Volumenkörper, ein importiertes Element. Siehe [Decken und Dächer](floors-roofs.md).

@@ -1,0 +1,99 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// Command arguments read the same way by every module: a point, an outline,
+/// the ids of a selection, a join style. What is malformed is refused with
+/// the reason, never read as zero or let through to fail later inside the
+/// engine.
+/// </summary>
+public static class Args
+{
+    /// <summary>A finite number under <paramref name="key"/>, required.</summary>
+    public static double Number(JsonObject a, string key)
+    {
+        if (a[key] == null) throw new CommandException($"Missing {key}.");
+        return Json.Number(a[key]) is { } n && double.IsFinite(n) ? n : throw new CommandException($"{key} must be a number.");
+    }
+
+    /// <summary>A plan point given as <c>[x, y]</c> (finite numbers); <paramref name="what"/> names it in the refusal.</summary>
+    public static Vec2 Point(JsonNode? n, string what)
+    {
+        if (n is JsonArray p && p.Count >= 2 && Json.Number(p[0]) is { } x && Json.Number(p[1]) is { } y && double.IsFinite(x) && double.IsFinite(y)) return new Vec2(x, y);
+        throw new CommandException($"The {what} is [x, y].");
+    }
+
+    /// <summary>
+    /// A plan point as the model stores it, <c>[x, y]</c>; null when it is not a list of two finite numbers (a coordinate
+    /// that is not one is never read as 0). Every module's own reader of stored points comes here.
+    /// </summary>
+    public static Vec2? TryPoint(JsonNode? n) => n is JsonArray a && a.Count >= 2 && Finite(a, 0) is { } x && Finite(a, 1) is { } y ? new Vec2(x, y) : null;
+
+    /// <summary><see cref="TryPoint"/>, the origin when there is none.</summary>
+    public static Vec2 PointOf(JsonNode? n) => TryPoint(n) ?? default;
+
+    /// <summary>
+    /// A point in space as the model stores it, <c>[x, y, z]</c>; null when a coordinate is not a finite number. With
+    /// <paramref name="needZ"/> false, a point given in plan only (<c>[x, y]</c>) stands at 0.
+    /// </summary>
+    public static Vec3? TryPoint3(JsonNode? n, bool needZ = true) =>
+        n is JsonArray a && a.Count >= 2 && Finite(a, 0) is { } x && Finite(a, 1) is { } y
+            && (a.Count >= 3 ? Finite(a, 2) : needZ ? null : 0) is { } z ? new Vec3(x, y, z) : null;
+
+    /// <summary>A stored list of plan points, <c>[[x, y], …]</c>: a point that is not two finite numbers is left out.</summary>
+    public static List<Vec2> StoredPoints(JsonNode? n) =>
+        [.. ((n as JsonArray)?.OfType<JsonArray>() ?? []).Select(p => TryPoint(p)).Where(p => p.HasValue).Select(p => p!.Value)];
+
+    /// <summary>A stored list of points in space, <c>[[x, y, z], …]</c>, read as <see cref="TryPoint3"/> reads each; the malformed left out.</summary>
+    public static List<Vec3> StoredPoints3(JsonNode? n, bool needZ = true) =>
+        [.. ((n as JsonArray)?.OfType<JsonArray>() ?? []).Select(p => TryPoint3(p, needZ)).Where(p => p.HasValue).Select(p => p!.Value)];
+
+    static double? Finite(JsonArray a, int i) => i < a.Count && Json.Number(a[i]) is { } d && double.IsFinite(d) ? d : null;
+
+    /// <summary>A plan point given as two numbers under <paramref name="x"/> and <paramref name="y"/>, both required.</summary>
+    public static Vec2 Point(JsonObject a, string x, string y) => new(Number(a, x), Number(a, y));
+
+    /// <summary>
+    /// An outline: <c>points</c>, a list of <c>[x, y]</c>, or else the rectangle
+    /// between <c>x1, y1</c> and <c>x2, y2</c> (counter-clockwise from the first corner).
+    /// </summary>
+    public static IReadOnlyList<Vec2> Points(JsonObject a)
+    {
+        if (a["points"] is JsonArray arr)
+        {
+            if (arr.Count == 0) throw new CommandException("points is empty.");
+            return arr.Select((n, i) => Point(n, $"point {i + 1} of points")).ToList();
+        }
+        if (a["points"] != null) throw new CommandException("points is a list of [x, y].");
+        var (p, q) = (Point(a, "x1", "y1"), Point(a, "x2", "y2"));
+        return [p, new Vec2(q.X, p.Y), q, new Vec2(p.X, q.Y)];
+    }
+
+    /// <summary>The ids a command addresses: <c>ids</c> (a list) and <c>id</c> (one), each once, in that order; what is not a string is skipped.</summary>
+    public static IReadOnlyList<string> Ids(JsonObject a)
+    {
+        var ids = a["ids"] is JsonArray arr ? arr.Select(n => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : null).OfType<string>().ToList() : [];
+        if ((string?)a["id"] is { } one) ids.Add(one);
+        return ids.Distinct().ToList();
+    }
+
+    /// <summary>A join style by name: butt or mitre; null when not given.</summary>
+    /// <summary>A path's arc: its rise off the chord (<c>arc</c>), or the arc through a third point (<c>x3</c>, <c>y3</c>); 0 for a straight one.</summary>
+    public static double Rise(JsonObject a, Vec2 start, Vec2 end)
+    {
+        var chord = (end - start).Length;
+        if (a["x3"] != null || a["y3"] != null) return PathCurve.CheckRise(PathCurve.RiseThrough(start, end, Point(a, "x3", "y3")), chord);
+        return Json.Number(a[PathCurve.Key]) is { } rise ? PathCurve.CheckRise(rise, chord) : 0;
+    }
+
+    public static JoinStyle? JoinStyle(JsonNode? n) => (string?)n switch
+    {
+        null => null,
+        "butt" => Platform.JoinStyle.Butt,
+        "mitre" => Platform.JoinStyle.Mitre,
+        var other => throw new CommandException($"A join style is butt or mitre, not „{other}”."),
+    };
+}

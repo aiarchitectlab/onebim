@@ -1,0 +1,357 @@
+/**
+ * Manage → Clash detection (docs/plan-visualisation.md, stage 2): the project's clash tests on the left (on for Run all,
+ * their counts, out of date once the model changed), and for the test picked its clashes, its settings, or the search
+ * sets. Run runs the tests asked for once and keeps what they found; a clash clicked is shown in 3D (the pair selected,
+ * a section box round where they meet, the camera looking across), given a status, someone who has it and notes, and
+ * sent out as BCF remarks or a CSV list.
+ */
+
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Cloud, Download, FileCode, FileText, Images, MessageSquareText, Play, Plus, Trash2, X } from 'lucide-react';
+import { notify, useUi } from '../../app/store';
+import { useSession } from '../../engine/session';
+import { isGuest } from '../../engine/share';
+import { projectTitle, saveFile } from '../../engine/files';
+import { useCamera } from '../../viewport/camera';
+import { useSectionBox } from '../../viewport/sectionBox';
+import { isolateIds, resetTemporary } from '../../viewport/temporary';
+import { Cell, LengthField } from '../../shell/cells';
+import { DraftGroupEditor } from '../../shell/ConditionGroupEditor';
+import { fromClashGroup, toClashGroup, type UGroup } from '../../shell/conditionGroup';
+import { author, exportBcf } from '../core/remarks/remarks';
+import { toggleClashMarks, useClashMode } from '../core/coordination/coordination';
+import { CoordinationPanel } from '../core/coordination/CoordinationDialog';
+import {
+  clashCsv, clashHtml, clashRemarks, deleteSet, deleteTest, framing, GROUP_LABELS, loadClashes, loadMembers, loadResults, reportFile, runClashes, saveSet, saveTest,
+  seedClashes, setStatus, STATUS_LABELS, STATUSES,
+  type Clash, type ClashList, type ClashStatus, type ClashTest, type GroupBy, type RuleGroup, type SearchSet,
+} from './clash';
+
+/** A clash in the 3D view: the pair selected (alone when asked), a section box round where they meet, the camera looking at it. */
+async function showClash(c: Clash, alone: boolean) {
+  const ids = [c.a, c.b];
+  useUi.setState({ view: '3d', selected: ids, selection: ids[0] });
+  if (alone) isolateIds(ids);
+  for (let k = 0; k < 40; k++) {
+    const api = useCamera.getState().api;
+    if (api) {
+      const box = (id: string) => { const b = api.boxOf?.([id]); return b ? { min: [b.min.x, b.min.y, b.min.z] as [number, number, number], max: [b.max.x, b.max.y, b.max.z] as [number, number, number] } : null; };
+      const f = framing(c.at, box(c.a), box(c.b), useCamera.getState().azimuth ?? 0);
+      useSectionBox.setState({ box: f.box });
+      api.orbitTo({ target: f.target, azimuth: f.azimuth, pitch: f.pitch, distance: f.distance });
+      return;
+    }
+    await new Promise((res) => setTimeout(res, 50));
+  }
+}
+
+const mm = (m: number) => `${Math.round(m * 1000)}`;
+const toBytes = (b64: string) => Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+/** The most pictures an HTML report takes (each a framing of the 3D view). */
+const MAX_PICTURES = 60;
+const day = (iso?: string) => (iso ? new Date(iso).toLocaleString(undefined, { dateStyle: 'short', timeStyle: 'short' }) : '');
+
+export function ClashDialog() {
+  const version = useSession((s) => s.version);
+  const [list, setList] = useState<ClashList | null>(null);
+  const [testId, setTestId] = useState<string | null>(null);
+  const [tab, setTab] = useState<'clashes' | 'test' | 'sets'>('clashes');
+  const [clashes, setClashes] = useState<Clash[]>([]);
+  const [showResolved, setShowResolved] = useState(false);
+  const [current, setCurrent] = useState<number | null>(null);
+  const [picked, setPicked] = useState<Set<number>>(new Set());
+  const [alone, setAlone] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [groupBy, setGroupBy] = useState<GroupBy>('none');
+  const [progress, setProgress] = useState<string | null>(null);
+  const mode = useClashMode((s) => s.mode);
+  const close = () => useUi.setState({ dialog: null });
+
+  // The tests and sets, read again as the model changes; a project with none gets the starting ones (one undo step).
+  // A guest never writes on opening (the host's project is the host's to seed), and a seed in flight is not asked twice.
+  const seeding = useRef(false);
+  useEffect(() => {
+    let live = true;
+    void loadClashes().then(async (l) => {
+      if (!live) return;
+      if (l && l.tests.length === 0 && l.sets.length === 0) {
+        if (!isGuest() && !seeding.current) { seeding.current = true; try { await seedClashes(); } finally { seeding.current = false; } return; }
+        if (seeding.current) return;
+      }
+      setList(l);
+      if (l && !l.tests.some((t) => t.id === testId)) setTestId(l.tests[0]?.id ?? null);
+    });
+    return () => { live = false; };
+  }, [version]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let live = true;
+    if (testId) void loadResults(testId, groupBy).then((r) => { if (live) setClashes(r?.clashes ?? []); }); else setClashes([]);
+    return () => { live = false; };
+  }, [testId, version, groupBy]);
+
+  const test = list?.tests.find((t) => t.id === testId) ?? null;
+  const shown = useMemo(() => clashes.filter((c) => showResolved || c.status !== 'resolved'), [clashes, showResolved]);
+  const go = (n: number | null) => {
+    if (n == null) return;
+    setCurrent(n);
+    const c = clashes.find((x) => x.n === n);
+    if (c) void showClash(c, alone);
+  };
+  const stepTo = (dir: 1 | -1) => {
+    if (!shown.length) return;
+    const at = shown.findIndex((c) => c.n === current);
+    go(shown[(at < 0 ? (dir > 0 ? 0 : shown.length - 1) : (at + dir + shown.length) % shown.length)].n);
+  };
+  const run = async (ids?: string[]) => {
+    setBusy(true);
+    const r = await runClashes(ids);
+    setBusy(false);
+    if (r) { const sum = (k: 'found' | 'new' | 'resolved') => r.reduce((n, x) => n + x[k], 0); notify(`${sum('found')} clashes found, ${sum('new')} new, ${sum('resolved')} resolved.`); }
+  };
+  const bcf = async () => {
+    if (!test) return;
+    setBusy(true);
+    const r = await clashRemarks(test.id, picked.size ? [...picked] : undefined, author());
+    setBusy(false);
+    if (r?.ids.length) await exportBcf({ ids: r.ids });
+    else notify('No open clash to send.');
+  };
+  const csv = async () => {
+    if (!test) return;
+    await saveFile(new TextEncoder().encode(clashCsv(test, clashes)), `${test.name}.csv`, 'text/csv');
+  };
+  const file = async (format: 'xml' | 'pdf') => {
+    if (!test) return;
+    const r = await reportFile(test.id, format, groupBy);
+    if (r) await saveFile(toBytes(r.data), r.name, format === 'pdf' ? 'application/pdf' : 'application/xml');
+  };
+  // An HTML report with a picture of each open clash (the first MAX_PICTURES), the 3D view framed on each in turn.
+  const html = async () => {
+    if (!test) return;
+    const open = shown.filter((c) => c.status !== 'resolved');
+    const pictures = new Map<number, string>();
+    setBusy(true);
+    for (const [k, c] of open.slice(0, MAX_PICTURES).entries()) {
+      setProgress(`${k + 1} / ${Math.min(open.length, MAX_PICTURES)}`);
+      await showClash(c, alone);
+      await new Promise((res) => setTimeout(res, 700));
+      const pic = useCamera.getState().api?.snapshot?.(640);
+      if (pic) pictures.set(c.n, pic);
+    }
+    setProgress(null);
+    setBusy(false);
+    const project = projectTitle(useSession.getState().doc?.path);
+    await saveFile(new TextEncoder().encode(clashHtml(project, test, shown, pictures)), `${test.name}.html`, 'text/html');
+  };
+  const marks = async () => {
+    const on = await toggleClashMarks();
+    if (on == null) notify('Open a plan, section or elevation to mark the clashes in.');
+  };
+  const newTest = async () => {
+    const a = list?.sets[0]?.id;
+    if (!a) { notify('Make a search set first.'); setTab('sets'); return; }
+    const r = await saveTest({ name: 'New test', setA: a, kind: 'hard', tolerance: 0.005 });
+    if (r) { setTestId(r.id); setTab('test'); }
+  };
+  const status = (numbers: number[], s: ClashStatus) => { if (test && numbers.length) void setStatus(test.id, numbers, { status: s }); };
+
+  return (
+    <div className="dialog-backdrop clash-backdrop">
+      <div className="dialog clash-dialog" role="dialog" aria-label="Clash detection" data-testid="clash-dialog" onClick={(e) => e.stopPropagation()}>
+        <header className="dialog-head"><span className="panel-title">Clash detection</span><button type="button" className="icon" onClick={close} title="Close"><X size={15} /></button></header>
+        {/* One window for both checks (S2): the tests, and the openings for MEP with their fixes (the check of Manage → Clash check…). */}
+        <div className="row tabs-row clash-modes" role="tablist" aria-label="Kind of check">
+          <button type="button" role="tab" aria-selected={mode === 'tests'} className={`btn${mode === 'tests' ? ' active' : ''}`} data-clash-mode="tests" onClick={() => useClashMode.setState({ mode: 'tests' })}>Tests</button>
+          <button type="button" role="tab" aria-selected={mode === 'openings'} className={`btn${mode === 'openings' ? ' active' : ''}`} data-clash-mode="openings" onClick={() => useClashMode.setState({ mode: 'openings' })}>Openings for MEP</button>
+        </div>
+        {mode === 'openings' && <div className="coordination" data-testid="coordination-dialog"><CoordinationPanel /></div>}
+        {mode === 'tests' && <>
+        <div className="dialog-body clash-body">
+          <section className="clash-main">
+            <div className="row clash-test-row" data-testid="clash-tests">
+              <select value={testId ?? ''} aria-label="Clash test" data-testid="clash-test" onChange={(e) => { setTestId(e.target.value); setCurrent(null); setPicked(new Set()); }}>
+                {list?.tests.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+              <button type="button" className="btn small" data-testid="clash-new-test" onClick={() => void newTest()}><Plus size={12} /> New test</button>
+            </div>
+            {test && (
+              <p className="small clash-counts">
+                {test.lastRun ? <><span className="cde-block">{test.counts.new + test.counts.active}</span> <span>open</span> · <span>{test.counts.reviewed + test.counts.approved}</span> <span>reviewed</span> · <span className="cde-ok">{test.counts.resolved}</span> <span>resolved</span></> : <span className="muted">not run yet</span>}
+              </p>
+            )}
+            <div className="row tabs-row">
+              <button type="button" className={`btn${tab === 'clashes' ? ' active' : ''}`} data-clash-tab="clashes" onClick={() => setTab('clashes')}>Clashes</button>
+              <button type="button" className={`btn${tab === 'test' ? ' active' : ''}`} data-clash-tab="test" onClick={() => setTab('test')}>Test</button>
+              <button type="button" className={`btn${tab === 'sets' ? ' active' : ''}`} data-clash-tab="sets" onClick={() => setTab('sets')}>Search sets</button>
+            </div>
+            {tab === 'clashes' && test && (
+              <ClashList test={test} clashes={shown} current={current} picked={picked} setPicked={setPicked} go={go} status={status}
+                header={(
+                  <div className="row coordination-tools">
+                    <button type="button" className="btn small" disabled={!shown.length} onClick={() => stepTo(-1)} title="Previous clash"><ChevronLeft size={13} /></button>
+                    <button type="button" className="btn small" data-testid="clash-next" disabled={!shown.length} onClick={() => stepTo(1)} title="Next clash"><ChevronRight size={13} /></button>
+                    <label className="check-line"><input type="checkbox" style={{ width: 'auto', marginRight: 6 }} checked={alone} onChange={(e) => { setAlone(e.target.checked); if (!e.target.checked) resetTemporary(); }} /> <span>alone in 3D</span></label>
+                    <label className="check-line"><input type="checkbox" style={{ width: 'auto', marginRight: 6 }} checked={showResolved} onChange={(e) => setShowResolved(e.target.checked)} /> <span>show resolved</span></label>
+                    <select value={groupBy} aria-label="Group the clashes" data-testid="clash-group-by" onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
+                      {(Object.keys(GROUP_LABELS) as GroupBy[]).map((g) => <option key={g} value={g}>{GROUP_LABELS[g]}</option>)}
+                    </select>
+                    <span className="grow" />
+                    {picked.size > 0 && <select value="" onChange={(e) => { status([...picked], e.target.value as ClashStatus); setPicked(new Set()); }} aria-label="Status of the selected clashes">
+                      <option value="" disabled>Status…</option>
+                      {STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
+                    </select>}
+                  </div>
+                )} />
+            )}
+            {tab === 'clashes' && !test && <p className="muted">No clash test yet.</p>}
+            {tab === 'test' && test && list && <TestForm key={test.id} test={test} sets={list.sets} onDelete={() => { void deleteTest(test.id); setTestId(null); }} />}
+            {tab === 'sets' && list && <SetsEditor sets={list.sets} />}
+          </section>
+        </div>
+        <footer className="dialog-foot">
+          <button type="button" className="btn primary" data-testid="clash-run-test" disabled={busy || !test} onClick={() => test && void run([test.id])}><Play size={13} /> Run test</button>
+          <button type="button" className="btn" data-testid="clash-run-all" disabled={busy || !list?.tests.some((t) => t.enabled)} onClick={() => void run()}><Play size={13} /> Run all</button>
+          <button type="button" className="btn" data-testid="clash-bcf" disabled={busy || !test || !clashes.length} onClick={() => void bcf()} title="Each open clash (or those selected) a remark of type Clash with its viewpoint, sent as a BCF file; sent again: the same remarks updated"><MessageSquareText size={13} /> BCF</button>
+          <button type="button" className="btn" disabled={!test || !clashes.length} onClick={() => void csv()}><Download size={13} /> CSV</button>
+          <button type="button" className="btn" data-testid="clash-xml" disabled={!test || !clashes.length} onClick={() => void file('xml')} title="The clashes as Navisworks writes its clash reports, in their groups"><FileCode size={13} /> XML</button>
+          <button type="button" className="btn" data-testid="clash-pdf" disabled={!test || !clashes.length} onClick={() => void file('pdf')}><FileText size={13} /> PDF</button>
+          <button type="button" className="btn" data-testid="clash-html" disabled={busy || !test || !shown.length} onClick={() => void html()} title="One page with a picture of each open clash, framed in the 3D view"><Images size={13} /> HTML</button>
+          <button type="button" className="btn" data-testid="clash-marks" onClick={() => void marks()} title="The view in front marks the open clashes with red clouds and their numbers (test.clash), on the screen only (View → Clash marks)"><Cloud size={13} /> Mark in view</button>
+          {busy && <span className="muted">{progress ? `Pictures ${progress}` : 'Testing…'}</span>}
+          <span className="grow" />
+          <button type="button" className="btn" onClick={close}>Done</button>
+        </footer>
+        </>}
+      </div>
+    </div>
+  );
+}
+
+function ClashList({ test, clashes, current, picked, setPicked, go, status, header }: {
+  test: ClashTest; clashes: Clash[]; current: number | null; picked: Set<number>; setPicked: (s: Set<number>) => void;
+  go: (n: number) => void; status: (numbers: number[], s: ClashStatus) => void; header: React.ReactNode;
+}) {
+  return (
+    <div data-testid="clash-results">
+      {test.lastRun && <p className="small muted">{`Run on ${day(test.lastRun.date)} · ${test.lastRun.countA} × ${test.setB || test.kind === 'openings' ? test.lastRun.countB : 'itself'} elements · ${test.lastRun.seconds} s`}</p>}
+      {test.lastRun?.truncated && <p className="error-text small">Stopped at the limit of 10,000 clashes: tighten the sets or the tolerance.</p>}
+      {test.stale && <p className="error-text" role="status">Out of date: the model has changed since this run. Run the test again.</p>}
+      {header}
+      {!test.lastRun ? <p className="muted">Run test runs it once and keeps what it finds here.</p> : clashes.length === 0 ? <p className="cde-ok">No clash.</p> : (
+        <div className="coordination-results">
+          <table className="schedule-table coordination-table">
+            <thead><tr><th /><th>#</th><th>Status</th><th>Element A</th><th>Element B</th><th>{test.kind === 'clearance' ? 'Distance (mm)' : test.kind === 'openings' ? 'Short by (mm)' : 'Depth (mm)'}</th><th>Storey</th><th>Assigned to</th><th>Notes</th></tr></thead>
+            <tbody>
+              {clashes.map((c, i) => (<Fragment key={c.key}>
+                {c.group !== undefined && c.group !== clashes[i - 1]?.group && (
+                  <tr className="clash-group" data-clash-group={c.group}>
+                    <td onClick={(e) => e.stopPropagation()}><input type="checkbox" style={{ width: 'auto' }} title="Select the group's clashes"
+                      checked={clashes.filter((x) => x.group === c.group).every((x) => picked.has(x.n))}
+                      onChange={(e) => { const s = new Set(picked); for (const x of clashes) if (x.group === c.group) { if (e.target.checked) s.add(x.n); else s.delete(x.n); } setPicked(s); }} /></td>
+                    <td colSpan={8}><b>{c.group}</b> <span className="muted small">{`· ${clashes.filter((x) => x.group === c.group).length}`}</span></td>
+                  </tr>
+                )}
+                <tr data-clash-n={c.n} data-clash-status={c.status} className={current === c.n ? 'current' : undefined} onClick={() => go(c.n)}>
+                  <td onClick={(e) => e.stopPropagation()}><input type="checkbox" style={{ width: 'auto' }} checked={picked.has(c.n)} onChange={(e) => { const s = new Set(picked); if (e.target.checked) s.add(c.n); else s.delete(c.n); setPicked(s); }} /></td>
+                  <td className="num"><b>{c.n}</b></td>
+                  <td onClick={(e) => e.stopPropagation()}>
+                    <select value={c.status} aria-label="Status" className={c.status === 'new' || c.status === 'active' ? 'cde-block' : c.status === 'resolved' ? 'cde-ok' : undefined} onChange={(e) => status([c.n], e.target.value as ClashStatus)}>
+                      {STATUSES.map((s) => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
+                    </select>
+                  </td>
+                  <td title={c.aClass ?? ''}>{c.aName || c.aClass}{c.aLink ? <span className="muted small"> · {c.aLink}</span> : null}</td>
+                  <td title={c.bClass ?? ''}>{c.bName || c.bClass}{c.bLink ? <span className="muted small"> · {c.bLink}</span> : null}</td>
+                  <td className="num">{c.crossing || test.kind === 'hard' ? mm(c.d) : `${mm(c.d)}`}</td>
+                  <td>{c.aStorey ?? c.bStorey ?? ''}</td>
+                  <td onClick={(e) => e.stopPropagation()}><Cell value={c.assignedTo ?? ''} placeholder="—" onCommit={(t) => { if (t.trim() !== (c.assignedTo ?? '')) void setStatus(test.id, [c.n], { assignedTo: t }); }} /></td>
+                  <td onClick={(e) => e.stopPropagation()}><Cell value={c.notes ?? ''} placeholder="—" onCommit={(t) => { if (t.trim() !== (c.notes ?? '')) void setStatus(test.id, [c.n], { notes: t }); }} /></td>
+                </tr>
+              </Fragment>))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TestForm({ test, sets, onDelete }: { test: ClashTest; sets: SearchSet[]; onDelete: () => void }) {
+  return (
+    <dl className="fields clash-test-form" data-testid="clash-test-form">
+      <dt>Name</dt><dd><Cell value={test.name} onCommit={(t) => { if (t.trim() && t !== test.name) void saveTest({ id: test.id, name: t.trim() }); }} /></dd>
+      {test.kind !== 'openings' && <>
+      <dt>Set A</dt>
+      <dd><select value={test.setA} onChange={(e) => void saveTest({ id: test.id, setA: e.target.value })}>{sets.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}</select></dd>
+      <dt>Set B</dt>
+      <dd><select value={test.setB ?? ''} onChange={(e) => void saveTest({ id: test.id, setB: e.target.value || null })}>
+        <option value="">Set A against itself</option>
+        {sets.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+      </select></dd>
+      </>}
+      <dt>Kind</dt>
+      <dd><select value={test.kind} onChange={(e) => { const kind = e.target.value as ClashTest['kind']; void saveTest({ id: test.id, kind, tolerance: kind === 'clearance' ? 0.05 : 0.005, ...(kind !== 'openings' && !test.setA ? { setA: sets[0]?.id } : {}) }); }}>
+        <option value="hard">Hard: elements crossing</option>
+        <option value="clearance">Clearance: closer than a distance</option>
+        <option value="openings">Openings for MEP: runs through walls, floors and roofs without an opening</option>
+      </select></dd>
+      {test.kind === 'openings' ? <>
+        <dt />
+        <dd><p className="muted small">The check of the Openings for MEP tab: each MEP run through a wall, floor or roof must lie inside an opening, with its clearance. Its depth is how far it is short. Openings are made there.</p>
+          <button type="button" className="link" onClick={() => useClashMode.setState({ mode: 'openings' })}>Openings for MEP</button></dd>
+      </> : <>
+      <dt title={test.kind === 'hard' ? 'A crossing this deep or less is not a clash' : 'Elements closer than this clash'}>{test.kind === 'hard' ? 'Tolerance' : 'Distance'}</dt>
+      {/* In the project's unit; the engine's own limit is 2 m (it says so when it is passed). */}
+      <dd><LengthField metres={test.tolerance} min={0} max={2} testId="clash-tolerance" onCommit={(m) => { if (m != null) void saveTest({ id: test.id, tolerance: m }); }} /></dd>
+      </>}
+      <dt>Run all</dt>
+      <dd><label><input type="checkbox" style={{ width: 'auto', marginRight: 6 }} checked={test.enabled} onChange={(e) => void saveTest({ id: test.id, enabled: e.target.checked })} /> takes this test</label></dd>
+      <dt />
+      <dd><p className="muted small">Changing the sets or the kind starts the test's clashes afresh. Never tested: an element and what fills its openings, the parts of one assembly, elements joined or attached to each other.</p>
+        <button type="button" className="btn small" onClick={onDelete}><Trash2 size={12} /> Delete test</button></dd>
+    </dl>
+  );
+}
+
+function SetsEditor({ sets }: { sets: SearchSet[] }) {
+  const [id, setId] = useState<string | null>(sets[0]?.id ?? null);
+  const set = sets.find((s) => s.id === id) ?? null;
+  const add = async () => {
+    const r = await saveSet({ name: 'New set', matchAll: false, rules: [{ field: 'class', op: 'is', values: [''] }], groups: [] });
+    if (r) setId(r.id);
+  };
+  return (
+    <div className="clash-sets" data-testid="clash-sets">
+      <div className="row">
+        <select value={id ?? ''} onChange={(e) => setId(e.target.value)} aria-label="Search set">
+          {sets.map((s) => <option key={s.id} value={s.id}>{s.name} ({s.count ?? 0})</option>)}
+        </select>
+        <button type="button" className="btn small" data-testid="clash-new-set" onClick={() => void add()}><Plus size={12} /> New set</button>
+        {set && <button type="button" className="btn small" onClick={() => void deleteSet(set.id)}><Trash2 size={12} /> Delete</button>}
+      </div>
+      {set && <SetForm key={set.id} set={set} />}
+    </div>
+  );
+}
+
+function SetForm({ set }: { set: SearchSet }) {
+  const [group, setGroup] = useState<UGroup>(() => fromClashGroup(set));
+  const [count, setCount] = useState<number | null>(set.count ?? null);
+  // How many elements the finished rules take as they are edited.
+  useEffect(() => {
+    const t = setTimeout(() => void loadMembers(toClashGroup(group) as RuleGroup).then((m) => setCount(m?.count ?? null)), 300);
+    return () => clearTimeout(t);
+  }, [group]);
+  const change = (g: UGroup) => { setGroup(g); void saveSet({ id: set.id, name: set.name, ...(toClashGroup(g) as RuleGroup) }); };
+  return (
+    <div className="clash-set-form">
+      <dl className="fields">
+        <dt>Name</dt><dd><Cell value={set.name} onCommit={(t) => { if (t.trim() && t !== set.name) void saveSet({ ...set, name: t.trim() }); }} /></dd>
+        <dt>Takes</dt>
+        <dd><span className="muted small" data-testid="clash-set-count">{count == null ? '…' : `${count} elements`}</span></dd>
+      </dl>
+      <DraftGroupEditor testPrefix="clash-rule" allowGroups value={fromClashGroup(set)} encode={toClashGroup} onCommit={change}
+        newCondition={() => ({ field: '@class', op: '=', value: '' })} matchLabels={['elements meeting every rule', 'elements meeting any rule']} />
+      <p className="muted small">A class is its IFC name (IfcWall) or its label (Wall). A "not" rule takes elements out. With no rule adding elements, the set holds everything.</p>
+    </div>
+  );
+}

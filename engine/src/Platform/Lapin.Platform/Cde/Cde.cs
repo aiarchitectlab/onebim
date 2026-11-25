@@ -1,0 +1,229 @@
+using System.Text.Json.Nodes;
+using Lapin.Model;
+
+namespace Lapin.Platform.Cde;
+
+/// <summary>
+/// The project folder as a common data environment (docs/plan-cde.md,
+/// decision 180): its path and naming convention kept on the IfcProject
+/// (<c>cde</c>), the names the convention gives, the pre-issue checks and the
+/// issues recorded. The issue itself (files written, hashed, the transmittal)
+/// is the host's, <c>cde.issue</c> in the dispatcher: it needs the exports
+/// and the project's file.
+/// </summary>
+public static class Cde
+{
+    public const string Key = "cde";
+
+    /// <summary>The project's CDE settings as kept; empty when none.</summary>
+    public static JsonObject Settings(IModelView m) => Spatial.Project(m)?.Attrs[Key] as JsonObject ?? [];
+
+    public static string? Folder(IModelView m) => (string?)Settings(m)["folder"] is { Length: > 0 } f ? f : null;
+
+    static void Write(ICommandContext ctx, Action<JsonObject> change)
+    {
+        var project = Spatial.Project(ctx.Model) ?? throw new CommandException("The model has no project.");
+        var attrs = project.CloneAttrs();
+        var cde = (attrs[Key] as JsonObject)?.DeepClone() as JsonObject ?? new JsonObject();
+        change(cde);
+        attrs[Key] = cde;
+        ctx.Replace(project.With(attrs: attrs));
+    }
+
+    /// <summary>Whether the folder is on this computer's disk (false in a host without files, and for a folder not there: a warning, never an error).</summary>
+    static bool Exists(string? folder)
+    {
+        try { return folder != null && Directory.Exists(folder); } catch { return false; }
+    }
+
+    /// <summary>The sheets asked for (ids), else every sheet in order.</summary>
+    public static List<Entity> SheetsOf(IModelView m, JsonNode? ids)
+    {
+        var all = m.OfClass(Sheets.Class).ToList();
+        if (ids is not JsonArray a) return all;
+        var wanted = a.Select(x => (string?)x).OfType<string>().ToList();
+        return wanted.Select(id => all.FirstOrDefault(s => s.Id == id) ?? throw new CommandException("There is no such sheet.")).ToList();
+    }
+
+    /// <summary>The documents asked (ids), else every document of the project.</summary>
+    public static List<Entity> DocumentsOf(IModelView m, JsonNode? ids)
+    {
+        var all = Documents.Documents.All(m).ToList();
+        if (ids is not JsonArray a) return all;
+        return a.Select(x => (string?)x).OfType<string>().Select(id => all.FirstOrDefault(d => d.Id == id) ?? throw new CommandException("There is no such document.")).ToList();
+    }
+
+    /// <summary>A document's container name: its template's type, numbered in the order of the project's documents of that type.</summary>
+    public static string DocumentName(IModelView m, CdeNaming naming, Entity doc)
+    {
+        var type = Documents.Documents.IsoType(doc);
+        var n = Documents.Documents.All(m).Where(d => Documents.Documents.IsoType(d) == type).Select(d => d.Id).ToList().IndexOf(doc.Id) + 1;
+        return naming.ForDocument(type, Math.Max(n, 1));
+    }
+
+    /// <summary>The naming an issue writes by: the project's, as an edition's hook makes it (<see cref="CdeHooks.Naming"/>).</summary>
+    public static CdeNaming Naming(IModelView m) => CdeHooks.Naming?.Invoke(CdeNaming.Of(m)) ?? CdeNaming.Of(m);
+
+    /// <summary>
+    /// The names an issue would write, for the sheets asked (all by default), the documents asked (all by default), the model, the set and
+    /// the transmittal. With <c>of</c> (an earlier issue's id or GlobalId) they are a new revision of that issue: its number, and by default
+    /// the revision after its last. The project's issues as series come with them (<c>series</c>), and the one these documents would be a
+    /// new revision of (<c>match</c>: the last issue that sent exactly the sheets, the <c>documents</c> asked and the <c>model</c> or not).
+    /// </summary>
+    public static JsonObject Names(IModelView m, JsonObject a)
+    {
+        var naming = Naming(m);
+        var of = (string?)a["of"] is { Length: > 0 } o ? CdeIssues.SeriesOf(m, o) ?? throw new CommandException("There is no such issue to issue a new revision of.") : null;
+        var revision = (string?)a["revision"] is { Length: > 0 } r ? r : CdeRevisions.Next(of?.LastRevision ?? CdeIssues.LastRevision(m));
+        var status = (string?)a["status"] is { Length: > 0 } s ? s : "S2";
+        var n = of?.Number ?? CdeIssues.NextNumber(m);
+        var series = CdeIssues.AllSeries(m);
+        var match = CdeIssues.Matching(m, SheetsOf(m, a["sheets"]).Select(x => x.Id), a["documents"] is JsonArray ? DocumentsOf(m, a["documents"]).Select(x => x.Id) : [],
+            a["model"] is JsonValue mv && mv.TryGetValue<bool>(out var withModel) && withModel);
+        return new JsonObject
+        {
+            ["revision"] = revision, ["status"] = status, ["number"] = n, ["of"] = of?.IssueId,
+            ["series"] = new JsonArray([.. series.Select(x => (JsonNode)x.ToJson())]),
+            ["match"] = match?.ToJson(),
+            ["sheets"] = new JsonArray(SheetsOf(m, a["sheets"]).Select(sheet =>
+            {
+                var name = naming.For(m, sheet);
+                return (JsonNode)new JsonObject
+                {
+                    ["id"] = sheet.Id, ["number"] = sheet.Str("number"), ["title"] = sheet.Name, ["name"] = name,
+                    ["file"] = CdeNaming.WithRevision(name, status, revision, "pdf"),
+                    ["problems"] = new JsonArray(naming.Validate(name).Select(p => (JsonNode)p).ToArray()),
+                };
+            }).ToArray()),
+            ["documents"] = new JsonArray(DocumentsOf(m, a["documents"]).Select(doc =>
+            {
+                var name = DocumentName(m, naming, doc);
+                return (JsonNode)new JsonObject
+                {
+                    ["id"] = doc.Id, ["title"] = doc.Name, ["name"] = name, ["file"] = CdeNaming.WithRevision(name, status, revision, "pdf"),
+                    ["problems"] = new JsonArray(naming.Validate(name).Select(p => (JsonNode)p).ToArray()),
+                };
+            }).ToArray()),
+            ["model"] = CdeNaming.WithRevision(naming.ForModel(), status, revision, "ifc"),
+            ["set"] = CdeNaming.WithRevision(naming.ForSet(), status, revision, "pdf"),
+            ["transmittal"] = CdeNaming.WithRevision(naming.ForTransmittal(n), status, revision, "pdf"),
+        };
+    }
+
+    public static void Register(IModuleRegistry r)
+    {
+        r.Class(new(CdeIssues.Class, "Issue", [], "#888888", Kind: "resource", Template: false));
+        // Remarks on sheets, read back from issued PDFs (stage 3).
+        PdfRemarks.CdeRemarks.Register(r);
+        // The project's IDS files (docs/ids.md): kept here; read and checked by the dispatcher's IDS calls.
+        IdsFiles.Register(r);
+
+        // The project folder: a path on this computer (or a share, or a synced cloud folder); empty clears it. Kept in the project, so it travels with the file.
+        r.Command("cde.setFolder", "Project folder", (ctx, a) =>
+        {
+            var path = ((string?)a["path"])?.Trim();
+            if (path is { Length: > 0 }) HostFiles.Check(path);
+            Write(ctx, cde => { if (path is { Length: > 0 }) cde["folder"] = path; else cde.Remove("folder"); });
+            return new JsonObject { ["folder"] = path is { Length: > 0 } ? path : null, ["exists"] = Exists(path) };
+        });
+
+        // The naming fields (project, originator, volume, level, role) and the required Pset_…Common properties (names; null: the defaults).
+        r.Command("cde.setNaming", "Naming convention", (ctx, a) =>
+        {
+            var naming = CdeNaming.Of(ctx.Model).With(a);
+            Write(ctx, cde =>
+            {
+                cde["naming"] = naming.ToJson();
+                if (a.ContainsKey("requiredProps"))
+                {
+                    if (a["requiredProps"] is JsonArray props) cde["requiredProps"] = new JsonArray(props.Select(x => (string?)x).OfType<string>().Select(x => x.Trim()).Where(x => x.Length > 0).Distinct().Select(x => (JsonNode)x).ToArray());
+                    else cde.Remove("requiredProps");
+                }
+            });
+            return naming.ToJson();
+        });
+
+        // The issue as the host wrote it (cde.issue): recorded in the project, the printed sheets given its revision and status.
+        r.Command("cde.recordIssue", "Issue", (ctx, a) =>
+        {
+            var files = (a["files"] as JsonArray ?? []).Select(IssuedFile.From).OfType<IssuedFile>().ToList();
+            if (files.Count == 0) throw new CommandException("An issue has at least one file.");
+            var issue = CdeIssues.Record(ctx, (string?)a["name"] ?? "", (string?)a["revision"] ?? "", (string?)a["status"] ?? "", (string?)a["container"] ?? "",
+                (string?)a["folder"], (string?)a["note"], files, a["version"] is JsonValue v && v.TryGetValue<int>(out var n) ? n : null, (string?)a["of"]);
+            return CdeIssues.Read(issue).ToJson();
+        });
+
+        // The version the interface saved after the issue (project.saveVersion), so the two are found together.
+        r.Command("cde.setIssueVersion", "Issue version", (ctx, a) =>
+        {
+            var e = ctx.Model.Get((string?)a["id"] ?? "") is { Class: CdeIssues.Class } i ? i : throw new CommandException("There is no such issue.");
+            var attrs = e.CloneAttrs();
+            if (a["version"] is JsonValue v && v.TryGetValue<int>(out var n)) attrs["version"] = n; else attrs.Remove("version");
+            ctx.Replace(e.With(attrs: attrs));
+            return null;
+        });
+
+        // An old issue's files no longer kept in the project's file (all, or the kinds given: ["ifc"]); its record, names and hashes stay.
+        r.Command("cde.dropIssueFiles", "Delete stored files", (ctx, a) =>
+        {
+            var kinds = a["kinds"] is JsonArray k ? k.Select(x => (string?)x).OfType<string>().ToHashSet() : null;
+            return new JsonObject { ["dropped"] = CdeIssues.DropStored(ctx, (string?)a["id"] ?? "", kinds) };
+        });
+
+        r.Command("cde.deleteIssue", "Delete issue", (ctx, a) =>
+        {
+            var e = ctx.Model.Get((string?)a["id"] ?? "") is { Class: CdeIssues.Class } i ? i : throw new CommandException("There is no such issue.");
+            ctx.Remove(e.Id);
+            return null;
+        });
+
+        // The settings with what the interface shows beside them: the containers, the codes, the next revision and number, an example name.
+        r.Query("cde.settings", (q, _) =>
+        {
+            var m = q.Model;
+            var naming = CdeNaming.Of(m);
+            var folder = Folder(m);
+            return new JsonObject
+            {
+                ["folder"] = folder, ["exists"] = Exists(folder),
+                ["containers"] = new JsonArray(CdeRevisions.Containers.Select(c => (JsonNode)c).ToArray()),
+                ["naming"] = naming.ToJson(),
+                // As an issue would write it: through the edition's hook.
+                ["example"] = Naming(m).ForModel(),
+                ["requiredProps"] = new JsonArray(CdeChecks.Required(m).Select(x => (JsonNode)x.Name).ToArray()),
+                ["roles"] = new JsonArray(CdeNaming.Roles.Select(x => (JsonNode)new JsonObject { ["code"] = x.Code, ["label"] = x.Label }).ToArray()),
+                ["statuses"] = new JsonArray(CdeRevisions.Statuses.Select(x => (JsonNode)new JsonObject { ["code"] = x.Code, ["label"] = x.Label, ["container"] = CdeRevisions.ContainerFor(x.Code) }).ToArray()),
+                ["lastRevision"] = CdeIssues.LastRevision(m),
+                ["nextRevision"] = CdeRevisions.Next(CdeIssues.LastRevision(m)),
+                ["nextNumber"] = CdeIssues.NextNumber(m),
+            };
+        });
+
+        r.Query("cde.naming", (q, a) => Names(q.Model, a));
+
+        // The checks: every rule over the sheets asked (all by default), with the issue's revision when one is given.
+        r.Query("cde.check", (q, a) => CdeChecks.ToJson(q, CdeChecks.Run(q, SheetsOf(q.Model, a["sheets"]), (string?)a["revision"] is { Length: > 0 } rev ? rev : null)));
+
+        r.Query("cde.issues", (q, _) => new JsonArray(CdeIssues.All(q.Model).Select(i => (JsonNode)i.ToJson()).ToArray()));
+
+        // What the issues keep in the project's file: the bytes once per hash, in all and per issue (a file shared with an earlier issue counted there).
+        r.Query("cde.storage", (q, _) =>
+        {
+            var seen = new HashSet<string>();
+            long total = 0;
+            var per = new JsonArray();
+            foreach (var i in CdeIssues.All(q.Model))
+            {
+                long size = 0, shared = 0;
+                var stored = 0;
+                foreach (var f in i.Files.Where(f => f.Stored))
+                {
+                    stored++;
+                    if (seen.Add(f.Sha256)) { size += f.Size; total += f.Size; } else shared += f.Size;
+                }
+                per.Add((JsonNode)new JsonObject { ["id"] = i.Id, ["number"] = i.Number, ["files"] = stored, ["size"] = size, ["shared"] = shared });
+            }
+            return new JsonObject { ["size"] = total, ["blobs"] = seen.Count, ["issues"] = per };
+        });
+    }
+}

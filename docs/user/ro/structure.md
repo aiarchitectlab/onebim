@@ -1,0 +1,119 @@
+---
+title: Structură
+order: 50
+summary: Stâlpi, grinzi și fundații, tipurile lor și cum se îmbină.
+---
+
+Tabul **Structură** are cadrele și fundațiile.
+
+![Tabul Structură](shots/ribbon-structure.webp)
+
+## Cadre
+
+- **Stâlp** (<kbd>CL</kbd>): un clic unde stă. Un stâlp merge de la nivelul lui la nivelul de deasupra.
+- **Grindă** (<kbd>BM</kbd>): un clic la fiecare capăt; cu **Arc** în bara liniei de comandă (**Linie** / **Arc**), dai clic pe cele două capete, apoi pe un punct prin care trece arcul. **Grindă curbă** (<kbd>BC</kbd>) pornește unealta Grindă deja pe **Arc**.
+  O grindă atârnă de nivelul de deasupra: fața ei de sus e la partea de sus a nivelului ei (**Cota superioară** a nivelului, unde începe nivelul de deasupra). **Proprietăți → Amplasare → Decalaj sus (de la nivelul de deasupra)** o mută de acolo: 0 îi ține fața de sus pe nivelul de deasupra, −50 o coboară cu 50 mm; **Cota superioară** arată unde e fața ei de sus față de ±0,00 și o poți scrie pe aceea. Dacă o grindă nu e unde te aștepți, verifică întâi înălțimile nivelurilor ([Niveluri](levels.md)).
+- **Stâlpi pe axe** pune câte un stâlp la fiecare intersecție a axelor. Axele le desenezi cu **Adnotări → Axă** (<kbd>GR</kbd>).
+
+## Cote temporare
+
+Selectează un stâlp într-un plan și Lapin îi desenează **cotele temporare**, pe fiecare din axele lui, la cea mai apropiată față de perete, stâlp sau ax de caroiaj paralel de fiecare parte; selectează o grindă dreaptă și ele merg de-a curmezișul ei la grinzile, pereții și axele paralele de o parte și de alta, și de la fiecare capăt liber în lungul ei la grinda sau peretele spre care merge, ca la [pereți](walls.md#cote-temporare).
+
+De unde pornesc și unde se opresc urmează [referința cotelor](walls.md#referinta-cotelor-de-la-fata-miezului-la-fata-miezului) aleasă de tine (**Adnotări → Cote temporare…**): cu **Fețele miezului** un stâlp se măsoară de la fața secțiunii lui (fără [straturile de finisaj](#straturi-de-finisaj-la-stalpi)) la fața miezului peretelui, cu **Fețe** de la tencuiala lui la finisajul peretelui, cu **Axe** de la centrul lui, cu **Centrul miezului** de la mijlocul secțiunii (centrul lui, dacă secțiunea nu e deplasată față de punctul de inserție). Fețele miezului unei grinzi sunt laturile ei. O grindă dreaptă selectată care întâlnește în unghi altă grindă sau un perete arată și acel unghi, scris ca s-o rotească, la fel ca la [pereți](walls.md#cote-temporare-unghiulare). Dă clic pe o valoare, scrie o distanță și apasă <kbd>Enter</kbd>: stâlpul se mută perpendicular pe linia măsurată, grinda perpendicular pe ea sau capătul ei în lung, un singur pas de anulare. Punctele și lacătul merg ca la pereți.
+
+Cât pui un stâlp, cotele apar, doar de citit, de la stâlpul de sub cursor (secțiunea și straturile de finisaj ale tipului lui); cât desenezi o grindă, de la linia desenată. Lista **Cote temporare** din bara uneltelor Stâlp și Grindă alege referința.
+
+![Cotele temporare ale unui stâlp, de la fața miezului la fața miezului](shots/column-temp-dimensions.webp)
+
+## Fundații
+
+- **Fundație continuă** (<kbd>SF</kbd>) merge sub pereți. Straturile ei exterioare se îmbină la 45° în colțuri.
+  Ca grinda, are **Linie** / **Arc** în bară; **Fundație continuă curbă** (<kbd>CF</kbd>) o pornește pe **Arc**.
+- **Fundație izolată** (<kbd>PF</kbd>): dă clic sub un stâlp. Cât timp unealta e pornită, se agață de centrele stâlpilor nivelului planului și ai nivelului de deasupra.
+- **Fundații izolate sub stâlpi** pune o fundație izolată sub fiecare stâlp selectat care nu are una, în centrul lui și rotită ca el. Fără stâlpi selectați, ia stâlpii nivelului planului (într-un plan de fundații, pe cei ai nivelului de deasupra).
+
+Desenează fundațiile pe nivelul **Foundations** sau dă-le un plan propriu.
+
+**O fundație continuă e doar betonul**, dacă nu ceri peretele. Cât timp **Fundație continuă** e pornită, bara liniei de comandă oferă **Doar fundația** (implicit: o talpă de beton de 600 × 400 mm, un tip cu profil făcut prima dată) sau **Cu perete** (soclul unui tip de fundație continuă deasupra, cu straturile lui) și tipul cu perete de folosit. Alegerea se ține minte. O fundație deja desenată se schimbă cu tipul ei în **Tipuri structurale**.
+
+![Opțiunea uneltei fundație continuă în linia de comandă: doar fundația sau cu perete](shots/structure-strip-option.webp)
+
+**În planuri.** O fundație stă sub planșeu, deci planul o desenează întrerupt în planul nivelului pe care stă, cum arată planul unei clădiri ce e dedesubt. Ca s-o vezi tăiată și văzută, folosește un **plan de fundații**: în browserul proiectului, **+** de lângă **Planuri** face unul pentru nivelul activ (tăiat la 0,50 m sub el, privind 2,50 m în jos).
+
+**Desenând într-un plan de fundații.** Arată și nivelul de dedesubt, iar ce desenezi acolo cu o unealtă de placă, perete, stâlp sau grindă stă pe acel nivel (Fundații la un proiect nou, la −1,50); uneltele de fundații păstrează nivelul planului. O fundație izolată desenată acolo sub un stâlp urcă la baza stâlpului; fața de jos a unei fundații continue e cea a tipului ei sub nivel.
+
+**O fundație izolată urcă la stâlpul ei.** O fundație izolată al cărei punct cade în secțiunea unui stâlp (la un milimetru) are fața de sus la baza stâlpului: nivelul stâlpului plus **Decalaj la bază**, treptele sub ea. Muți stâlpul, îi schimbi nivelul sau decalajul bazei, și fundația îl urmează. Sub stâlpi așezați unul pe altul îl urmează pe cel mai de jos; din doi la fel de jos, pe cel cu centrul mai aproape. O fundație fără stâlp deasupra stă pe nivelul ei, cu **Baza** tipului ei sub el. **Fundații izolate sub stâlpi** pune fiecare fundație în cel mai înalt nivel aflat la sau sub fața ei de jos (Fundații la un proiect nou), altfel în cel mai de jos. O fundație izolată importată dintr-un fișier IFC rămâne unde o pune fișierul.
+
+În **Proprietăți** o fundație izolată își arată cotele **Sus** și **Jos** și stâlpul pe care îl urmează. Scrie o cotă **Sus** ca să-i dai una proprie: nu mai urmează stâlpul. **La baza stâlpului** o leagă din nou.
+
+![Cota unei fundații izolate în Proprietăți: la baza stâlpului ei](shots/structure-pad-level.webp)
+
+![Stâlpi, grinzi și fundații izolate în 3D](shots/structure-3d.webp)
+
+Grinzile și fundațiile continue se taie și se mută cu aceleași unelte ca pereții (vezi [Tăierea, prelungirea, împărțirea și paralela pereților](walls.md)): **Modifică → Împarte elementul** taie una în două unde dai clic, **Modifică → Taie/Prelungește elemente** o taie până la o limită sau o prelungește până la ea (o fundație continuă curbă continuă pe cercul ei; adusă pe axa altei grinzi, cele două se îmbină), iar **Modifică → Paralelă din element** o copiază paralel, de la axă sau între fețe.
+
+## Tipuri și colțuri
+
+**Tipuri structurale** setează secțiunile stâlpilor, grinzilor și fundațiilor: secțiuni de beton și profile metalice. **Secțiunea** unui stâlp e un **Dreptunghi**, un **Cerc** sau un **Poligon**, unul regulat, dat de **Laturi** și **Diametru** (prin colțuri) (un stâlpișor octogonal, cum îl poate avea un IFC importat). Dă clic pe un tip din listă ca să-i schimbi dimensiunea sau numele, apoi **Salvează tipul**: toate elementele de acel tip îl urmează; **Tip nou** te întoarce la crearea unui tip.
+
+**Material** e din ce sunt făcute elementele tipului: beton armat pentru un tip nou, sau materialul profilului pentru unul dintr-o bibliotecă de profile (oțel, lemn, aluminiu), până alegi altul. Alege unul dintre materialele proiectului, sau **Material nou…** ca să faci unul. Culoarea, hașura, îmbinările, cantitățile și exportul IFC ale elementelor îl urmează. La un tip de fundație continuă e **Materialul tălpii** (elevația își păstrează straturile); la o fundație izolată e al treptelor. **Proprietăți** arată materialul unui stâlp, al unei grinzi sau al unei fundații sub tipul lui; **Schimbă în tip…** deschide tipul aici.
+
+**Duplică** de lângă nume copiază tipul ca „Nume 2” („IPE 300 (2)” când numele se termină cu un număr), iar **↑** **↓** îl mută în sus și în jos în listele tipurilor lui, ca la [Tipurile de pereți](walls.md#tipurile-de-pereți).
+
+Grinzile și fundațiile se îmbină singure unde se întâlnesc, un colț la 45°. O grindă trasată din axul unui stâlp în axul altuia se oprește la fețele stâlpilor; lungimea, volumul și etrierii ei numără deschiderea liberă dintre ele. **La 45°**, **Cap la cap** și **Inversează** (grupul **Îmbinări**, același care servește și pereții) schimbă cum se întâlnesc două grinzi sau două fundații. **Preia proprietățile** (<kbd>MA</kbd>) copiază tipul și setările unui element pe altele, iar **Creează similar** (<kbd>CS</kbd>) începe desenarea unui alt element de același tip.
+
+Orice alt profil vine din biblioteci: **Dintr-o bibliotecă de profile…** caută în toate (vezi [Biblioteci de profile](profiles.md)).
+
+## Tipuri dintr-un tabel
+
+**Importă…** sub lista tipurilor de stâlpi și grinzi citește un CSV sau un registru Excel, un rând un tip: numele, felul (grindă, stâlp sau buiandrug), profilul, ori înălțimea h și lățimea b pentru un dreptunghi, materialul și marcajul, iar pentru un buiandrug rezemarea, producătorul, codul și lungimile în care se face. Lapin ghicește fiecare coloană după antet, în engleză, română, germană, franceză sau cehă (*Název*, *Výška*, *Šířka*, *Uložení*…), și citește exportul unui producător cu coloane ca *height.value* și *height.unit*; dialogul arată ce a luat, iar tu poți da unui câmp altă coloană sau altă unitate. Profilul e căutat în proiect, în bibliotecile tale de profile și în catalogul Lapin (IPE 300, HEA 240…); un rând al cărui profil nu e în nicio bibliotecă apare ca necitit. Rândurile care nu spun felul sunt ce alegi tu (grinzi, stâlpi sau buiandrugi prefabricați). **Un tip pentru lungimile unei secțiuni** face din rândurile unei secțiuni, unui material și unui producător, ale căror nume diferă doar prin lungime, un singur tip cu toate lungimile de stoc și codul fiecăreia (*KP 7 - 100*, *KP 7 - 125*… devin *KP 7* cu 1000 și 1250); Lapin o bifează când fișierul are astfel de rânduri.
+
+Previzualizarea arată fiecare tip ca **Nou**, **Există deja în proiect** (lăsat cum e) sau **Diferă**, cu ce diferă (*secțiune*, *lungimi*, *material*…); pentru acestea alegi, ca la tipurile de pereți, **Actualizează-l pe al proiectului** (elementele lui și buiandrugii care îl folosesc îl urmează), **Păstrează-le pe amândouă** (*Nume (2)*) sau **Sari peste**. Importul e un singur pas de anulat. **Exportă CSV** scrie tipurile în aceleași coloane, ca o listă să poată merge într-un tabel și să se întoarcă.
+
+![Tipuri structurale: un tip de buiandrug prefabricat importat din tabelul unui producător, cu marca, rezemarea și lungimile de stoc](shots/structure-types-lintel.webp)
+
+## Straturi de finisaj la stâlpi
+
+Un tip de stâlp are **Finish layers, outward** (straturi de finisaj, spre exterior) în **Tipuri structurale** (fila **Stâlpi**): tencuială, plăci antifoc sau izolație în jurul miezului. Fiecare rând are un **material**, o **grosime** și **fețele** pe care le acoperă: **+X**, **−X**, **+Y** și **−Y**, axele proprii ale secțiunii (X pe lățimea ei, Y pe lungime). Cu toate bifate, stratul merge pe tot conturul; debifează o față care stă lipită de un perete. **Add layer** adaugă un rând, coșul îl șterge, iar primul rând e cel mai din interior.
+
+![Tipuri structurale: un tip de stâlp cu un strat de tencuială peste tot și o placă antifoc pe o față](shots/column-layers-types.webp)
+
+- **Secțiuni metalice.** O secțiune I sau H de oțel e învelită în jurul conturului ei, cum se fac plăcile antifoc.
+- **Planuri și secțiuni.** Fiecare strat se desenează în jurul miezului cu hașura propriului material ([Grafica materialelor](material-graphics.md)).
+- **Visibility / Graphics.** Straturile intră în subcategoriile categoriei stâlpilor (miez, finisaje, izolație…) și ascultă de modurile de straturi ale stilurilor de vedere, ca straturile unui perete. Planurile unui proiect nou lasă finisajele deoparte implicit, ca tencuiala pereților.
+- **3D.** Straturile se văd în 3D.
+- **Cantități.** Se măsoară pe straturi în cantitățile stâlpului (*Lapin_ColumnLayerQuantities*): lățime, arie laterală și volum.
+- **IFC.** Un stâlp cu straturi iese cu un *IfcMaterialConstituentSet*: *Core* și câte un constituent pentru fiecare strat.
+- **Pereți.** Un perete care întâlnește un stâlp se oprește la stratul lui cel mai exterior.
+
+![Un plan cu doi stâlpi secționați, straturile lor hașurate în jurul miezului](shots/column-layers-plan.webp)
+
+## Tipuri de grinzi ca buiandrugi
+
+Un tip de grindă poate fi produsul unui buiandrug prefabricat. În **Tipuri de pereți** sau în configuratorul unei uși ori ferestre, **Buiandrugi → Prefabricat**, apoi săgeata: **Produs** arată întâi **Tipurile de grinzi**: buiandrugul ia secțiunea tipului (lățimea pe grosimea peretelui, înălțimea), cea mai scurtă dintre lungimile lui care acoperă golul și ambele rezemări (un tip fără lungimi se taie la lungime) și materialul lui, dacă regula nu numește altul. Rezemarea e a tipului: câmpul de rezemare o arată estompat, iar o valoare scrisă acolo e a regulii, până o ștergi. Ales în **Tipuri structurale**, un tip de grindă își arată **Marca**, **Rezemarea** și **Lungimile de stoc** (milimetri, separați prin spații sau |) ca să le schimbi; buiandrugii urmează tipul. Importul catalogului de buiandrugi al unui producător (butonul de lângă **Produs**) face din fiecare produs și un tip de grindă, așa că buiandrugii și tipurile de grinzi sunt o singură listă; produsele importate înainte merg mai departe.
+
+![Buiandrugii unui tip de perete: prefabricați, tipul de grindă KP 7 ca produs](shots/lintel-beam-type.webp)
+
+Buiandrugii rămân părți ale peretelui lor, ca până acum; în IFC fiecare e un *IfcBeam* LINTEL cu tipul său *IfcBeamType*, iar tabelul buiandrugilor îi listează după marcajul și numele tipului, cu codul lungimii pe care o ia fiecare.
+
+## Grafica unei fundații continue într-o vedere
+
+Hașura unei fundații continue e cea a materialului ei. Ca s-o schimbi într-o singură vedere (scara sau unghiul hașurii, fără hașură, o culoare), sau ca să desenezi simplu o fațadă hașurată a ei, selectează fundația și alege **Graphics in this view…** (clic dreapta într-un plan, o secțiune sau o fațadă, sau **Properties → Graphics in view**): **Cut** setează ce hașurează planurile și secțiunile, **Seen faces** ce hașurează o fațadă. Vezi [Grafică în această vedere](views.md#grafică-în-această-vedere).
+
+## Fundații continue cu profil
+
+Un tip de fundație continuă e fie cel standard, o elevație cu straturile ei pe o talpă, fie orice profil extrudat de-a lungul axului fundației, ca profilele de fundație din Revit. În **Tipuri structurale → Strip**, alegi **Formă: Profil** și un profil: unul din catalog (dreptunghiulară, în 2 sau 3 trepte, cu fața de sus înclinată, excentrică cu elevația la o margine, cu elevație), făcut cu dimensiunile lui, sau unul al proiectului (**Gestionare → Profile**, unde poți și să-i tastezi colțurile sau să citești un contur desenat). Punctul de inserție al profilului stă pe axul fundației, la cota **Jos** a tipului.
+
+Fundațiile cu profil merg drept sau curb. Două care se întâlnesc într-un colț se taie pe bisectoare, iar una care se oprește în alta intră în ea și e tăiată de corpul ei, așa că fiecare treaptă se întâlnește cu treapta celeilalte. Planurile, secțiunile și fațadele taie corpul extrudat. Cantitățile dau lungimea, aria secțiunii și volumul, iar fețele ei verticale sunt cele pe care Organizarea de șantier le cofrează. În IFC una dreaptă e un IfcFooting STRIP_FOOTING al cărui corp e profilul extrudat (un IfcArbitraryClosedProfileDef), tăiat de planele colțurilor; una curbă merge ca fețele ei. Alegi **Standard** ca să te întorci la elevația pe talpă.
+
+![Fundații continue în trepte sub o casă, tăiate pe bisectoare la colțuri](shots/footing-profile-3d.webp)
+
+![Un tip de fundație continuă cu profil](shots/footing-profile-type.webp)
+
+## O vedere de structură
+
+Disciplina unei vederi decide ce arată. O vedere **Structură** arată doar miezurile portante, fără finisaje. Disciplina o alegi în proprietățile vederii. Vezi [Secțiuni, fațade și 3D](views.md).
+
+## Încărcări
+
+Grupul **Încărcări** are ce îi trebuie unui calcul structural: cazuri de încărcare, încărcări pe suprafață, liniare și punctuale, și combinațiile. Vezi [Încărcări](loads.md).

@@ -1,0 +1,866 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing;
+using Lapin.Drawing.Export;
+using Lapin.Drawing.Views;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// Something other than a view a sheet can show (a schedule): its pages laid
+/// out in paper millimetres (y down from the top-left), at most as wide as asked.
+/// </summary>
+public interface ISheetContent
+{
+    bool Handles(Entity e);
+    /// <summary>Its pages, each with its size and pens; <paramref name="maxWidth"/> and <paramref name="maxHeight"/> (paper mm) wrap and page it.</summary>
+    IReadOnlyList<(double W, double H, List<Pen> Pens)> Pages(IQueryContext q, Entity e, double maxWidth, double? maxHeight);
+}
+
+/// <summary>
+/// A view on a sheet: where its centre sits on the paper (mm, from the top-left), its box (0 × 0: fits the drawing), the drawing
+/// point at its centre (null: the drawing's centre); or bound to a named <see cref="Boundary"/> of its view (decision 236), which
+/// gives the box and the middle. A <see cref="Pinned"/> one stays where it is: not moved, nudged or cropped on the sheet.
+/// </summary>
+public sealed record SheetViewport(string Id, string ViewId, double X, double Y, double Width = 0, double Height = 0, Vec2? Center = null, int Page = 1, string? Boundary = null, bool Pinned = false)
+{
+    public JsonObject ToJson()
+    {
+        var o = new JsonObject { ["id"] = Id, ["viewId"] = ViewId, ["x"] = X, ["y"] = Y, ["width"] = Width, ["height"] = Height };
+        if (Center is { } c) o["center"] = new JsonArray(c.X, c.Y);
+        if (Page > 1) o["page"] = Page;
+        if (Boundary != null) o["boundary"] = Boundary;
+        if (Pinned) o["pinned"] = true;
+        return o;
+    }
+
+    public static SheetViewport? From(JsonNode? n) => n is JsonObject o && (string?)o["id"] is { } id && (string?)o["viewId"] is { } v
+        ? new SheetViewport(id, v, Json.Number(o["x"]) ?? 0, Json.Number(o["y"]) ?? 0, Json.Number(o["width"]) ?? 0, Json.Number(o["height"]) ?? 0,
+            Args.TryPoint(o["center"]),
+            (int)(Json.Number(o["page"]) ?? 1), (string?)o["boundary"], o["pinned"] is JsonValue pv && pv.TryGetValue<bool>(out var pinned) && pinned)
+        : null;
+}
+
+/// <summary>
+/// Sheets (the old Lapin's, part of core): paper A0–A4 in either orientation,
+/// a frame 10 mm in, a 180 × 50 mm title block, and views placed on them at
+/// their own scale. A sheet is a <c>LapinSheet</c> entity (not exported to
+/// IFC). Paper millimetres from the top-left corner; a viewport maps the
+/// view's metres to paper by its scale (1:N: 1 m is 1000 / N mm).
+/// </summary>
+public static class Sheets
+{
+    public const string Class = "LapinSheet";
+    public static readonly Dictionary<string, (double W, double H)> Papers = new()
+    {
+        ["A0"] = (1189, 841), ["A1"] = (841, 594), ["A2"] = (594, 420), ["A3"] = (420, 297), ["A4"] = (297, 210),
+        // ISO 216's long sheets (an A size several times its short side: a plan along a road, a facade) and the North American ones.
+        ["A0x2"] = (1682, 1189), ["A1x3"] = (1783, 841), ["A2x3"] = (1261, 594), ["A3x3"] = (891, 420), ["A3x4"] = (1189, 420), ["A4x3"] = (630, 297),
+        ["Letter"] = (279.4, 215.9), ["Tabloid"] = (431.8, 279.4), ["ARCH D"] = (914.4, 609.6), ["ARCH E"] = (1219.2, 914.4),
+    };
+
+    /// <summary>A paper of the user's own size (a tester's wish, #89): <c>paperWidth</c> × <c>paperHeight</c> mm, as typed.</summary>
+    public const string Custom = "custom";
+    public static readonly string[] PaperChoices = [.. Papers.Keys, Custom];
+    const double MinPaper = 100, MaxPaper = 5000;
+
+    static string CheckPaper(string paper) => paper == Custom || Papers.ContainsKey(paper) ? paper
+        : throw new CommandException($"A sheet's paper is one of {string.Join(", ", PaperChoices)}.");
+
+    /// <summary>A custom paper's size from a command's arguments, kept on the sheet (mm, 100 to 5000).</summary>
+    static void CustomSize(JsonObject attrs, JsonObject a)
+    {
+        double Size(string k, double d) => Math.Clamp(Json.Number(a[k]) ?? d, MinPaper, MaxPaper);
+        attrs["paperWidth"] = Size("paperWidth", 1000);
+        attrs["paperHeight"] = Size("paperHeight", 700);
+    }
+    public static readonly int[] Scales = [1, 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000];
+    public const double Margin = 10;
+    public static readonly (double W, double H) TitleBlock = (180, 50);
+    /// <summary>Paper pens: the frame and title block rules (mm).</summary>
+    const double FramePen = 0.5, RulePen = 0.25;
+
+    public static (double W, double H) PaperOf(Entity sheet)
+    {
+        // A custom paper is as wide and tall as typed; the orientation turns only the standard ones.
+        if (sheet.Str("paper") == Custom)
+            return (Math.Clamp(sheet.NumOrNull("paperWidth") ?? 1000, MinPaper, MaxPaper), Math.Clamp(sheet.NumOrNull("paperHeight") ?? 700, MinPaper, MaxPaper));
+        var (w, h) = Papers.GetValueOrDefault(sheet.Str("paper") ?? "A1", Papers["A1"]);
+        return sheet.Str("orientation") == "portrait" ? (h, w) : (w, h);
+    }
+
+    public static List<SheetViewport> Viewports(Entity sheet) =>
+        sheet.Attrs["viewports"] is JsonArray a ? a.Select(SheetViewport.From).OfType<SheetViewport>().ToList() : [];
+
+    /// <summary>A viewport box that fits a drawing's extent at its scale, plus a 10 mm margin (paper mm).</summary>
+    public static (double W, double H) Fit((Vec2 Min, Vec2 Max) bounds, double scale)
+    {
+        var k = 1000 / scale;
+        return (Math.Max(40, (bounds.Max.X - bounds.Min.X) * k + 20), Math.Max(30, (bounds.Max.Y - bounds.Min.Y) * k + 20));
+    }
+
+    /// <summary>A sheet's viewport as placed: its box on the paper and the transform from the view's metres.</summary>
+    public sealed record Placement(SheetViewport Viewport, Entity View, Views.Rendered Drawing, double X0, double Y0, double X1, double Y1, Func<Vec2, Vec2> ToPaper, bool Content = false, int Pages = 1)
+    {
+        /// <summary>The drawing point at the box's middle, and the named boundary it shows (decision 236), if any.</summary>
+        public Vec2 Middle { get; init; }
+        public Entity? Boundary { get; init; }
+        /// <summary>Paper mm per drawing metre.</summary>
+        public double K => 1000 / Drawing.Scale;
+        /// <summary>The turn (radians, anticlockwise) the view's drawing takes on the paper: a plan's orientation (decision 526); 0: as drawn.</summary>
+        public double Turn { get; init; }
+        /// <summary>A move on the paper (mm, y down) as the move in the view's drawing (m) that shows as it.</summary>
+        public Vec2 FromPaper(double dx, double dy) => Turning.Turn(new Vec2(dx / K, -dy / K), -Turn);
+    }
+
+    /// <summary>A viewport's boundary when it names one of its view's.</summary>
+    static Entity? BoundaryOf(IModelView m, SheetViewport vp) =>
+        vp.Boundary is { } bid && m.Get(bid) is { Class: ViewBoundaries.Class } b && b.Str("viewId") == vp.ViewId ? b : null;
+
+    /// <summary>The frame's inner width and height on a sheet, less the title block's height (what a schedule pages into).</summary>
+    public static (double W, double H) FrameSize(Entity sheet)
+    {
+        var (w, h) = PaperOf(sheet);
+        return (w - 2 * Margin - 4, h - 2 * Margin - TitleBlock.H - 4);
+    }
+
+    /// <summary>As <see cref="FrameSize(Entity)"/> with the sheet's own title block (decision 340): its frame's margins and its block's height.</summary>
+    public static (double W, double H) FrameSize(IModelView m, Entity sheet)
+    {
+        if (TitleBlocks.TemplateOf(m, sheet) == null) return FrameSize(sheet);
+        var l = TitleBlocks.Layout(m, sheet);
+        return (l.Frame.X1 - l.Frame.X0 - 4, l.Frame.Y1 - l.Frame.Y0 - (l.Block.Y1 - l.Block.Y0) - 4);
+    }
+
+    public static List<Placement> Place(IQueryContext q, Entity sheet)
+    {
+        var o = new List<Placement>();
+        foreach (var vp in Viewports(sheet))
+        {
+            // A schedule (or any module's sheet content): its page, laid out in paper mm, centred on the viewport.
+            if (q.Model.Get(vp.ViewId) is { } other && q.Services.All<ISheetContent>().FirstOrDefault(c => c.Handles(other)) is { } content)
+            {
+                var (fw, fh) = FrameSize(q.Model, sheet);
+                var wrap = vp.Width > 0 ? Math.Max(60, Math.Min(vp.Width, fw)) : fw;
+                var pages = content.Pages(q, other, wrap, fh);
+                var (pw, ph, pp) = vp.Page - 1 < pages.Count ? pages[vp.Page - 1] : (40, 10, new List<Pen>());
+                var bw = Math.Max(pw, vp.Width > 0 ? vp.Width : 0);
+                var (x0, y0) = (vp.X - bw / 2, vp.Y - ph / 2);
+                Vec2 Shift(Vec2 p) => new(p.X + x0, p.Y + y0);
+                o.Add(new Placement(vp, other, new Views.Rendered(pp, [], null, 1000, "content", null, []), x0, y0, x0 + bw, y0 + ph, Shift, true, pages.Count));
+                continue;
+            }
+            if (Views.Find(q.Model, vp.ViewId) is not { } view) continue;
+            var r = Views.Render(q, view, print: true);
+            var k = 1000 / r.Scale;
+            // A turned plan (decision 526) lies on the paper as it shows on screen: its drawing turned about the middle the
+            // viewport shows (kept in the view's own coordinates, so turning the view keeps that middle in the box), its box fitting it turned.
+            var turn = Views.Turn(q.Model, view);
+            Vec2 T(Vec2 p) => Turning.Turn(p, turn);
+            var shown = turn == 0 ? r.Bounds : Turning.Bounds(r.Pens, turn);
+            var (w, h) = vp.Width > 0 && vp.Height > 0 ? (vp.Width, vp.Height) : shown is { } b ? Fit(b, r.Scale) : (120, 80);
+            var c = vp.Center ?? (shown is { } bb ? Turning.Turn((bb.Min + bb.Max) * 0.5, -turn) : new Vec2(0, 0));
+            // A cropped view (forum topic 68): its box is its crop region as it shows (its annotation crop when that is on; else
+            // the annotations it draws outside the region too), with no margin round it.
+            if (!(vp.Width > 0 && vp.Height > 0) && ViewCrops.ActiveOf(q.Model, view, r.Scale) is { } crop)
+            {
+                var (lo, hi) = crop.Annotations ?? crop.Model;
+                if (crop.Annotations == null && Turning.Bounds(r.Pens, turn) is { } drawn)
+                    (lo, hi) = (new Vec2(Math.Min(lo.X, drawn.Min.X), Math.Min(lo.Y, drawn.Min.Y)), new Vec2(Math.Max(hi.X, drawn.Max.X), Math.Max(hi.Y, drawn.Max.Y)));
+                (w, h) = ((hi.X - lo.X) * k, (hi.Y - lo.Y) * k);
+                c = vp.Center ?? crop.World((lo + hi) * 0.5);
+            }
+            // Bound to a named boundary of its view: its box and middle are the boundary's (turned: the box round the boundary as it shows).
+            var boundary = BoundaryOf(q.Model, vp);
+            if (boundary != null)
+            {
+                var (bmin, bmax) = ViewBoundaries.Box(boundary);
+                var corners = new[] { bmin, new Vec2(bmax.X, bmin.Y), bmax, new Vec2(bmin.X, bmax.Y) }.Select(T).ToList();
+                (w, h, c) = ((corners.Max(p => p.X) - corners.Min(p => p.X)) * k, (corners.Max(p => p.Y) - corners.Min(p => p.Y)) * k, (bmin + bmax) * 0.5);
+            }
+            var tc = T(c);
+            Vec2 ToPaper(Vec2 p) { var d = T(p) - tc; return new(vp.X + d.X * k, vp.Y - d.Y * k); }
+            o.Add(new Placement(vp, view, r, vp.X - w / 2, vp.Y - h / 2, vp.X + w / 2, vp.Y + h / 2, ToPaper) { Middle = c, Boundary = boundary, Turn = turn });
+        }
+        return o;
+    }
+
+    // ------------------------------------------------------------ clipping to a viewport's box
+
+    internal static bool ClipSegment(ref Vec2 a, ref Vec2 b, double x0, double y0, double x1, double y1)
+    {
+        double t0 = 0, t1 = 1, dx = b.X - a.X, dy = b.Y - a.Y;
+        foreach (var (p, q) in new[] { (-dx, a.X - x0), (dx, x1 - a.X), (-dy, a.Y - y0), (dy, y1 - a.Y) })
+        {
+            if (Math.Abs(p) < 1e-15) { if (q < 0) return false; continue; }
+            var t = q / p;
+            if (p < 0) { if (t > t1) return false; if (t > t0) t0 = t; }
+            else { if (t < t0) return false; if (t < t1) t1 = t; }
+        }
+        var a0 = a;
+        a = new Vec2(a0.X + dx * t0, a0.Y + dy * t0);
+        b = new Vec2(a0.X + dx * t1, a0.Y + dy * t1);
+        return true;
+    }
+
+    internal static List<Vec2> ClipLoop(IReadOnlyList<Vec2> loop, double x0, double y0, double x1, double y1) => Polygon2.ClipBox(loop, x0, y0, x1, y1);
+
+    /// <summary>
+    /// A view's pen on paper, cut to a box as a viewport shows it (segments and fills clipped, texts kept when their point is
+    /// inside, pictures clipped where printed); null when nothing of it is inside. A document's picture cropped to a boundary uses it too.
+    /// </summary>
+    /// <param name="turnDeg">The turn <paramref name="toPaper"/> gives the drawing (a turned plan, decision 526): its texts turn with it, kept readable (<see cref="Turning.Upright"/>).</param>
+    /// <param name="unitsPerMm">Drawing units per paper mm (the view's scale / 1000), for a text turned over on its footprint.</param>
+    public static Pen? ClipToBox(Pen pen, Func<Vec2, Vec2> toPaper, double x0, double y0, double x1, double y1, string? viewport = null, double turnDeg = 0, double unitsPerMm = 0)
+    {
+        var o = new Pen(pen.Layer, pen.Stroke, pen.Width, pen.Fill, pen.Dash) { Viewport = viewport };
+        foreach (var (a, b) in pen.Segments)
+        {
+            var (pa, pb) = (toPaper(a), toPaper(b));
+            if (ClipSegment(ref pa, ref pb, x0, y0, x1, y1)) o.Segments.Add((pa, pb));
+        }
+        // The exact curves go along: DXF writes only the chords the box kept as them, a cut one's piece as a line.
+        if (o.Segments.Count > 0) o.Curves.AddRange(pen.Curves.Select(c => c.Map(toPaper)));
+        foreach (var loop in pen.Loops)
+            if (ClipLoop(loop.Select(toPaper).ToList(), x0, y0, x1, y1) is { Count: >= 3 } c) o.Loops.Add(c);
+        foreach (var t0 in pen.Texts)
+        {
+            var t = Turning.Upright(t0, turnDeg, unitsPerMm);
+            var at = toPaper(t.At);
+            if (at.X >= x0 && at.X <= x1 && at.Y >= y0 && at.Y <= y1) o.Texts.Add(t with { At = at });
+        }
+        // A picture keeps its corners and is clipped to the box where it is printed.
+        foreach (var img in pen.Images) o.Images.Add(img with { Corners = [.. img.Corners.Select(toPaper)] });
+        if (o.Images.Count > 0) o.Clip = (x0, y0, x1, y1);
+        return o.Segments.Count + o.Loops.Count + o.Texts.Count + o.Images.Count > 0 ? o : null;
+    }
+
+    // ------------------------------------------------------------ the sheet on paper
+
+    /// <summary>An issue being made (docs/plan-cde.md): its revision, status, name and date, printed on the sheet's title block and revision table as issued.</summary>
+    public sealed record Issuing(string Revision, string Status, string Name, string At);
+
+    /// <summary>
+    /// A sheet as paper pens: the views clipped to their boxes with their titles, the frame and the title block (its views placed here unless
+    /// given); with <paramref name="issuing"/>, as that issue prints it (its revision and status in the title block, its row in the table);
+    /// what is drawn on the sheet's paper over all of it (decision 620), unless <paramref name="annotations"/> is false (the paper's own screen, under them).
+    /// </summary>
+    public static PaperPage Compose(IQueryContext q, Entity sheet, List<Placement>? placed = null, Issuing? issuing = null, bool annotations = true)
+    {
+        if (issuing != null)
+        {
+            var sa = sheet.CloneAttrs();
+            var tbIssued = (sa["titleBlock"] as JsonObject)?.DeepClone() as JsonObject ?? new JsonObject();
+            tbIssued["revision"] = issuing.Revision;
+            tbIssued["status"] = issuing.Status;
+            sa["titleBlock"] = tbIssued;
+            sheet = sheet.With(attrs: sa);
+        }
+        var (W, H) = PaperOf(sheet);
+        var pens = new List<Pen>();
+        var placements = placed ?? Place(q, sheet);
+        foreach (var pl in placements)
+            foreach (var pen in pl.Drawing.Pens)
+                if (ClipToBox(pen, pl.ToPaper, pl.X0, pl.Y0, pl.X1, pl.Y1, pl.Viewport.Id, pl.Turn * 180 / Math.PI, pl.Drawing.Scale / 1000) is { } o) pens.Add(o);
+
+        var frame = new Pen("FRAME", "#000000", FramePen, null, null);
+        var rules = new Pen("TITLE", "#000000", RulePen, null, null);
+        var text = new Pen("TEXT", "#000000", 0, null, null);
+        void Rect(Pen p, double x0, double y0, double x1, double y1) =>
+            p.Segments.AddRange([(new(x0, y0), new(x1, y0)), (new(x1, y0), new(x1, y1)), (new(x1, y1), new(x0, y1)), (new(x0, y1), new(x0, y0))]);
+        // A title block of the user's (decision 340): its own frame and block; none, Lapin standard's as it always was.
+        var template = TitleBlocks.TemplateOf(q.Model, sheet);
+        if (template == null) Rect(frame, Margin, Margin, W - Margin, H - Margin);
+
+        // View titles: the view's name over a rule, its scale beside, under the box's lower-left corner; the view's own pens, so they move with it.
+        foreach (var pl in placements.Where(p => !p.Content))
+        {
+            // A symbol of the user's for the title (the view's own, else the project's): its insertion point at the box's lower-left corner.
+            if (SymbolSlots.SymbolFor(q.Model, "viewTitle", pl.View) is { } titleSymbol)
+            {
+                var titled = pl;
+                var own = SymbolSlots.SheetPens(q, titleSymbol, new Vec2(pl.X0, pl.Y1), titled.View, SymbolSlots.MarkTokens(q.Model, pl.View, key => key switch
+                {
+                    "view.name" or "mark.name" => (true, titled.Boundary != null ? $"{titled.View.Name} · {titled.Boundary.Name}" : titled.View.Name),
+                    "view.scale" or "mark.scale" => (true, $"1:{titled.Drawing.Scale:0}"),
+                    _ => (false, null),
+                }));
+                foreach (var p in own) p.Viewport = pl.Viewport.Id;
+                pens.AddRange(own);
+                continue;
+            }
+            var y = pl.Y1 + 7;
+            var title = new Pen("TEXT", "#000000", 0, null, null) { Viewport = pl.Viewport.Id };
+            var rule = new Pen("TITLE", "#000000", RulePen, null, null) { Viewport = pl.Viewport.Id };
+            var name = pl.Boundary != null ? $"{pl.View.Name} · {pl.Boundary.Name}" : pl.View.Name;
+            title.Texts.Add(new PenText(new Vec2(pl.X0, y), name, 3.5, Anchor: "start", Bold: true));
+            var nameWidth = TextMeasure.Width(name, 3.5, bold: true);
+            rule.Segments.Add((new(pl.X0, y + 1.5), new(pl.X0 + Math.Max(nameWidth, 30) + 4, y + 1.5)));
+            title.Texts.Add(new PenText(new Vec2(pl.X0 + nameWidth + 4, y), $"1:{pl.Drawing.Scale:0}", 2.5, Anchor: "start"));
+            pens.AddRange([rule, title]);
+        }
+
+        // The sheet's own symbols (a north arrow, a stamp, a key): over the views, under the title block.
+        pens.AddRange(Symbols.SheetPens(q, sheet, placements));
+
+        if (template != null)
+        {
+            TitleBlocks.Draw(q, sheet, template, TitleBlocks.Layout((W, H), template), placements, issuing, pens);
+            if (annotations) pens.AddRange(PaperViews.PrintPens(q, sheet, placements));
+            return new PaperPage(W, H, pens, sheet.Name, DraftingResources.Book(q.Model).LineCap);
+        }
+        // The title block: project; sheet with its revision and status; then number, scale, date, drawn by and checked by.
+        var (bw, bh) = TitleBlock;
+        double bx0 = W - Margin - bw, by0 = H - Margin - bh, bx1 = W - Margin, by1 = H - Margin;
+        Rect(frame, bx0, by0, bx1, by1);
+        rules.Segments.Add((new(bx0, by0 + 20), new(bx1, by0 + 20)));
+        rules.Segments.Add((new(bx0, by0 + 35), new(bx1, by0 + 35)));
+        const int cellCount = 5;
+        for (var i = 1; i < cellCount; i++) rules.Segments.Add((new(bx0 + i * bw / cellCount, by0 + 35), new(bx0 + i * bw / cellCount, by1)));
+        var tb = sheet.Attrs["titleBlock"] as JsonObject;
+        string Field(string k, string fallback = "") => (string?)tb?[k] is { Length: > 0 } v ? v : fallback;
+        var projectName = Field("project", ProjectName(q));
+        text.Texts.Add(new PenText(new Vec2(bx0 + 3, by0 + 4.5), "PROJECT", 1.8, Anchor: "start"));
+        text.Texts.Add(new PenText(new Vec2(bx0 + 3, by0 + 15), projectName, 5, Anchor: "start", Bold: true));
+        text.Texts.Add(new PenText(new Vec2(bx0 + 3, by0 + 24.5), "SHEET", 1.8, Anchor: "start"));
+        text.Texts.Add(new PenText(new Vec2(bx0 + 3, by0 + 32), sheet.Name, 4, Anchor: "start", Bold: true));
+        // The revision and the status (ISO 19650: P01…, S2…) at the right of the sheet's row, as the last issue set them.
+        double rx = bx0 + bw - 54, sx = bx0 + bw - 27;
+        rules.Segments.Add((new(rx, by0 + 20), new(rx, by0 + 35)));
+        rules.Segments.Add((new(sx, by0 + 20), new(sx, by0 + 35)));
+        text.Texts.Add(new PenText(new Vec2(rx + 3, by0 + 24.5), "REV", 1.8, Anchor: "start"));
+        text.Texts.Add(new PenText(new Vec2(rx + 3, by0 + 32), Field("revision", "—"), 4, Anchor: "start", Bold: true));
+        text.Texts.Add(new PenText(new Vec2(sx + 3, by0 + 24.5), "STATUS", 1.8, Anchor: "start"));
+        text.Texts.Add(new PenText(new Vec2(sx + 3, by0 + 32), Field("status", "—"), 4, Anchor: "start", Bold: true));
+        var scales = placements.Where(p => !p.Content).Select(p => p.Drawing.Scale).Distinct().OrderBy(x => x).Select(s => $"1:{s:0}").ToList();
+        var cells = new[]
+        {
+            ("NUMBER", sheet.Str("number") ?? ""),
+            ("SCALE", scales.Count == 0 ? "—" : string.Join(", ", scales)),
+            ("DATE", Field("date", DrawingDates.Format(DraftingResources.Book(q.Model), DateTime.Now))),
+            // Who drew and checked it: the sheet's own, else the project's information (Manage → Project information…).
+            ("DRAWN BY", Field("drawnBy", Documents.ProjectInfo.Get(q.Model, "author") ?? "")),
+            ("CHECKED BY", Field("checkedBy", Documents.ProjectInfo.Get(q.Model, "checkedBy") ?? "")),
+        };
+        for (var i = 0; i < cellCount; i++)
+        {
+            var x = bx0 + i * bw / cellCount + 3;
+            text.Texts.Add(new PenText(new Vec2(x, by0 + 39.5), cells[i].Item1, 1.8, Anchor: "start"));
+            text.Texts.Add(new PenText(new Vec2(x, by0 + 46.5), cells[i].Item2, i == 0 ? 4 : 3, Anchor: "start", Bold: i == 0));
+        }
+        RevisionTable(RevisionRows(q.Model, sheet, issuing), frame, rules, text, bx0, by0, bw);
+        pens.AddRange([frame, rules, text]);
+        // What is drawn on the sheet itself (decision 620): over everything, as on the screen; none on a sheet from before.
+        if (annotations) pens.AddRange(PaperViews.PrintPens(q, sheet, placements));
+        return new PaperPage(W, H, pens, sheet.Name, DraftingResources.Book(q.Model).LineCap);
+    }
+
+    /// <summary>The issues a sheet went out in, oldest first, with the one being made: revision, date (the project's format, DrawingDates), status, the issue's name.</summary>
+    public static List<(string Revision, string Date, string Status, string Name)> RevisionRows(IModelView m, Entity sheet, Issuing? issuing)
+    {
+        var issues = Cde.CdeIssues.OfSheet(m, sheet.Id).Select(i => (i.Revision, i.At, i.Status, i.Name)).ToList();
+        if (issuing != null) issues.Add((issuing.Revision, issuing.At, issuing.Status, issuing.Name));
+        return [.. issues.Select(it => (it.Revision,
+            DateTime.TryParse(it.At, CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AdjustToUniversal, out var d) ? DrawingDates.Format(DraftingResources.Book(m), d) : it.At,
+            it.Status, it.Name))];
+    }
+
+    /// <summary>
+    /// The sheet's revision table (ISO 19650: the issues the sheet went out
+    /// in), over the title block, newest last: revision, date, status, the
+    /// issue's name. Nothing when the sheet was never issued.
+    /// </summary>
+    internal static void RevisionTable(IReadOnlyList<(string Revision, string Date, string Status, string Name)> issues, Pen frame, Pen rules, Pen text, double bx0, double by0, double bw)
+    {
+        if (issues.Count == 0) return;
+        const double row = 5;
+        var top = by0 - (issues.Count + 1) * row;
+        frame.Segments.AddRange([(new(bx0, top), new(bx0 + bw, top)), (new(bx0, top), new(bx0, by0)), (new(bx0 + bw, top), new(bx0 + bw, by0))]);
+        double[] cols = [bx0 + 3, bx0 + 18, bx0 + 42, bx0 + 60];
+        void Row(double y, string rev, string date, string status, string name, bool head)
+        {
+            text.Texts.Add(new PenText(new Vec2(cols[0], y), rev, head ? 1.8 : 2.5, Anchor: "start", Bold: !head));
+            text.Texts.Add(new PenText(new Vec2(cols[1], y), date, head ? 1.8 : 2.5, Anchor: "start"));
+            text.Texts.Add(new PenText(new Vec2(cols[2], y), status, head ? 1.8 : 2.5, Anchor: "start"));
+            text.Texts.Add(new PenText(new Vec2(cols[3], y), name, head ? 1.8 : 2.5, Anchor: "start"));
+        }
+        Row(top + row - 1.3, "REV", "DATE", "STATUS", "DESCRIPTION", true);
+        rules.Segments.Add((new(bx0, top + row), new(bx0 + bw, top + row)));
+        for (var i = 0; i < issues.Count; i++)
+        {
+            var it = issues[i];
+            Row(top + (i + 2) * row - 1.3, it.Revision, it.Date, it.Status, it.Name, false);
+        }
+    }
+
+    /// <summary>What a placed view breaks on the paper: "outside" (past the frame), "titleBlock" (over it); empty when it sits well (a little slack).</summary>
+    public static List<string> Problems(Entity sheet, Placement p) => Problems(TitleBlocks.Layout(PaperOf(sheet), null), p);
+
+    /// <summary>As <see cref="Problems(Entity, Placement)"/> with the sheet's own title block's frame and box (decision 340).</summary>
+    public static List<string> Problems(IModelView m, Entity sheet, Placement p) => Problems(TitleBlocks.Layout(m, sheet), p);
+
+    static List<string> Problems(TitleBlocks.SheetLayout l, Placement p)
+    {
+        var (fx0, fy0, fx1, fy1) = l.Frame;
+        var (bx0, by0, bx1, by1) = l.Block;
+        var o = new List<string>();
+        if (p.X0 < fx0 - 0.5 || p.Y0 < fy0 - 0.5 || p.X1 > fx1 + 0.5 || p.Y1 > fy1 + 0.5) o.Add("outside");
+        if (p.X1 > bx0 + 0.5 && p.X0 < bx1 - 0.5 && p.Y1 > by0 + 0.5 && p.Y0 < by1 - 0.5) o.Add("titleBlock");
+        return o;
+    }
+
+    /// <summary>
+    /// The project's name as a title block shows it when its project field is left empty: the IfcProject's name when the user gave one,
+    /// else the project file's name ("House" for House.lapin), what the interface calls the project; "Project" before either exists.
+    /// </summary>
+    public static string ProjectName(IQueryContext q)
+    {
+        var own = Spatial.Project(q.Model)?.Name;
+        if (own is { Length: > 0 } && own.Trim() != "Project") return own.Trim();
+        return q.Title is { Length: > 0 } title ? title : own is { Length: > 0 } ? own : "Project";
+    }
+
+    /// <summary>
+    /// A hash of what the sheet's views draw on the paper (their pens as
+    /// placed, with their titles): the same while the drawing is the same,
+    /// whatever the date or the title block say. An issue keeps it, so a later
+    /// check tells a sheet changed since it went out (docs/plan-cde.md). What is
+    /// drawn on the sheet's paper and its own symbols count too (audit §16
+    /// leftovers), by what they are (their attributes, a symbol's definition
+    /// with it), not by their live texts, so a date filled in changes nothing;
+    /// a sheet with none hashes as it always did.
+    /// </summary>
+    public static string DrawingHash(IQueryContext q, Entity sheet)
+    {
+        var sb = new System.Text.StringBuilder();
+        foreach (var pen in Compose(q, sheet).Pens.Where(p => p.Viewport != null)) sb.Append(pen.ToJson().ToJsonString()).Append('\n');
+        foreach (var e in PaperViews.Owned(q.Model, sheet.Id).OrderBy(x => x.Id, StringComparer.Ordinal))
+        {
+            sb.Append("paper ").Append(e.Class).Append(' ').Append(e.PredefinedType).Append(' ').Append(e.Id).Append(' ').Append(e.Attrs.ToJsonString()).Append('\n');
+            if (e.PredefinedType == Symbols.Predefined && q.Model.Get(e.Str("symbolId") ?? "") is { } def) sb.Append("symbol ").Append(def.Attrs.ToJsonString()).Append('\n');
+        }
+        return Cde.CdeTransmittal.Sha256(sb.ToString());
+    }
+
+    internal static JsonObject PageJson(IModelView m, PaperPage page, Entity sheet, List<Placement> placements)
+    {
+        var (W, H) = (page.W, page.H);
+        var l = TitleBlocks.Layout(m, sheet);
+        return new JsonObject
+        {
+            ["w"] = W, ["h"] = H,
+            ["frame"] = new JsonArray(l.Frame.X0, l.Frame.Y0, l.Frame.X1, l.Frame.Y1),
+            ["titleBlock"] = new JsonArray(l.Block.X0, l.Block.Y0, l.Block.X1, l.Block.Y1),
+            ["titleBlockId"] = TitleBlocks.AssignedId(m, sheet), ["titleBlockName"] = TitleBlocks.NameOf(m, TitleBlocks.AssignedId(m, sheet)),
+            ["pens"] = new JsonArray(page.Pens.Select(p => (JsonNode)p.ToJson()).ToArray()),
+            ["viewports"] = new JsonArray(placements.Select(p => (JsonNode)new JsonObject
+            {
+                ["id"] = p.Viewport.Id, ["viewId"] = p.Viewport.ViewId, ["x0"] = p.X0, ["y0"] = p.Y0, ["x1"] = p.X1, ["y1"] = p.Y1, ["scale"] = p.Drawing.Scale,
+                ["content"] = p.Content, ["page"] = p.Viewport.Page, ["pages"] = p.Pages, ["width"] = p.Viewport.Width,
+                ["pinned"] = p.Viewport.Pinned, ["boundary"] = p.Boundary?.Id, ["boundaryName"] = p.Boundary?.Name, ["name"] = p.View.Name,
+                ["cx"] = p.Middle.X, ["cy"] = p.Middle.Y,
+                ["warnings"] = new JsonArray(Problems(m, sheet, p).Select(w => (JsonNode)w).ToArray()),
+            }).ToArray()),
+        };
+    }
+
+    public static byte[] Pdf(IQueryContext q, IEnumerable<Entity> sheets, Issuing? issuing = null) =>
+        PdfWriter.Write(sheets.Select(s => Compose(q, s, null, issuing)).ToList(), id => q.Model.Get(id) is { Class: Images.Class } image ? Images.Bytes(image) : null);
+
+    public static byte[] Dxf(IQueryContext q, Entity sheet, Issuing? issuing = null) => DxfWriter.Page(Compose(q, sheet, null, issuing), $"Lapin · {sheet.Str("number")} {sheet.Name}");
+
+    // ------------------------------------------------------------ commands
+
+    static Entity Require(IModelView m, string? id) => m.Get(id ?? "") is { Class: Class } s ? s : throw new CommandException("There is no such sheet.");
+
+    /// <summary>A sheet's viewport as placed now (refused when pinned or a schedule).</summary>
+    static (List<SheetViewport> Vps, int I, Placement Pl) Placed(ICommandContext ctx, Entity sheet, string? viewportId)
+    {
+        var vps = Viewports(sheet);
+        var i = vps.FindIndex(v => v.Id == viewportId);
+        if (i < 0) throw new CommandException("The sheet has no such view.");
+        if (vps[i].Pinned) throw new CommandException("The view is pinned to the sheet: unpin it first.");
+        var pl = Place(ctx.Query, sheet).FirstOrDefault(p => p.Viewport.Id == viewportId) ?? throw new CommandException("The view does not draw.");
+        if (pl.Content) throw new CommandException("A schedule is set by its width.");
+        return (vps, i, pl);
+    }
+
+    /// <summary>
+    /// A view placed again at another scale (the forum's topic #31, decision 547), as a detail of it is drawn beside it: the
+    /// view duplicated with its annotations, at the scale asked, showing the part of the viewport given (a rectangle on the
+    /// paper, kept inside its box; none: the box as it is), on the same sheet beside it (to its right, else its left, below,
+    /// above, as the frame has room), all in one undo step. The original stays as it is, a pinned one too.
+    /// </summary>
+    public static JsonObject PlaceAtScale(ICommandContext ctx, JsonObject a)
+    {
+        var scale = Json.Number(a["scale"]) ?? throw new CommandException("Give the scale.");
+        if (!(scale >= 1 && scale <= 10000)) throw new CommandException("A scale is 1:1 to 1:10000.");
+        Entity sheet;
+        string vpId;
+        if ((string?)a["viewportId"] is { } given) (sheet, vpId) = (Require(ctx.Model, (string?)a["id"]), given);
+        else
+        {
+            var viewId = (string?)a["viewId"] ?? throw new CommandException("Which view?");
+            var on = ctx.Model.OfClass(Class).SelectMany(s => Viewports(s).Where(v => v.ViewId == viewId).Select(v => (Sheet: s, Vp: v))).FirstOrDefault();
+            if (on.Sheet == null) throw new CommandException("The view is on no sheet: place it on one first.");
+            (sheet, vpId) = (on.Sheet, on.Vp.Id);
+        }
+        var pl = Place(ctx.Query, sheet).FirstOrDefault(p => p.Viewport.Id == vpId) ?? throw new CommandException("The sheet has no such view.");
+        if (pl.Content) throw new CommandException("A schedule has no scale.");
+        var (x0, y0, x1, y1) = (Json.Number(a["x0"]) ?? pl.X0, Json.Number(a["y0"]) ?? pl.Y0, Json.Number(a["x1"]) ?? pl.X1, Json.Number(a["y1"]) ?? pl.Y1);
+        if (x1 < x0) (x0, x1) = (x1, x0);
+        if (y1 < y0) (y0, y1) = (y1, y0);
+        (x0, y0, x1, y1) = (Math.Max(x0, pl.X0), Math.Max(y0, pl.Y0), Math.Min(x1, pl.X1), Math.Min(y1, pl.Y1));
+        if (x1 - x0 < 1 || y1 - y0 < 1) throw new CommandException("Draw the part to show on the view.");
+        // The part's middle in the view's drawing, and its box at the new scale (paper mm grow as the scale's number falls).
+        var middle = pl.Middle + pl.FromPaper((x0 + x1) / 2 - pl.Viewport.X, (y0 + y1) / 2 - pl.Viewport.Y);
+        var f = pl.Drawing.Scale / scale;
+        var (w, h) = ((x1 - x0) * f, (y1 - y0) * f);
+        if (w < 10 || h < 10) throw new CommandException(FormattableString.Invariant($"At 1:{scale:0.##} the part would be under 10 mm across on the paper: draw a larger part, or a larger scale."));
+        var src = Views.Find(ctx.Model, pl.Viewport.ViewId)!;
+        // Named after it and its scale ("Ground floor 1:25"), a copy's name when that is taken.
+        var stem = FormattableString.Invariant($"{src.Name} 1:{scale:0.##}");
+        var name = (string?)a["name"] is { Length: > 0 } nm ? nm
+            : ctx.Model.OfClass(Views.Class).Any(v => v.Name == stem) ? Views.CopyName(ctx.Model, stem, Views.Class) : stem;
+        var (copy, _) = Views.Duplicate(ctx, pl.Viewport.ViewId, name, null, withDetailing: true);
+        var attrs = copy.CloneAttrs();
+        attrs["scale"] = scale;
+        ctx.Replace(copy.With(attrs: attrs));
+        var (x, y) = (Json.Number(a["x"]), Json.Number(a["y"]));
+        if (x == null || y == null)
+        {
+            var layout = TitleBlocks.Layout(ctx.Model, sheet);
+            var frame = layout.Frame;
+            const double gap = 10;
+            // Inside the frame, off the title block and the views already there.
+            var taken = Place(ctx.Query, sheet).Select(p => (p.X0, p.Y0, p.X1, p.Y1)).Append(layout.Block).ToList();
+            bool Fits(double cx, double cy) => cx - w / 2 >= frame.X0 && cx + w / 2 <= frame.X1 && cy - h / 2 >= frame.Y0 && cy + h / 2 <= frame.Y1
+                && !taken.Any(t => cx - w / 2 < t.X1 && cx + w / 2 > t.X0 && cy - h / 2 < t.Y1 && cy + h / 2 > t.Y0);
+            double Along(double c, double half, double lo, double hi) => Math.Clamp(c, lo + half, Math.Max(lo + half, hi - half));
+            var cy = Along(pl.Viewport.Y, h / 2, frame.Y0, frame.Y1);
+            var cx = Along(pl.Viewport.X, w / 2, frame.X0, frame.X1);
+            var spots = new (double X, double Y)[]
+            {
+                (pl.X1 + gap + w / 2, cy), (pl.X0 - gap - w / 2, cy), (cx, pl.Y1 + gap + h / 2), (cx, pl.Y0 - gap - h / 2),
+            };
+            var spot = spots.FirstOrDefault(s => Fits(s.X, s.Y), spots[0]);
+            (x, y) = (x ?? spot.X, y ?? spot.Y);
+        }
+        var vps = Viewports(sheet);
+        var vp = new SheetViewport(ctx.NewId(), copy.Id, x.Value, y.Value, w, h, middle);
+        vps.Add(vp);
+        Write(ctx, sheet, vps);
+        return new JsonObject { ["viewId"] = copy.Id, ["viewportId"] = vp.Id, ["sheetId"] = sheet.Id };
+    }
+
+    static void SetBoundary(ICommandContext ctx, Entity b, Vec2 min, Vec2 max)
+    {
+        var attrs = b.CloneAttrs();
+        attrs["min"] = new JsonArray(Math.Round(min.X, 6), Math.Round(min.Y, 6));
+        attrs["max"] = new JsonArray(Math.Round(max.X, 6), Math.Round(max.Y, 6));
+        ctx.Replace(b.With(attrs: attrs));
+    }
+
+    static void Write(ICommandContext ctx, Entity sheet, List<SheetViewport> vps)
+    {
+        var attrs = sheet.CloneAttrs();
+        attrs["viewports"] = new JsonArray(vps.Select(v => (JsonNode)v.ToJson()).ToArray());
+        ctx.Replace(sheet.With(attrs: attrs));
+    }
+
+    /// <summary>
+    /// A new sheet (the next number) with the views or contents given, each by its id, centre (paper mm) and page: what a
+    /// module's command lays out in one step (the Gantt on a sheet, a stages sheet).
+    /// </summary>
+    public static Entity AddSheet(ICommandContext ctx, string name, string paper, bool portrait, IEnumerable<(string ViewId, double X, double Y, int Page)> views, string? discipline = null)
+    {
+        CheckPaper(paper);
+        var id = ctx.NewId();
+        var vps = views.Select(v => (JsonNode)new SheetViewport(ctx.NewId(), v.ViewId, v.X, v.Y, Page: v.Page).ToJson()).ToArray();
+        var sheet = new Entity(id, Class, name, new JsonObject
+        {
+            ["number"] = NextNumber(ctx.Model), ["paper"] = paper, ["orientation"] = portrait ? "portrait" : "landscape",
+            ["titleBlock"] = new JsonObject(), ["viewports"] = new JsonArray(vps),
+        });
+        if (discipline != null) sheet.Attrs["discipline"] = discipline;
+        ctx.Add(sheet);
+        return sheet;
+    }
+
+    /// <summary>
+    /// A view (or a sheet content: a schedule) placed on a sheet: <c>{viewId, page?, boundaryId?, x?, y?}</c> (no point: the middle
+    /// of the paper left of the title block, a schedule's top-left in the frame's). A view goes on one sheet, once per page and
+    /// named boundary (decision 236).
+    /// </summary>
+    public static SheetViewport AddViewport(ICommandContext ctx, JsonObject a, Entity sheet)
+    {
+        var viewId = (string?)a["viewId"] ?? throw new CommandException("Which view?");
+        var page = (int)(Json.Number(a["page"]) ?? 1);
+        var isContent = ctx.Model.Get(viewId) is { } ent && ctx.Services.All<ISheetContent>().Any(c => c.Handles(ent));
+        if (Views.Find(ctx.Model, viewId) == null && !isContent) throw new CommandException("There is no such view.");
+        if (PaperViews.SheetIdOf(viewId) != null) throw new CommandException("A sheet's paper is not a view to place.");
+        // A named boundary of the view (decision 236): the view may go on as many sheets as it has boundaries, once each.
+        var boundary = (string?)a["boundaryId"] is { Length: > 0 } bid
+            ? ctx.Model.Get(bid) is { Class: ViewBoundaries.Class } be && be.Str("viewId") == viewId ? bid : throw new CommandException("The view has no such boundary.")
+            : null;
+        if (ctx.Model.OfClass(Class).FirstOrDefault(s => Viewports(s).Any(v => v.ViewId == viewId && v.Page == page && v.Boundary == boundary)) is { } on)
+            throw new CommandException(boundary != null ? $"That boundary of the view is on sheet {on.Str("number")} already." : $"The view is on sheet {on.Str("number")} already.");
+        var (W, H) = PaperOf(sheet);
+        var vps = Viewports(sheet);
+        var block = TitleBlocks.Layout(ctx.Model, sheet).Block;
+        var (x, y) = (Json.Number(a["x"]) ?? (W - (block.X1 - block.X0)) / 2, Json.Number(a["y"]) ?? H / 2);
+        // A schedule placed with no point (decision 287): its top-left corner in the frame's, where a table is read from, not
+        // its middle in the paper's (a wide table ran past the frame on the left).
+        if (isContent && a["x"] is null && a["y"] is null && ctx.Services.All<ISheetContent>().First(c => c.Handles(ctx.Model.Get(viewId)!)) is var content
+            && content.Pages(ctx.Query, ctx.Model.Get(viewId)!, FrameSize(ctx.Model, sheet).W, FrameSize(ctx.Model, sheet).H) is { } pages && page - 1 < pages.Count)
+            (x, y) = (TitleBlocks.Layout(ctx.Model, sheet).Frame.X0 + 4 + pages[page - 1].W / 2, TitleBlocks.Layout(ctx.Model, sheet).Frame.Y0 + 4 + pages[page - 1].H / 2);
+        var vp = new SheetViewport(ctx.NewId(), viewId, x, y, Page: page, Boundary: boundary);
+        vps.Add(vp);
+        Write(ctx, sheet, vps);
+        return vp;
+    }
+
+    /// <summary>A sheet as a message names it: its number and name (A-101 · Plans).</summary>
+    public static string Label(Entity sheet) => sheet.Str("number") is { Length: > 0 } n ? $"{n} · {sheet.Name}" : sheet.Name;
+
+    /// <summary>
+    /// The sheets each view or schedule is placed on (its id, or a level's default plan's <c>plan:&lt;storey&gt;</c>), in the
+    /// sheets' order; <paramref name="except"/>: sheets left out (those going in the same deletion).
+    /// </summary>
+    public static Dictionary<string, List<Entity>> PlacedOn(IModelView m, IReadOnlySet<string>? except = null)
+    {
+        var on = new Dictionary<string, List<Entity>>();
+        foreach (var s in m.OfClass(Class))
+        {
+            if (except?.Contains(s.Id) == true) continue;
+            foreach (var v in Viewports(s).Select(v => v.ViewId).Distinct())
+                (on.TryGetValue(v, out var l) ? l : on[v] = []).Add(s);
+        }
+        return on;
+    }
+
+    /// <summary>
+    /// A view placed on a sheet is not deleted (forum topic 207, as Revit): it comes off the sheet first, so no sheet is left with
+    /// a hole where a drawing was. The whole deletion is refused, naming the views and their sheets, when any of
+    /// <paramref name="deleting"/> is one (a level whose default plan is on a sheet too); a sheet deleted with its views takes them
+    /// along. Deleting the sheet, or removing the view from it (sheet.removeViewport), stays allowed.
+    /// </summary>
+    public static void RefuseDeletingPlaced(IModelView m, IReadOnlySet<string> deleting)
+    {
+        var on = PlacedOn(m, deleting);
+        if (on.Count == 0) return;
+        var hit = new List<(string Name, List<Entity> Sheets)>();
+        foreach (var id in deleting)
+        {
+            if (m.Get(id) is not { } e) continue;
+            if (on.TryGetValue(id, out var sheets) || (e.Class == IfcClass.BuildingStorey && on.TryGetValue("plan:" + id, out sheets)))
+                hit.Add((e.Name, sheets));
+        }
+        if (hit.Count == 0) return;
+        if (hit.Count == 1)
+        {
+            var (name, sheets) = hit[0];
+            throw new CommandException(sheets.Count == 1
+                ? $"„{name}” is on sheet {Label(sheets[0])}: remove it from the sheet first, then delete it."
+                : $"„{name}” is on sheets {string.Join(", ", sheets.Select(Label))}: remove it from the sheets first, then delete it.");
+        }
+        var numbers = hit.SelectMany(h => h.Sheets).DistinctBy(s => s.Id).Select(s => s.Str("number") is { Length: > 0 } n ? n : s.Name);
+        throw new CommandException($"{hit.Count} views are on sheets ({string.Join(", ", numbers)}): remove them from the sheets first, then delete them. Nothing was deleted.");
+    }
+
+    /// <summary>The next sheet number after the last one: A-101 → A-102.</summary>
+    /// <summary>
+    /// The number a new sheet takes: in the series of the sheet made last (its prefix, „A-” of „A-102”), one past the highest number
+    /// any sheet of that series has, never one already taken; „A-101” for the first sheet.
+    /// </summary>
+    public static string NextNumber(IModelView m)
+    {
+        var numbers = m.OfClass(Class).Select(s => s.Str("number")).OfType<string>().ToList();
+        if (numbers.Count == 0) return "A-101";
+        var taken = numbers.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var last = numbers[^1];
+        static (string Prefix, string Digits)? Split(string n) =>
+            System.Text.RegularExpressions.Regex.Match(n, @"^(.*?)(\d+)$") is { Success: true } x ? (x.Groups[1].Value, x.Groups[2].Value) : null;
+        if (Split(last) is var (prefix, digits))
+        {
+            long? high = null;
+            foreach (var n in numbers)
+                if (Split(n) is var (p, d) && p == prefix && long.TryParse(d, out var k) && (high == null || k > high)) high = k;
+            if (high is { } h && h < long.MaxValue)
+                for (var k = h + 1; k < long.MaxValue; k++)
+                    if (prefix + k.ToString(System.Globalization.CultureInfo.InvariantCulture).PadLeft(digits.Length, '0') is var next && !taken.Contains(next)) return next;
+        }
+        for (var k = 2; ; k++)
+            if (!taken.Contains($"{last}-{k}")) return $"{last}-{k}";
+    }
+
+    public static void Register(IModuleRegistry r)
+    {
+        r.Class(new(Class, "Sheet",
+        [
+            new("number", "Number", "text"),
+            new("paper", "Paper", "choice", Choices: PaperChoices),
+            new("paperWidth", "Paper width (mm)", "number", Min: MinPaper, Max: MaxPaper, ShowIf: FieldDescriptor.When("paper", Custom)),
+            new("paperHeight", "Paper height (mm)", "number", Min: MinPaper, Max: MaxPaper, ShowIf: FieldDescriptor.When("paper", Custom)),
+            new("orientation", "Orientation", "choice", Choices: ["landscape", "portrait"], ShowIf: FieldDescriptor.When("paper", "!" + Custom)),
+            new("discipline", "Discipline", "text"),
+        ], "#555555", Kind: "view"));
+
+        r.Command("sheet.create", "New sheet", (ctx, a) =>
+        {
+            var paper = CheckPaper((string?)a["paper"] ?? "A1");
+            var number = ((string?)a["number"])?.Trim() is { Length: > 0 } n ? n : NextNumber(ctx.Model);
+            var sheet = new Entity(ctx.NewId(), Class, (string?)a["name"] ?? "Sheet", new JsonObject
+            {
+                ["number"] = number, ["paper"] = paper, ["orientation"] = (string?)a["orientation"] == "portrait" ? "portrait" : "landscape",
+                ["titleBlock"] = new JsonObject(), ["viewports"] = new JsonArray(),
+            });
+            if ((string?)a["discipline"] is { Length: > 0 } discipline) sheet.Attrs["discipline"] = discipline;
+            if (paper == Custom) CustomSize(sheet.Attrs, a);
+            ctx.Add(sheet);
+            // With {viewId}: the view placed on the new sheet in the same step (Place on sheet… → New sheet, forum topic 207), one undo.
+            if ((string?)a["viewId"] is { Length: > 0 })
+                return new JsonObject { ["id"] = sheet.Id, ["viewportId"] = Sheets.AddViewport(ctx, a, ctx.Model.Get(sheet.Id)!).Id };
+            return new JsonObject { ["id"] = sheet.Id };
+        });
+
+        // A copy of a sheet: its paper, title block and discipline, the next number, no views (a view sits on one sheet); what is
+        // drawn on its paper and its symbols copied onto the copy's (decision 620).
+        r.Command("sheet.duplicate", "Duplicate sheet", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var attrs = sheet.CloneAttrs();
+            attrs["number"] = NextNumber(ctx.Model);
+            attrs["viewports"] = new JsonArray();
+            var copy = new Entity(ctx.NewId(), Class, (string?)a["name"] is { Length: > 0 } nm ? nm : Views.CopyName(ctx.Model, sheet.Name, Class), attrs);
+            ctx.Add(copy);
+            PaperViews.Copy(ctx, sheet.Id, copy.Id);
+            return new JsonObject { ["id"] = copy.Id };
+        });
+
+        // A title block field (project, drawnBy, date, revision…); empty clears it.
+        r.Command("sheet.titleBlock", "Title block", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var attrs = sheet.CloneAttrs();
+            var tb = attrs["titleBlock"] as JsonObject ?? new JsonObject();
+            foreach (var (k, v) in a["fields"] as JsonObject ?? [])
+                if ((string?)v is { Length: > 0 } s) tb[k] = s; else tb.Remove(k);
+            attrs["titleBlock"] = tb;
+            ctx.Replace(sheet.With(attrs: attrs));
+            return null;
+        });
+
+        // Place a view: where asked, else in the middle of the paper's free area. A view sits on one sheet, as in Revit.
+        r.Command("sheet.addViewport", "Place view", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            return new JsonObject { ["viewportId"] = Sheets.AddViewport(ctx, a, sheet).Id };
+        });
+
+        r.Command("sheet.updateViewport", "Move view", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var vps = Viewports(sheet);
+            var i = vps.FindIndex(v => v.Id == (string?)a["viewportId"]);
+            if (i < 0) throw new CommandException("The sheet has no such view.");
+            var v = vps[i];
+            var moves = a.ContainsKey("x") || a.ContainsKey("y") || a.ContainsKey("width") || a.ContainsKey("height") || a.ContainsKey("center");
+            if (v.Pinned && moves && !(a["pinned"] is JsonValue up && up.TryGetValue<bool>(out var unpin) && !unpin)) throw new CommandException("The view is pinned to the sheet: unpin it to move it.");
+            var next = v with
+            {
+                X = Json.Number(a["x"]) ?? v.X, Y = Json.Number(a["y"]) ?? v.Y,
+                Width = Json.Number(a["width"]) ?? v.Width, Height = Json.Number(a["height"]) ?? v.Height,
+                Center = a.ContainsKey("center") ? Args.TryPoint(a["center"]) : v.Center,
+                Pinned = a["pinned"] is JsonValue pv && pv.TryGetValue<bool>(out var pin) ? pin : v.Pinned,
+            };
+            // Bound to a boundary, or set free of it (keeping the box it had, so nothing moves on the paper).
+            if (a.ContainsKey("boundary"))
+            {
+                if ((string?)a["boundary"] is { Length: > 0 } bid)
+                {
+                    if (ctx.Model.Get(bid) is not { Class: ViewBoundaries.Class } be || be.Str("viewId") != v.ViewId) throw new CommandException("The view has no such boundary.");
+                    if (ctx.Model.OfClass(Class).Any(s => Viewports(s).Any(o => o.Id != v.Id && o.ViewId == v.ViewId && o.Page == v.Page && o.Boundary == bid)))
+                        throw new CommandException("That boundary of the view is on a sheet already.");
+                    next = next with { Boundary = bid };
+                }
+                else if (Place(ctx.Query, sheet).FirstOrDefault(p => p.Viewport.Id == v.Id) is { } pl)
+                    next = next with { Boundary = null, Width = pl.X1 - pl.X0, Height = pl.Y1 - pl.Y0, Center = pl.Middle };
+            }
+            vps[i] = next;
+            Write(ctx, sheet, vps);
+            return null;
+        });
+
+        // A view's box set on the sheet (paper mm, x0 y0 x1 y1): what it shows stays where it is on the paper, the box takes more or less
+        // of it; a view bound to a boundary resizes the boundary in its view (decision 236).
+        r.Command("sheet.cropViewport", "Crop view", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var (vps, i, pl) = Placed(ctx, sheet, (string?)a["viewportId"]);
+            var (x0, y0, x1, y1) = (Json.Number(a["x0"]) ?? pl.X0, Json.Number(a["y0"]) ?? pl.Y0, Json.Number(a["x1"]) ?? pl.X1, Json.Number(a["y1"]) ?? pl.Y1);
+            if (x1 < x0) (x0, x1) = (x1, x0);
+            if (y1 < y0) (y0, y1) = (y1, y0);
+            if (x1 - x0 < 10 || y1 - y0 < 10) throw new CommandException("A view on a sheet is 10 mm across at least.");
+            var (cx, cy) = ((x0 + x1) / 2, (y0 + y1) / 2);
+            var k = pl.K;
+            var middle = pl.Middle + pl.FromPaper(cx - pl.Viewport.X, cy - pl.Viewport.Y);
+            if (pl.Boundary is { } b)
+            {
+                // A boundary is square to the view's axes: a plan turned by a quarter turn crops it with its sides swapped; by another angle, in its view (decision 526).
+                var quarters = Math.Round(pl.Turn / (Math.PI / 2));
+                if (Math.Abs(pl.Turn - quarters * Math.PI / 2) > 1e-9) throw new CommandException("The plan is turned: crop its boundary in the view (View boundaries), not on the sheet.");
+                var half = new Vec2((x1 - x0) / 2 / k, (y1 - y0) / 2 / k);
+                if (Math.Abs(quarters) % 2 == 1) half = new Vec2(half.Y, half.X);
+                SetBoundary(ctx, b, middle - half, middle + half);
+                vps[i] = vps[i] with { X = cx, Y = cy };
+            }
+            else vps[i] = vps[i] with { X = cx, Y = cy, Width = x1 - x0, Height = y1 - y0, Center = middle };
+            Write(ctx, sheet, vps);
+            return null;
+        });
+
+        // What a view shows slid inside its box by dx, dy paper mm (the box stays); a bound one moves its boundary in its view.
+        r.Command("sheet.panViewport", "Pan view", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var (vps, i, pl) = Placed(ctx, sheet, (string?)a["viewportId"]);
+            var shift = -pl.FromPaper(Json.Number(a["dx"]) ?? 0, Json.Number(a["dy"]) ?? 0);
+            if (pl.Boundary is { } b)
+            {
+                var (min, max) = ViewBoundaries.Box(b);
+                SetBoundary(ctx, b, min + shift, max + shift);
+            }
+            else
+            {
+                vps[i] = vps[i] with { Width = pl.X1 - pl.X0, Height = pl.Y1 - pl.Y0, Center = pl.Middle + shift };
+                Write(ctx, sheet, vps);
+            }
+            return null;
+        });
+
+        // The same view again at another scale beside itself (the forum's topic #31, decision 547): {id, viewportId} (or {viewId}: the
+        // sheet it is on), {scale}, the part to show as a rectangle on the viewport {x0, y0, x1, y1} (paper mm; none: its box as it
+        // is), {x, y} where it goes (none: beside it), {name}. Returns {viewId, viewportId, sheetId}.
+        r.Command("sheet.placeAtScale", "Place again at another scale", (ctx, a) => Sheets.PlaceAtScale(ctx, a));
+
+        r.Command("sheet.removeViewport", "Remove view from sheet", (ctx, a) =>
+        {
+            var sheet = Require(ctx.Model, (string?)a["id"]);
+            var vps = Viewports(sheet);
+            if (vps.RemoveAll(v => v.Id == (string?)a["viewportId"]) == 0) throw new CommandException("The sheet has no such view.");
+            Write(ctx, sheet, vps);
+            return null;
+        });
+
+        r.Query("sheet.drawing", (q, a) =>
+        {
+            var sheet = Require(q.Model, (string?)a["id"]);
+            // Every view rendered once, for the page and its viewports both.
+            var placements = Place(q, sheet);
+            return PageJson(q.Model, Compose(q, sheet, placements), sheet, placements);
+        });
+    }
+}

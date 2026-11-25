@@ -1,0 +1,42 @@
+{
+  "name": "lapin-pro",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@10.33.4",
+  "scripts": {
+    "setup": "pnpm install && pnpm build:engine",
+    "build:engine": "dotnet build engine/Lapin.slnx -v q -nologo",
+    "dev": "node scripts/dev.mjs",
+    "dev:desktop": "node scripts/dev.mjs --desktop",
+    "typecheck": "pnpm --filter ui typecheck",
+    "lint": "pnpm --filter ui lint",
+    "test": "pnpm --filter ui test && pnpm test:engine && pnpm test:feedback && pnpm test:store && pnpm test:catalogue && pnpm test:python",
+    "test:feedback": "node --test deploy/feedback/server/server.test.mjs",
+    "test:store": "node --test deploy/store/server/server.test.mjs deploy/store/server/paid.test.mjs",
+    "test:engine": "dotnet test engine/tests/Lapin.Engine.Tests -v q -nologo",
+    "test:python": "node scripts/test-python.mjs",
+    "test:catalogue": "node --test scripts/command-catalogue.test.mjs",
+    "products": "node scripts/product.mjs",
+    "check:licenses": "node scripts/check-licenses.mjs",
+    "build": "node scripts/check-licenses.mjs && pnpm --filter ui build",
+    "build:product": "node scripts/check-licenses.mjs && node scripts/build-product.mjs",
+    "build:web": "node scripts/check-licenses.mjs && node scripts/build-web.mjs",
+    "check:web": "node scripts/check-web.mjs",
+    "docs:user": "node scripts/user-docs/run.mjs",
+    "tauri": "tauri",
+    "mcp": "node scripts/lapin-mcp.mjs",
+    "catalogue": "node scripts/command-catalogue.mjs",
+    "publish:python": "node scripts/publish-python.mjs"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.5.0",
+    "marked": "16.4.1",
+    "playwright-core": "1.56.1"
+  }
+}

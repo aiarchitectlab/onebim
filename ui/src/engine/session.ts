@@ -1,0 +1,270 @@
+/**
+ * Lapin's side of the engine session: the IFC entities, their relationships
+ * and the meshes as the Lapin engine last sent them, kept in step by its
+ * diffs. An entity travels as a node whose type is its IFC class. Every edit
+ * is an engine command (one undo step); nothing is modelled here.
+ */
+
+import { setLibraryApp } from '../platform/libraryFile';
+import { create } from 'zustand';
+import { EngineClient, engineUrl, LONG_TIMEOUT_MS } from './client';
+import { ENGINE_PART_FAILED, workerTransport, type PartState } from './workerTransport';
+import { invitation, relayTransport, savedName, setPresenceSender, useShare, type Participant, type ShareStatus } from './share';
+import { notify } from '../app/store';
+import type { Diff, DocState, NodeDto, RelationDto, RenderItem, SessionInfo, SharedMesh } from './protocol';
+import { storeys } from './model';
+import { useUi } from '../app/store';
+import { DEFAULT_VIEW_SCALES, useStandards, type AreaStep, type Unit } from './unitsStore';
+import { begin, callLabel, commandLabel, haveCommandLabels, setCommandLabels, SlowCalls, stillRunning } from './running';
+
+export interface SessionState {
+  connected: boolean;
+  info: SessionInfo | null;
+  nodes: Map<string, NodeDto>;
+  relations: Map<string, RelationDto>;
+  render: Map<string, RenderItem>;
+  /** The shared meshes the render's instances use, by id. */
+  meshes: Map<string, SharedMesh>;
+  doc: DocState | null;
+  version: number;
+  error: string | null;
+  /** Why the engine is unreachable, once that has lasted (null while it is fine). */
+  engineProblem: string | null;
+}
+
+export const useSession = create<SessionState>(() => ({
+  connected: false, info: null, nodes: new Map(), relations: new Map(), render: new Map(), meshes: new Map(), doc: null, version: -1, error: null, engineProblem: null,
+}));
+
+/** The web build runs the engine in a worker (VITE_ENGINE=worker); the desktop app and pnpm dev reach the local engine over its WebSocket. */
+export const engineInBrowser = import.meta.env.VITE_ENGINE === 'worker';
+
+/** A guest (docs/plan-multiplayer.md) talks to the host's engine through the relay; otherwise this computer's own engine. */
+const guestOf = invitation();
+/** A lazy part of the browser's engine on its way, or not come (docs/plan-browser-engine.md, Lazy parts). */
+const onPart = (name: string, state: PartState) => {
+  if (state === 'loading') notify('Loading a part of Lapin used for the first time…');
+  else if (state === 'failed') notify(ENGINE_PART_FAILED);
+  else {
+    // The parts fetched so far, on the page for the web build's check (scripts/check-web.mjs).
+    const root = document.documentElement;
+    root.dataset.lapinParts = [...(root.dataset.lapinParts ? root.dataset.lapinParts.split(' ') : []), name].join(' ');
+    if (useUi.getState().notice === 'Loading a part of Lapin used for the first time…') notify(null);
+  }
+};
+export const engine = new EngineClient(guestOf ? relayTransport(guestOf, savedName) : engineInBrowser ? workerTransport(undefined, onPart) : engineUrl);
+
+/** Fold an engine diff into the session (a reset replaces everything). A diff older than what is shown is skipped. */
+export function applyDiff(d: Diff): void {
+  const s = useSession.getState();
+  if (!d.reset && d.version <= s.version) return;
+  const nodes = d.reset ? new Map<string, NodeDto>() : new Map(s.nodes);
+  const relations = d.reset ? new Map<string, RelationDto>() : new Map(s.relations);
+  const render = d.reset ? new Map<string, RenderItem>() : new Map(s.render);
+  for (const id of d.removedNodes) nodes.delete(id);
+  for (const n of d.nodes) nodes.set(n.id, n);
+  for (const id of d.removedRelations) relations.delete(id);
+  for (const r of d.relations) relations.set(r.id, r);
+  for (const id of d.renderRemoved) render.delete(id);
+  for (const r of d.render) render.set(r.nodeId, r);
+  let meshes = s.meshes;
+  if (d.reset || d.meshes?.length || d.meshesRemoved?.length) {
+    meshes = d.reset ? new Map() : new Map(s.meshes);
+    for (const id of d.meshesRemoved ?? []) meshes.delete(id);
+    for (const m of d.meshes ?? []) meshes.set(m.id, m);
+  }
+  useSession.setState({ nodes, relations, render, meshes, doc: d.state, version: d.version });
+  // The standards live on the project node: asked again only when the diff brings it (or everything), not on every drag step.
+  if (d.reset || d.nodes.some((n) => n.type === 'IfcProject')) void refreshStandards();
+  // A selection the edit took away goes too.
+  const { selection: sel, selected } = useUi.getState();
+  // A grid axis is selected as grid#tag: it stays while its grid does.
+  const alive = (id: string) => nodes.has(id) || (id.includes('#') && nodes.has(id.slice(0, id.indexOf('#'))));
+  if (sel && !alive(sel)) useUi.setState({ selection: null });
+  if (selected.some((id) => !alive(id))) useUi.setState({ selected: selected.filter(alive) });
+  const storey = useUi.getState().storeyId;
+  if (storey && !nodes.has(storey)) useUi.setState({ storeyId: null });
+  // A type that went is no longer what the tools build with (nor a roof the configurator is open on, nor a view an inset was to go on).
+  const ui = useUi.getState();
+  for (const k of REMEMBERED_IDS)
+    if (ui[k] && !nodes.has(ui[k]!)) useUi.setState({ [k]: null });
+  if (ui.insetAt && !nodes.has(ui.insetAt.viewId)) useUi.setState({ insetAt: null });
+}
+
+/** The ids the interface keeps for the tools (the types they build with, the roof being configured): cleared when their node goes. */
+export const REMEMBERED_IDS = ['wallTypeId', 'slabTypeId', 'doorTypeId', 'windowTypeId', 'stairTypeId', 'rampTypeId', 'ceilingTypeId', 'skirtingTypeId', 'roomFinishTypeId', 'curtainTypeId', 'memberTypeId', 'joistTypeId', 'roofId'] as const;
+
+/** Run an engine command; its diff arrives as an event. Errors land in the session. */
+export async function execute(command: string, args: Record<string, unknown> = {}): Promise<unknown> {
+  if (recording) { recording.push({ command, args }); return null; }
+  // The same edit asked again while the first still runs (app report #187): said so, not queued behind it a second time.
+  const end = begin(command, args);
+  if (!end) { notify(stillRunning(commandLabel(command))); return null; }
+  void loadCommandLabels();
+  try {
+    const result = await engine.call('doc.execute', { command, args });
+    useSession.setState({ error: null });
+    reportDropped(result);
+    return result;
+  } catch (e) {
+    useSession.setState({ error: e instanceof Error ? e.message : String(e) });
+    return null;
+  } finally {
+    end();
+  }
+}
+
+/** The commands' readable names, fetched once, the first time an edit is sent (a slow one is then said by name). */
+let labelsAsked = false;
+async function loadCommandLabels(): Promise<void> {
+  if (labelsAsked || haveCommandLabels()) return;
+  labelsAsked = true;
+  try { setCommandLabels((await engine.call<{ commands?: { name: string; label?: string }[] }>('session.catalogue'))?.commands); } catch { labelsAsked = false; }
+}
+
+/** A command that took sketch constraints off shapes it replaced says which and why (`dropped`): shown, never silent. */
+function reportDropped(result: unknown): void {
+  const dropped = (result as { dropped?: { kind?: string; reason?: string }[] } | null)?.dropped;
+  if (!Array.isArray(dropped) || !dropped.length) return;
+  const reason = dropped[0].reason ?? 'its shape changed';
+  notify(dropped.length === 1 ? `Constraint dropped: ${reason}` : `${dropped.length} constraints dropped: ${reason}`);
+}
+
+let recording: { command: string; args: Record<string, unknown> }[] | null = null;
+
+/**
+ * The commands `run` would send, kept instead of sent (each answers null), so they go together as one edit.batch: one undo
+ * step (Match properties gives a type the way its module does, decision 490). Only the commands `run` sends before it awaits.
+ */
+export function stepsOf(run: () => unknown): { command: string; args: Record<string, unknown> }[] {
+  const was = recording;
+  const steps: { command: string; args: Record<string, unknown> }[] = [];
+  recording = steps;
+  try { void Promise.resolve(run()).catch(() => undefined); } finally { recording = was; }
+  return steps;
+}
+
+/** Ask the engine a question (no edit): null when it cannot answer. */
+export async function query<T = unknown>(name: string, args: Record<string, unknown> = {}): Promise<T | null> {
+  try { return await engine.call<T>('doc.query', { name, args }); } catch { return null; }
+}
+
+/** Undo or redo one step: a failure is said the way an edit's is (the session's `error`), never swallowed. */
+async function step(method: 'doc.undo' | 'doc.redo'): Promise<unknown> {
+  try {
+    const result = await engine.call(method);
+    useSession.setState({ error: null });
+    return result;
+  } catch (e) {
+    useSession.setState({ error: e instanceof Error ? e.message : String(e) });
+    return undefined;
+  }
+}
+export const undo = () => step('doc.undo');
+export const redo = () => step('doc.redo');
+
+/** The storey the plan shows and new elements go on: the chosen one, else the lowest. */
+export function activeStorey(s: SessionState = useSession.getState()): NodeDto | null {
+  const chosen = useUi.getState().storeyId;
+  // None chosen: the ground floor (the lowest at or above ±0.00), not the foundations below it.
+  const all = storeys(s);
+  return (chosen ? s.nodes.get(chosen) : undefined) ?? all.find((n) => Number(n.props.elevation ?? 0) >= -1e-6) ?? all[0] ?? null;
+}
+
+/** The storey to build on: the active one, or a new one when the project has none yet. */
+export async function ensureStorey(): Promise<string | null> {
+  const existing = activeStorey();
+  if (existing) return existing.id;
+  const result = await execute('storey.create', {}) as { id?: string } | null;
+  return activeStorey()?.id ?? result?.id ?? null;
+}
+
+/** How long the engine may be unreachable before the window says so. */
+const LOST_NOTICE_MS = 10_000;
+const LOST_NOTICE = 'The engine stopped; restarting…';
+/** Said when the transport does not retry (the engine in a worker): nothing is restarting. */
+const STOPPED_NOTICE = 'The engine stopped: reload the page to start it again.';
+
+/** Connect to the engine and keep the session in step with it. */
+export async function connect(): Promise<void> {
+  engine.onDiff(applyDiff);
+  engine.onEvent('presence', (d) => useShare.setState({ participants: (d as { participants: Participant[] }).participants }));
+  engine.onEvent('share', (d) => useShare.setState({ status: d as ShareStatus }));
+  engine.onEvent('ended', (d) => useShare.setState({ ended: String(d) }));
+  setPresenceSender((p) => engine.notify('presence.update', p as Record<string, unknown>));
+  // An edit is waited for while the engine is connected (it finishes it whatever the window does): past the usual wait, said so.
+  // It names the edit (app report #187). Slow edits can overlap: the newest still running is named, and the notice goes
+  // only when the last of them has landed (and only if it is still the one shown).
+  const slowCalls = new SlowCalls();
+  let shown: string | null = null;
+  engine.onSlow((method, slow, params) => {
+    const text = slowCalls.change(callLabel(method, params), slow);
+    if (text) notify(shown = text);
+    else if (shown && useUi.getState().notice === shown) { shown = null; notify(null); }
+  });
+  let lost: ReturnType<typeof setTimeout> | undefined;
+  engine.onStatus((connected) => {
+    useSession.setState({ connected });
+    clearTimeout(lost);
+    if (connected) {
+      useSession.setState({ engineProblem: null });
+      // The main window says who works here: it is the host among a shared session's participants.
+      if (!guestOf && useUi.getState().windowRole === 'main') engine.notify('presence.hello', { name: savedName() });
+      void resync();
+    } else {
+      lost = setTimeout(() => { if (!useSession.getState().engineProblem) useSession.setState({ engineProblem: engine.retries ? LOST_NOTICE : STOPPED_NOTICE }); }, LOST_NOTICE_MS);
+    }
+  });
+  void watchDesktopEngine();
+  try {
+    await engine.start();
+  } catch (e) {
+    // A start that cannot be retried (the engine in a worker) fails for good: the real reason is shown, not "restarting…".
+    clearTimeout(lost);
+    useSession.setState({ engineProblem: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** In the desktop app the shell restarts a stopped engine and says how it went. */
+async function watchDesktopEngine(): Promise<void> {
+  if (!(window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) return;
+  const { listen } = await import('@tauri-apps/api/event');
+  await listen('engine-restarted', () => notify('The engine stopped and was restarted.'));
+  await listen<string>('engine-failed', (e) => useSession.setState({ engineProblem: e.payload || 'The engine could not be restarted: quit and reopen Lapin.' }));
+}
+
+/**
+ * After (re)connecting: the engine's description and the whole model. A
+ * connection that drops meanwhile is left to the next status change; any
+ * other failure is said, and tried again shortly, so the screen never keeps
+ * a previous engine's model for good.
+ */
+async function resync(attempt = 0): Promise<void> {
+  try {
+    const info = await engine.call<SessionInfo>('session.info');
+    const snapshot = await engine.call<Diff>('doc.snapshot', {}, { timeoutMs: LONG_TIMEOUT_MS });
+    useSession.setState({ info });
+    setLibraryApp(info.engineVersion ?? null);
+    applyDiff(snapshot);
+  } catch (e) {
+    if (!useSession.getState().connected) return;
+    if (attempt >= 5) { notify(`The engine's model could not be read: ${e instanceof Error ? e.message : String(e)}`); return; }
+    setTimeout(() => void resync(attempt + 1), 500 * (attempt + 1));
+  }
+}
+
+/** The project's units and line caps (its drafting standards), for the panels and the live input. */
+let standardsPending = false;
+/** A refresh asked for while one was on its way: asked again when it lands, so a units change is never missed. */
+let standardsAgain = false;
+async function refreshStandards(): Promise<void> {
+  if (standardsPending) { standardsAgain = true; return; }
+  standardsPending = true;
+  try {
+    do {
+      standardsAgain = false;
+      const b = await query<{ units?: Unit; lineCap?: 'round' | 'square'; areaRounding?: AreaStep; scaleChoices?: number[] }>('standards.get');
+      if (b) useStandards.setState({ units: b.units ?? 'mm', lineCap: b.lineCap ?? 'round', areaRounding: b.areaRounding ?? null, scales: b.scaleChoices?.length ? b.scaleChoices : DEFAULT_VIEW_SCALES });
+    } while (standardsAgain);
+  } catch { /* no project open */ } finally { standardsPending = false; }
+}

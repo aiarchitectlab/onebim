@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Rebar 2D (docs/plan-rebar.md): reinforcement drawn on views as parametric
+    bar shapes (straight, L, U, stirrup, polyline, tie), bent at the Eurocode
+    radius, with hooks, marks, distributions along a path and the bar bending
+    schedule. It draws through the platform's view annotations and needs no
+    other module's code; the schedule is read by the architecture module's
+    schedule entity through IScheduleSource. The stirrups configured on beam and
+    column types read the structure module's sections.
+  -->
+  <PropertyGroup>
+    <LapinModuleId>rebar</LapinModuleId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../Model/Lapin.Model/Lapin.Model.csproj" Private="false" />
+    <ProjectReference Include="../../../Platform/Lapin.Platform/Lapin.Platform.csproj" Private="false" />
+    <ProjectReference Include="../../../Platform/Lapin.Drawing/Lapin.Drawing.csproj" Private="false" />
+    <ProjectReference Include="../Lapin.Structure/Lapin.Structure.csproj" Private="false" />
+    <!-- A wall's openings, where a rebar set's bars stop (decision 730); the module requires architecture already. -->
+    <ProjectReference Include="../../Architecture/Lapin.Architecture/Lapin.Architecture.csproj" Private="false" />
+  </ItemGroup>
+</Project>

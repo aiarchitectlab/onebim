@@ -1,0 +1,164 @@
+---
+title: Studio
+order: 85
+summary: Modelez des solides libres, esquissés sur n’importe quelle face ou plan, puis poussez, tirez, arrondissez, évidez, divisez et répétez-les en 3D.
+---
+
+## L’onglet Studio
+
+L’onglet **Studio** crée des solides qu’aucun autre onglet ne construit : un banc, un auvent, une main courante, une fontaine, un socle sur une façade. Chaque solide part d’une esquisse ou d’une primitive. Vous le modifiez ensuite en 3D par étapes, et chaque étape reste modifiable.
+
+![L’onglet Studio](shots/ribbon-studio.webp)
+
+Ses outils se répartissent en six groupes : **Esquisse** (lignes, rectangles, cercles, les **Arcs** ▾, décalage et, dessous, l’esquisse sur une face ou un plan, **Modifications d’esquisse** ▾, **Plans de travail** ▾ et **Sur face** ▾), **Contraintes** (les listes **Géométriques** ▾ et **Dimensions** ▾), **Solides** (extrusion, balayage, révolution, lissage, modifier l’esquisse, **Épais** ▾ et **Primitives** ▾), **Parties** (placer et modifier des pièces), **Modifier** (pousser/tirer, congé, chanfrein, coque, scinder, **Réseaux** ▾ et **Déplacer, pivoter, symétrie** ▾) et **Booléennes**. Un bouton avec ▾ ouvre sa liste ; chaque outil garde ses lettres, et **Commandes…** et **Mes outils** le trouvent comme avant.
+
+Un solide Studio a une classe IFC, comme tout élément. Choisissez-la dans ses propriétés : une barre, une plaque, un revêtement, un garde-corps, une dalle ou une autre. Ses quantités et son export suivent cette classe.
+
+## Où esquisser
+
+Le contour d’un solide se dessine avec les outils de **Dessin**, en polylignes fermées, rectangles et cercles. Des lignes et des arcs qui se rejoignent bout à bout forment aussi un contour fermé. Une forme fermée à l’intérieur du contour est un trou.
+
+Vous pouvez esquisser sur quatre sortes de vues :
+
+- **Un plan** dessine à la cote de son niveau.
+- **Une coupe** dessine sur sa ligne de coupe, à la verticale.
+- **Une élévation** ou **un plan de référence** : voir *Plans de référence* plus bas.
+
+## Créer un solide
+
+- **Extrusion** (EXTRUDE) pousse le contour tout droit. Tapez S pour les deux côtés de l’esquisse, T pour une dépouille qui incline les côtés vers l’intérieur, et Cut pour qu’il coupe les éléments sélectionnés avant. Pour le mener jusqu’à la face d’un autre élément, utilisez **Jusqu’à → une face…** dans ses propriétés, ou **Extruder jusqu’à la face**. La profondeur, les hauteurs et les épaisseurs se tapent dans l’unité du projet, comme le dit l’invite (`Depth (mm)` : `2000` fait 2 m).
+- **Balayage** (SWEEP) fait suivre un chemin à un profil. TWist tord la section en chemin, SCale l’agrandit, RIse la soulève. Un cercle qui monte devient une hélice et fait TUrns tours.
+- **Lissage** (LOFT) relie des profils dessinés sur des vues différentes. Tapez S pour passer en douceur par eux. Une ligne sélectionnée avec le rôle *rail* le courbe, comme guide.
+- **Révolution** (REVOLVE) fait tourner un profil autour d’une ligne d’axe.
+- **Les primitives** posent d’un clic une boîte, un cylindre, une sphère, un cône, un tore, un coin ou une pyramide. Leurs dimensions et leur position se changent dans leurs propriétés.
+
+![Une main courante balayée le long d’un cercle qui monte de 3 m en deux tours](shots/studio-helix.webp)
+
+Chaque solide reste lié à son esquisse. Modifiez la forme et le solide la suit, avec le même GlobalId. Sélectionnez un solide pour changer sa classe IFC, son type prédéfini et son type dans le panneau des propriétés. **Modifier l’esquisse** ouvre la vue sur laquelle se trouve l’esquisse.
+
+Un solide qui vient d’être créé est sélectionné : il s’allume avec les poignées de son esquisse. Dans un plan, une coupe ou une élévation, là où la vue coupe un solide, sa coupe est remplie de blanc : les lignes de l’esquisse deviennent une forme qu’on voit pleine. Un matériau qui a son propre remplissage ou sa propre hachure la dessine avec celui-ci à la place.
+
+## Anneau, Caisson et Bande de mur
+
+Ces trois outils donnent à une forme dessinée une épaisseur dans son propre plan, puis une hauteur à partir de ce plan :
+
+- **Anneau** (<kbd>RING</kbd>) prend un cercle, un arc ou un contour fermé et en fait un anneau ou un tube. Son épaisseur est à l’**intérieur**, à l’**extérieur** ou **centré** sur la forme.
+- **Caisson** (<kbd>BOX</kbd>) prend un rectangle, une polyligne fermée ou un cercle et fait les murs tout autour. Un fond (**Bas**) et un dessus (**Haut**) sont facultatifs, chacun avec sa propre épaisseur.
+- **Bande de mur** (<kbd>TWALL</kbd>) prend une ligne, une polyligne ou un arc et en fait une bande de mur. Son épaisseur est **à gauche**, **à droite** ou **centré**, vue en suivant la ligne dans le sens où vous l’avez dessinée. Ses angles sont assemblés en onglet.
+
+Lancez l’outil et cliquez sur la forme. La ligne de commande propose les options sous forme de lettres : <kbd>I</kbd>, <kbd>O</kbd> et <kbd>C</kbd> (ou <kbd>L</kbd>, <kbd>R</kbd> et <kbd>C</kbd>) pour l’emplacement de l’épaisseur, et pour un caisson <kbd>B</kbd> et <kbd>T</kbd> pour activer ou désactiver le fond et le dessus. Tapez ensuite l’épaisseur et la hauteur, en mètres, ou appuyez sur <kbd>Enter</kbd> pour garder la valeur affichée.
+
+**Dans un plan**, les outils créent par défaut des murs natifs, du type de mur choisi dans **Architecture**. Une forme fermée devient une boucle de murs joints à ses angles, une polyligne une chaîne de murs, et un arc ou un cercle des murs courbes. L’emplacement de l’épaisseur décide de l’endroit où se placent les murs : toute l’épaisseur du type de mur va du côté choisi. Le fond et le dessus d’un caisson deviennent des planchers. Tapez <kbd>S</kbd> avant de choisir la forme pour créer plutôt un solide Studio.
+
+**Dans une coupe, une élévation ou un plan de référence**, les outils créent un solide Studio de la classe IFC IfcWall ; le fond et le dessus d’un caisson sont des dalles séparées (IfcSlab). La hauteur suit la normale du plan, vers vous ; une hauteur négative s’éloigne de vous, comme avec **Extrusion**. Pour donner un type à un tel mur, sélectionnez-le et choisissez-en ou créez-en un sous **Type** dans le panneau des propriétés.
+
+![Un anneau de murs courbes natifs autour d’un cercle, un caisson avec son fond et son dessus, et une bande de mur, dans le plan du rez-de-chaussée](shots/studio-thick-plan.webp)
+
+Tout reste paramétrique. Sélectionnez le solide et modifiez son **Épaisseur**, sa **Hauteur** et **L’épaisseur est** dans le panneau des propriétés. Pour un caisson, cochez **Bas** ou **Haut** et réglez leurs épaisseurs : Lapin ajoute ou retire les dalles. Un caisson avec un fond ou un dessus est regroupé avec eux dans un assemblage (IfcElementAssembly). Faites glisser les poignées de la forme, ou modifiez-la dans sa vue, et le solide est reconstruit.
+
+![Les propriétés d’un caisson : son épaisseur, sa hauteur, son fond et son dessus](shots/studio-box-properties.webp)
+
+## Plans de référence
+
+Un plan de référence est un plan placé n’importe où dans le modèle, avec sa propre vue. Vous dessinez dessus avec Dessin, comme dans une coupe, et Studio y crée des solides. Créez-en un depuis l’onglet **Studio** :
+
+- **Plan depuis la vue** (<kbd>REFPLANE</kbd>) est parallèle au plan, à la coupe, à l’élévation ou au plan de référence devant vous. Tapez à quelle distance il se trouve vers vous (une valeur négative l’éloigne).
+- **Plan sur une face** : dans la vue 3D, cliquez sur une face de n’importe quel élément. Le plan se pose sur la face, tourné vers l’extérieur de celle-ci.
+- **Plan par 3 points** : dans la vue 3D, cliquez sur trois points du modèle. Le plan passe par eux.
+
+Le nouveau plan s’ouvre aussitôt. Il figure sous **Plans de référence** dans l’arborescence du projet. Son dessin est une coupe sur le plan, regardant contre le côté vers lequel il est tourné.
+
+Dans la vue 3D, chaque plan de référence est dessiné comme une feuille translucide portant son nom, aussi grande que le modèle sur lui (ou selon **Largeur dessinée (3D)** et **Hauteur dessinée (3D)**, 2 × 2 m au moins), mise en évidence sous le curseur. Cliquez dessus pour sélectionner le plan, double-cliquez pour ouvrir sa vue. Le plan sélectionné, glissez la flèche en son milieu pour le déplacer le long de sa normale : le décalage se lit à côté de la flèche, et ce qui est dessiné sur le plan suit. **Vue → Plans de référence** masque et affiche les feuilles ; elles n’entrent jamais dans les exports, les rendus ni les images. Dans les plans, les coupes et les élévations, un plan qui coupe la vue est dessiné comme une ligne en tirets avec son nom, sur toute l’étendue de la vue : un clic sélectionne le plan, un double clic l’ouvre. Un plan parallèle à la vue n’y est pas dessiné (il n’en coupe rien). Ces lignes ne sont que pour l’écran : les planches ne les impriment jamais.
+
+![Un plan de référence sur la façade sud, avec un anneau dessiné dessus](shots/studio-plane.webp)
+
+Sélectionnez le plan dans l’arborescence pour le déplacer. **Origine x**, **y** et **z** le placent. **Orienté** est la direction en plan vers laquelle il est tourné, **Inclinaison** de combien il penche en arrière (à 90° il est à plat, tourné vers le haut) et **Rotation dans le plan** fait tourner son dessin autour de sa normale. **Déplacer selon sa normale…** et **Tourner autour de la verticale…** font la même chose en une seule étape. Ce qui est dessiné sur le plan, et chaque solide créé à partir de lui, se déplace avec lui.
+
+![Les propriétés d’un plan de référence](shots/studio-plane-properties.webp)
+
+Les coupes et les élévations sont aussi des plans. Un solide esquissé dans une coupe repose sur sa ligne de coupe, et suit la ligne quand vous la déplacez. Dans une coupe développée, il repose sur le tronçon sur lequel il est dessiné. Une élévation prend son propre plan la première fois que vous y créez un solide : à l’avant du modèle, avec son x tel qu’il est dessiné maintenant. Modifiez sa **Profondeur du plan d’esquisse** dans les propriétés de l’élévation pour déplacer le plan, et ses solides, le long de la vue.
+
+![La maison avec ses solides Studio en 3D](shots/studio-3d.webp)
+
+En IFC, un anneau, les murs d’un caisson et une bande de mur sont des éléments IfcWall, le fond et le dessus d’un caisson des éléments IfcSlab, et un caisson avec eux un IfcElementAssembly avec IfcRelAggregates ; leurs types s’écrivent IfcWallType et IfcSlabType. Chaque export 3D (IFC, Fragments, glTF, USD, COLLADA) écrit un solide Studio là où il se trouve dans le modèle, quel que soit le plan sur lequel il a été esquissé, avec ses trous ; un assemblage est un nœud de groupe au-dessus de ses parties. Rouvert, l’IFC propre à Lapin ramène les solides comme références, à leur place, avec leur classe, leur type et leur assemblage, mais ils ne sont plus modifiables (leurs esquisses ne sont pas dans le fichier). L’historique de chaque solide est conservé dans le jeu de propriétés propre à Lapin, Lapin_Intent. Les solides Studio ne prennent que des types simples, sans couches : c’est la modélisation libre pour laquelle ils existent ; les murs à couches sont les murs natifs de Lapin.
+## Modifier un solide en 3D
+
+Ces outils travaillent sur les faces et les arêtes du corps tel qu’il est construit maintenant. La face sous la souris s’allume.
+
+**Pousser/Tirer**, **Scinder**, **Trancher** et **Déplacer 3D** se manient sur le modèle lui-même. Cliquez sur une face, et une flèche se dresse dessus : la souris déplace la face le long de la flèche, et ce que fera l’étape se dessine au fur et à mesure. Pousser/Tirer dessine en vert ce qu’il ajoute et en rouge ce qu’il enlève. Une coupe en deux ou une tranche dessine son plan en jaune. La distance s’affiche près de la flèche. Tapez une valeur pour la fixer exactement, par exemple 500 ou -250. Cliquez ou appuyez sur <kbd>Entrée</kbd> pour l’appliquer, ou sur <kbd>Échap</kbd> pour abandonner ; l’outil reste actif pour la face suivante. <kbd>Entrée</kbd> sans rien déplacer ni taper répète la dernière distance. Un glissement avance au centimètre, ou par 10 cm avec <kbd>Maj</kbd>. Le bouton droit et celui du milieu font toujours tourner et déplacer la vue. Les autres outils demandent leur valeur dans une petite case près du curseur.
+
+- **Pousser/Tirer** (PU) déplace une face vers l’extérieur, ou vers l’intérieur quand la distance est négative. Sur une extrusion, son extrémité change la profondeur et son côté déplace l’arête de l’esquisse dessous. Sur un mur ou un autre élément, tirer ajoute un solide dans le matériau de la face, et pousser découpe l’élément.
+- **Arrondir l’arête** (FE) arrondit l’arête la plus proche du clic, et **Chanfreiner l’arête** (CE) la chanfreine. Choisissez *tout autour de la face* pour traiter toutes les arêtes de la face d’un coup.
+- **Coque** évide les solides sélectionnés, avec des parois aussi épaisses que vous le tapez. Elle peut rester fermée, ou être laissée ouverte à son extrémité, à son esquisse ou aux deux.
+- **Scinder** coupe un solide en deux par un plan parallèle à la face choisie, aussi loin dans la face que vous le faites glisser ou le tapez. Les deux parties gardent l’esquisse. **Trancher** ne garde qu’un côté : choisissez **Garder derrière** ou **Garder devant** dans la barre en bas de la vue.
+- **Réseau** répète le solide en ligne, et **Réseau polaire** le répète autour d’une verticale. Avec autre chose de sélectionné (une référence, un groupe, un mur), ils en font des copies, comme **Modifier → Réseau** : **En ligne**, un pas selon x, y et z, ou **Autour d’un centre**, l’angle que remplissent les copies (360° les répartit sur un tour complet).
+- **Rotation 3D** fait tourner le solide autour d’une arête choisie. **Symétrie 3D** le reflète dans le plan d’une face. **Déplacer 3D** pose des flèches selon x, y et z sur la sélection (solides, références, groupes ou n’importe quel élément) : faites-en glisser une, ou tapez une distance pour l’axe affiché près de la valeur (<kbd>Tab</kbd> passe à l’axe suivant).
+
+![Pousser/Tirer : la face du dessus tirée vers le haut, ce qu’elle ajoute dessiné en vert, et la distance près de la flèche](shots/studio-push-pull.webp)
+
+![L’arête arrondie : l’arrondi suit le bloc quand sa profondeur change](shots/studio-fillet.webp)
+
+## Dessiner sur une face
+
+Dans la vue 3D, vous pouvez dessiner directement sur une face, puis pousser ou tirer ce que vous avez dessiné. **Studio → Esquisse → Sur face** ▾ contient **Rectangle sur face** (FRE), **Cercle sur face** (FCI) et **Polygone sur face** (FPL).
+
+1. Cliquez sur une face de n’importe quel élément : un solide Studio, un mur, une dalle ou un poteau. Le clic est le premier point : le coin d’un rectangle, le centre d’un cercle ou le premier sommet d’un polygone. La face reste soulignée pendant que vous dessinez.
+2. Déplacez la souris. La forme la suit sur la face, avec sa taille à côté. Les points s’accrochent aux coins de la face, aux milieux de ses arêtes et à son milieu ; sinon ils avancent au centimètre, ou par 10 cm avec <kbd>Maj</kbd>. Cliquez sur le coin opposé, ou sur un point du cercle. Vous pouvez aussi taper la taille : la largeur et la hauteur d’un rectangle sous la forme `1200, 600`, ou le rayon d’un cercle. Un polygone prend un clic à chaque sommet, ou une longueur tapée dans la direction de la souris. Cliquez sur son premier sommet ou appuyez sur <kbd>Entrée</kbd> pour le fermer ; <kbd>Retour arrière</kbd> retire le dernier sommet.
+3. Dès que la forme est fermée, une flèche se dresse dessus, comme avec **Pousser/Tirer**. Tirez-la vers l’extérieur et elle devient un solide posé sur la face, dans le matériau de la face. Poussez-la vers l’intérieur et elle devient une découpe dans l’élément : une niche, une poche, ou un trou quand elle le traverse. Cliquez ou appuyez sur <kbd>Entrée</kbd> pour l’appliquer. <kbd>Échap</kbd>, ou une distance de 0, laisse la forme sur la face comme esquisse, à extruder plus tard.
+
+La forme est une esquisse sur un plan de référence posé sur la face. Le plan porte le nom de l’élément et de la face, par exemple *Extrude 1, north face*, et les formes dessinées sur la même face le partagent. La vue 3D ne dessine pas ces plans, car la face montre déjà où ils sont. Ouvrez-en un depuis l’arborescence du projet pour modifier l’esquisse en 2D ; le solide ou la découpe la suit. **Pousser/Tirer** sur l’extrémité du solide change sa profondeur. **Pousser/Tirer** sur le fond d’une poche rend la découpe plus ou moins profonde, au lieu d’ajouter à l’élément.
+
+![Un rectangle dessiné sur le côté d’un bloc, sa taille près du curseur](shots/studio-on-face.webp)
+
+## Esquisser en 3D
+
+Le groupe **Esquisse** de l’onglet **Studio** dessine des lignes et des formes directement dans la vue 3D, de deux façons qui enregistrent la même chose : une esquisse sur le plan de référence de la face, comme ci-dessus.
+
+**Droit sur la face, comme dans SketchUp.** Sans esquisse ouverte, **Ligne** (KL), **Rectangle** (KR) et **Cercle** (KC) dessinent sur la face sous le curseur. La face s’éclaire quand vous la survolez ; dans le vide, vous dessinez au niveau de l’étage actif. Le premier clic fixe le plan.
+
+- Le curseur déduit ce sur quoi il se trouve et le dit à côté de lui : **Extrémité**, **Milieu**, **Sur l’arête**, **Intersection**, **Sur face**. Depuis le dernier point, il suit les axes du modèle qui se trouvent sur la face, tracés dans leurs couleurs (rouge x, vert y, bleu z), et va **Parallèle à l’arête** ou **Perpendiculaire à l’arête** en magenta.
+- <kbd>→</kbd> verrouille le rouge, <kbd>←</kbd> le vert, <kbd>↑</kbd> le bleu, <kbd>↓</kbd> la direction de l’arête déduite en dernier ; la même touche le relâche. Maintenez <kbd>Maj</kbd> pour garder la direction déduite à cet instant.
+- Saisissez une valeur à tout moment, sans cliquer dans une case, et appuyez sur <kbd>Entrée</kbd> : `1200` est la longueur du segment suivant dans la direction que montre la souris (`1000<30` à 30°), `1200,600` la largeur et la hauteur d’un rectangle, `300` ou `r300` le rayon d’un cercle.
+- Une ligne se poursuit point par point. De retour sur son premier point, la boucle se ferme et la flèche de pousser/tirer se dresse aussitôt dessus ; <kbd>Échap</kbd> la garde comme esquisse. <kbd>Entrée</kbd> ou <kbd>Échap</kbd> avant cela laisse la ligne ouverte, comme esquisse sur la face. <kbd>Retour arrière</kbd> reprend le dernier point. L’outil reste actif pour la forme suivante ; <kbd>Échap</kbd> sans rien de dessiné y met fin.
+
+![Une ligne dessinée sur le côté d’un bloc, l’axe rouge déduit de son dernier point](shots/studio-sketch-3d.webp)
+
+**Sur un plan de travail, comme en CAO.** **Esquisse sur face** (KF) et un clic sur une face font de cette face le plan de travail actif : elle s’éclaire et la barre de l’esquisse indique *Esquisse sur* la face : la même barre que pour toute esquisse de Lapin (Modifier l’esquisse d’un plancher, l’esquisse d’une pièce), avec les outils de Dessin, **Terminer l’esquisse**, **Annuler** (ce qui a été dessiné depuis le début de l’esquisse s’en va, en une étape d’annulation), **Regarder le plan** et **Ouvrir en 2D** (la vue propre du plan, la même esquisse). **Esquisse sur plan** fait de même avec le plan de référence sélectionné. Tant qu’il est actif, **Ligne**, **Rectangle**, **Cercle** lancent dessus les LINE, RECTANGLE et CIRCLE propres à la ligne de commande, et chaque commande de **Dessin** que vous saisissez agit dessus dans les coordonnées propres du plan, avec les accrochages aux objets, l’orthogonal et le repérage d’un plan, dont les arêtes de la face. **Terminer l’esquisse** (KE, ou <kbd>Entrée</kbd> quand aucune commande n’est en cours) soude les lignes dessinées et pose la flèche de pousser/tirer sur la dernière forme fermée dessinée ; <kbd>Échap</kbd> quitte l’esquisse et ce que vous avez dessiné reste. **Regarder le plan** (KP) tourne la vue perpendiculairement au plan. Sur une face, le x du plan va de gauche à droite tel que vous voyez la face de l’extérieur, à l’horizontale, et son y monte sur la face (sur une face du dessus, x est l’est et y le nord) : `@1500,0` va donc vers la droite, et les tailles tapées se lisent de la même façon des deux manières.
+
+Les deux arcs ne font chacun qu’une chose, avec ou sans esquisse : **Arc par 2 points** (KA) est celui de SketchUp (ci-dessous), **Arc par 3 points** lance l’ARC de la ligne de commande par trois points, sur le plan de travail quand il y en a un d’actif, sinon au niveau de l’étage.
+
+![Esquisse sur face : le dessus d’un bloc éclairé comme plan de travail, un rectangle dessiné dessus avec la ligne de commande](shots/studio-sketch-plane.webp)
+
+**Les lignes divisent les faces.** Une ligne tracée en travers d’une face, d’arête à arête (ou une boucle fermée de lignes et d’arcs à l’intérieur), la divise en régions. La face s’éclaire région par région sous le curseur, et **Pousser/Tirer** sur une région pousse ou tire cette région seule : un solide à part sur la face, ou une découpe dans celle-ci. Les lignes qui s’arrêtent avant une arête ne divisent rien. Une boucle fermée tracée à l’intérieur d’une face (ou d’une région) en est un trou, comme dans SketchUp : **Pousser/Tirer** sur la face qui l’entoure laisse la boucle de côté, et la boucle se pousse ou se tire seule.
+
+- **Arc par 2 points** (KA) dessine sur la face sous le curseur, à la manière de SketchUp : cliquez sur le début, sur la fin, puis sur la hauteur de la flèche (ou saisissez la longueur de la corde, puis la flèche).
+- **Décaler** (KO) clique sur une face, ou sur une région de celle-ci, et redessine son contour vers l’intérieur ou l’extérieur par le curseur, ou selon la distance saisie ; la forme fermée reçoit aussitôt la flèche de pousser/tirer.
+- Avec une esquisse ouverte, **Décaler**, **Ajuster**, **Prolonger** et **Raccord** exécutent sur le plan de travail les OFFSET, TRIM, EXTEND et FILLET de la ligne de commande.
+- Une forme dessinée sur un plan de référence et sélectionnée dans la vue 3D y montre ses points. Faites-en glisser un : il se déplace sur le plan, avec les accrochages des outils d’esquisse, et le solide issu de l’esquisse suit.
+- Les deux façons s’accrochent aussi aux arêtes des autres éléments situés dans le plan, comme le côté d’un bloc voisin à fleur de la face.
+
+![Une ligne en travers du côté d’un bloc le divise : la région en dessous est tirée seule](shots/studio-sketch-region.webp)
+
+**Mètre, guides et Suivez-moi.**
+
+- **Mètre** (KM) mesure et laisse des guides, comme celui de SketchUp. Cliquez sur une arête, éloignez-vous-en et cliquez : une ligne guide court parallèlement à l’arête par ce point, ou à la distance que vous saisissez. Cliquez plutôt sur un point, et le second clic montre la distance et laisse là un point guide. Les guides sont en pointillés, les deux façons d’esquisser s’y accrochent (et là où ils croisent la face), ils sont conservés avec le projet et jamais exportés ni imprimés. **Effacer les guides** les enlève tous.
+- **Suivez-moi** (FM) balaie une face le long d’un chemin là où elle se trouve : cliquez sur la face (ou sur une région de celle-ci divisée par des lignes), puis sur le chemin, soit une ligne dessinée, une polyligne, un arc ou un cercle, soit une autre face dont elle suit les arêtes tout autour, comme une face supérieure pour une corniche. Les angles sont en onglet. La face devient une esquisse sur son plan et le résultat est un seul solide Studio qui suit les deux esquisses.
+- **Raccourcis SketchUp** active dans la vue 3D les touches d’une lettre de SketchUp, pour cet ordinateur : <kbd>L</kbd> ligne, <kbd>R</kbd> rectangle, <kbd>C</kbd> cercle, <kbd>A</kbd> arc, <kbd>P</kbd> pousser/tirer, <kbd>F</kbd> décaler, <kbd>T</kbd> mètre, <kbd>M</kbd> déplacer, <kbd>E</kbd> effacer, <kbd>Espace</kbd> sélectionner. Elles sont désactivées par défaut, car elles prendraient la place des raccourcis de deux lettres de Lapin qui commencent par ces lettres dans la vue 3D ; les raccourcis de deux lettres et la ligne de commande fonctionnent comme avant partout ailleurs.
+
+![Un guide à une distance saisie de l’arête du bloc, et une corniche balayée autour du dessus avec Suivez-moi](shots/studio-sketch-follow.webp)
+
+## Les étapes
+
+Les propriétés d’un solide Studio listent ses étapes dans l’ordre. Chaque étape peut être désactivée, avancée ou reculée, modifiée ou retirée. Modifiez l’esquisse, et chaque étape est refaite sur le nouveau corps. Une étape qui ne retrouve plus sa face ou son arête le dit sous **Problèmes**.
+
+![Un cylindre évidé en tuyau et répété trois fois : ses deux étapes dans ses propriétés](shots/studio-steps.webp)
+
+Les propriétés d’une polyligne listent ses côtés. Tapez la longueur d’un côté, et son extrémité glisse le long de celui-ci. Les côtés suivants suivent, jusqu’au prochain côté qui court dans la même direction, de sorte qu’un rectangle reste un rectangle. Un solide dessiné dessus suit aussi.
+
+## Les maillages d’autres logiciels
+
+**Fichier → Importer un maillage (OBJ, STL, glTF)…** fait entrer un maillage sous forme de références que vous voyez et auxquelles vous vous accrochez. Un fichier OBJ ou STL ne dit ni son unité ni quel axe est vers le haut, donc Lapin le demande. Une référence se déplace, pivote, se reflète et se copie telle quelle, comme n’importe quel élément. Pour changer sa forme, sélectionnez-la et cliquez sur **Faire un solide Studio**. Elle accepte alors pousser/tirer, arrondis, booléens et les autres étapes. Le même outil fonctionne sur les murs, les dalles et les éléments des fichiers IFC.
+
+## Booléens
+
+**Soustraire**, **Union** et **Intersection** combinent n’importe quels éléments, le premier sélectionné étant la cible. Les outils restent modifiables, et le résultat les suit. **Afficher les opérandes** montre les outils cachés d’une union pour les modifier. **Supprimer l’opération** sépare à nouveau les éléments.

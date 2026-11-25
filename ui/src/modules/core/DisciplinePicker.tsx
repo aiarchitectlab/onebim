@@ -1,0 +1,35 @@
+/**
+ * A view's or sheet's discipline: the browser files it under the set of that
+ * discipline (Architecture, Structure, MEP, or the project's own), and a view
+ * takes its discipline's style. One of the known ones, or another typed in.
+ */
+
+import { promptText } from '../../shell/prompts';
+import { execute, useSession } from '../../engine/session';
+import type { NodeDto } from '../../engine/protocol';
+import { knownDisciplines } from './disciplines';
+import { useViewStyles } from './viewStyles';
+import { sameKind } from '../../shell/params';
+
+const OTHER = '\u0000other';
+
+/** `onPick`: how the discipline is set when the view is not an entity of its own ({3D}: view.setStyle). */
+export function DisciplinePicker({ node, onPick }: { node: NodeDto; onPick?: (discipline: string) => void }) {
+  const nodes = useSession((s) => s.nodes);
+  const styles = useViewStyles();
+  const known = knownDisciplines(nodes, styles);
+  const current = typeof node.props.discipline === 'string' && node.props.discipline.trim() ? node.props.discipline.trim() : 'Architecture';
+  const set = (discipline: string) => onPick ? onPick(discipline) : void execute('element.update', { ids: sameKind(node), attrs: { discipline } });
+  const pick = (v: string) => {
+    if (v !== OTHER) { set(v); return; }
+    const typed = promptText('The discipline (the browser groups views and sheets by it)', current)?.trim();
+    if (typed) set(typed);
+  };
+  return (
+    <select value={known.includes(current) ? current : OTHER + current} onChange={(e) => pick(e.target.value)} disabled={!node.editable} title="The browser files the view under this discipline's set; a view takes its discipline's style">
+      {known.map((d) => <option key={d} value={d}>{d}</option>)}
+      {!known.includes(current) && <option value={OTHER + current}>{current}</option>}
+      <option value={OTHER}>Other…</option>
+    </select>
+  );
+}

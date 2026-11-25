@@ -1,0 +1,246 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+
+namespace Lapin.Architecture.Roofs;
+
+/// <summary>
+/// What the roof configurator shows of a roof (decision 231): its fields as they stand, every edge's kind, the plan (the wall
+/// line, the eaves, ridges, hips and valleys), a section across the main ridge through its framing (the covering, the wall
+/// plates, the truss or couple nearest the middle with its webs and collar tie, the purlins and ridge beam cut), and a summary
+/// of what it takes. Read-only: the configurator sends the draft, the model is not touched.
+/// </summary>
+public static class RoofPreview
+{
+    static JsonArray Pt(Vec2 p) => new(Math.Round(p.X, 4), Math.Round(p.Y, 4));
+    static JsonArray Pts(IEnumerable<Vec2> ps) => new(ps.Select(p => (JsonNode)Pt(p)).ToArray());
+    static string N(double v, string f) => v.ToString(f, CultureInfo.InvariantCulture);
+
+    public static JsonObject Of(Entity roof, IModelView m)
+    {
+        var o = new JsonObject { ["attrs"] = roof.Attrs.DeepClone() };
+        if (Roof.Resolve(roof, m) is not { } r) { o["problem"] = "A roof needs three corners at least."; return o; }
+        var corners = Roof.Contour(roof);
+        var logicalRules = Roof.Rules(roof, corners);
+        o["outline"] = Pts(corners);
+        if (r.EdgeOf != null) o["builtOutline"] = Pts(r.Outline);
+        o["kinds"] = new JsonArray(logicalRules.Select(x => (JsonNode)(x.Kind == EdgeKind.Gable ? "gable" : "eave")).ToArray());
+        o["eaves"] = Pts(Roof.EaveOutline(r));
+        if (Roof.Problem(r) is { } problem) { o["problem"] = problem; return o; }
+        if (r.Flat)
+        {
+            if (r.HasLayers)
+            {
+                o["section"] = FlatSection(r);
+                o["summary"] = new JsonArray(Row("Roof area", $"{N(Math.Abs(Polygon2.SignedArea(Roof.EaveOutline(r))), "0.0")} m²"), LayersRow(r));
+            }
+            else
+                o["summary"] = new JsonArray(Row("Covering", $"{N(Math.Abs(Polygon2.SignedArea(Roof.EaveOutline(r))), "0.0")} m²"), DeckRow(r));
+            return o;
+        }
+        var (shape, why) = Roof.Solve(r);
+        if (shape == null) { o["problem"] = why ?? "The roof does not build."; return o; }
+        o["lines"] = new JsonArray(shape.Lines.Where(l => l.Kind != LineKind.Eave).Select(l => (JsonNode)new JsonObject
+        {
+            ["kind"] = l.Kind.ToString().ToLowerInvariant(), ["a"] = Pt(l.A.Xy), ["b"] = Pt(l.B.Xy),
+        }).ToArray());
+        var holes = RoofOpenings.Place(roof, shape, m, []);
+        var members = RoofParts.Framing(r, shape, holes);
+        o["section"] = Section(r, shape, members);
+
+        var summary = new JsonArray(
+            Row(r.HasLayers ? "Roof area" : "Covering", r.HasLayers
+                ? $"{N(shape.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length), "0.0")} m²"
+                : $"{N(shape.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length), "0.0")} m² · {r.Covering.Id}"),
+            Row("Height over the plates", $"{N(shape.Height - r.BaseZ, "0.00")} m"));
+        if (r.HasLayers) summary.Add((JsonNode)LayersRow(r));
+        else if (!r.Framed) summary.Add((JsonNode)DeckRow(r));
+        if (members.Count > 0)
+        {
+            var trusses = members.Where(x => x.Truss >= 0).Select(x => x.Truss).Distinct().Count();
+            if (trusses > 0) summary.Add((JsonNode)Row("Trusses", $"{trusses}"));
+            foreach (var role in new[] { "rafter", "collar", "purlin", "ridge", "hip", "valley", "trimmer" })
+                if (members.Where(x => x.Role == role).ToList() is { Count: > 0 } ms)
+                    summary.Add((JsonNode)Row(RoofParts.RoleLabel(role) + "s", role is "rafter" or "collar" ? $"{ms.Count} · {N(ms.Sum(x => x.Length), "0.0")} m" : $"{N(ms.Sum(x => x.Length), "0.0")} m"));
+            summary.Add((JsonNode)Row("Timber", $"{N(members.Sum(x => x.Volume), "0.00")} m³ · {r.Grade}"));
+        }
+        var gutters = RoofParts.Gutters(r, shape);
+        var outlets = Drainage.Outlets(m, r, gutters);
+        if (gutters.Count > 0) summary.Add((JsonNode)Row("Gutters", $"{N(gutters.Sum(x => x.Length), "0.0")} m · {outlets.Count} downpipes"));
+        // Where the downpipes leave the gutters (decision 235), for the plan.
+        o["outlets"] = new JsonArray([.. outlets.Select(x => { var g = gutters[x.Gutter]; return (JsonNode)Pt((g.A + (g.B - g.A) * (x.Station / g.Length)).Xy + g.Out * Drainage.Spec.Of(roof).R); })]);
+        o["downpipes"] = r.Roof.Str("downpipes") ?? "auto";
+        o["summary"] = summary;
+        return o;
+    }
+
+    static JsonArray Row(string label, string value) => new(label, value);
+
+    /// <summary>A roof without framing: its deck's material and thickness (decision 329).</summary>
+    static JsonArray DeckRow(Roof.Resolved r) =>
+        Row("Deck", $"{(RoofCoverings.DeckNameOf(r.Roof) is { Length: > 0 } d ? d : "—")} · {N(r.StructureDepth * 100, "0.#")} cm");
+
+    static JsonArray LayersRow(Roof.Resolved r) =>
+        Row("Layers", $"{r.Layers.Count} · {N(r.Layers.Sum(l => l.Thickness) * 100, "0.#")} cm");
+
+    static JsonObject FlatSection(Roof.Resolved r)
+    {
+        var eave = Enumerable.Range(0, r.Outline.Count)
+            .Select(i => r.Outline[(i + 1) % r.Outline.Count] - r.Outline[i]).MaxBy(d => d.Length);
+        var axis = eave.Normalized();
+        var n = new Vec2(-axis.Y, axis.X);
+        var c = r.Outline.Aggregate(new Vec2(0, 0), (s, p) => s + p) * (1.0 / r.Outline.Count);
+        var items = new JsonArray();
+        void Add(string role, IEnumerable<(double X, double Z)> pts, string? name = null, string? material = null, string? layerRole = null)
+        {
+            var obj = new JsonObject { ["role"] = role, ["pts"] = new JsonArray(pts.SelectMany(p => new[] { (JsonNode)Math.Round(p.X, 4), Math.Round(p.Z, 4) }).ToArray()) };
+            if (name != null) obj["name"] = name;
+            if (material != null) obj["material"] = material;
+            if (layerRole != null) obj["layerRole"] = layerRole;
+            items.Add((JsonNode)obj);
+        }
+        var z = r.BaseZ;
+        var baseEaves = Roof.EaveOutline(r);
+        for (var li = 0; li < r.Layers.Count; li++)
+        {
+            var layer = r.Layers[li];
+            var poly = Roof.LayerEaveOutline(r, li) ?? baseEaves;
+            foreach (var (k0, k1) in RoofParts.Crossings(poly, c, n))
+                Add($"layer:{li}", [(k0, z), (k1, z), (k1, z + layer.Thickness), (k0, z + layer.Thickness)], layer.DisplayName, layer.Material, layer.Role);
+            z += layer.Thickness;
+        }
+        foreach (var (w0, w1) in RoofParts.Crossings(r.Outline, c, n))
+            foreach (var w in new[] { w0, w1 })
+                Add("wall", [(w - 0.15, r.PlateZ - 0.8), (w + 0.15, r.PlateZ - 0.8), (w + 0.15, r.PlateZ), (w - 0.15, r.PlateZ)]);
+        var xs = items.SelectMany(i => ((JsonArray)i!["pts"]!).Where((_, k) => k % 2 == 0).Select(v => (double)v!)).DefaultIfEmpty(0).ToList();
+        var zs = items.SelectMany(i => ((JsonArray)i!["pts"]!).Where((_, k) => k % 2 == 1).Select(v => (double)v!)).DefaultIfEmpty(0).ToList();
+        var walls = RoofParts.Crossings(r.Outline, c, n);
+        return new JsonObject
+        {
+            ["items"] = items,
+            ["box"] = new JsonArray(xs.Min(), zs.Min(), xs.Max(), zs.Max()),
+            ["span"] = walls.Count > 0 ? Math.Round(walls[^1].T1 - walls[0].T0, 3) : null,
+            ["walls"] = new JsonArray(walls.SelectMany(w => new[] { (JsonNode)Math.Round(w.T0, 4), Math.Round(w.T1, 4) }).ToArray()),
+            ["plate"] = Math.Round(r.BaseZ, 4),
+            ["top"] = Math.Round(z, 4),
+        };
+    }
+
+    /// <summary>
+    /// A vertical section across the main ridge (or the longest eave) through the outline's middle: x across, z up. The covering
+    /// over the slopes it crosses, the walls under the plates, the members a cut there meets: of the rafters and chords that stand
+    /// parallel to it, those nearest on each side with their truss or collar tie; the level members it crosses, cut.
+    /// </summary>
+    static JsonObject Section(Roof.Resolved r, RoofShape shape, List<RoofParts.Member> members)
+    {
+        var ridge = shape.Lines.Where(l => l.Kind == LineKind.Ridge && l.Length > 0.1).MaxBy(l => l.Length);
+        var eave = Enumerable.Range(0, r.Outline.Count).Where(i => r.Rules[i].Kind == EdgeKind.Eave)
+            .Select(i => r.Outline[(i + 1) % r.Outline.Count] - r.Outline[i]).DefaultIfEmpty(r.Outline[1] - r.Outline[0]).MaxBy(d => d.Length);
+        var axis = ridge != null ? (ridge.B - ridge.A).Xy.Normalized() : eave.Normalized();
+        var n = new Vec2(-axis.Y, axis.X);
+        var c = ridge != null ? (ridge.A.Xy + ridge.B.Xy) * 0.5 : r.Outline.Aggregate(new Vec2(0, 0), (s, p) => s + p) * (1.0 / r.Outline.Count);
+        double X(Vec3 p) => Vec2.Dot(p.Xy - c, n);
+        double Along(Vec3 p) => Vec2.Dot(p.Xy - c, axis);
+        var items = new JsonArray();
+        void Add(string role, IEnumerable<(double X, double Z)> pts, string? name = null, string? material = null, string? layerRole = null)
+        {
+            var obj = new JsonObject { ["role"] = role, ["pts"] = new JsonArray(pts.SelectMany(p => new[] { (JsonNode)Math.Round(p.X, 4), Math.Round(p.Z, 4) }).ToArray()) };
+            if (name != null) obj["name"] = name;
+            if (material != null) obj["material"] = material;
+            if (layerRole != null) obj["layerRole"] = layerRole;
+            items.Add((JsonNode)obj);
+        }
+
+        if (r.HasLayers)
+        {
+            var from = r.BaseLayerOffset;
+            for (var li = 0; li < r.Layers.Count; li++)
+            {
+                var layer = r.Layers[li];
+                var lShape = Roof.LayerShape(r, shape, li);
+                var to = from + layer.Thickness;
+                foreach (var plane in lShape.Planes)
+                {
+                    var z = RoofSolver.PlaneZ(plane.Points);
+                    foreach (var (k0, k1) in RoofParts.Crossings(plane.Points.Select(q => q.Xy).ToList(), c, n))
+                    {
+                        double Zk(double k) => z(c + n * k);
+                        var sec = Math.Sqrt(1 + Math.Pow((Zk(k1) - Zk(k0)) / (k1 - k0), 2));
+                        var (lo, hi) = (from * sec, to * sec);
+                        Add($"layer:{li}", [(k0, Zk(k0) + lo), (k1, Zk(k1) + lo), (k1, Zk(k1) + hi), (k0, Zk(k0) + hi)], layer.DisplayName, layer.Material, layer.Role);
+                    }
+                }
+                from = to;
+            }
+        }
+        else
+        {
+            // The covering (or the deck) over each slope the cut crosses: from the structure's top to the covering's.
+            foreach (var plane in shape.Planes)
+            {
+                var z = RoofSolver.PlaneZ(plane.Points);
+                foreach (var (k0, k1) in RoofParts.Crossings(plane.Points.Select(q => q.Xy).ToList(), c, n))
+                {
+                    double Zk(double k) => z(c + n * k);
+                    var sec = Math.Sqrt(1 + Math.Pow((Zk(k1) - Zk(k0)) / (k1 - k0), 2));
+                    var (lo, hi) = (r.StructureDepth * sec, r.Thickness * sec);
+                    Add("covering", [(k0, Zk(k0) + lo), (k1, Zk(k1) + lo), (k1, Zk(k1) + hi), (k0, Zk(k0) + hi)]);
+                    // Without framing, the deck under it (decision 329).
+                    if (!r.Framed) Add("deck", [(k0, Zk(k0)), (k1, Zk(k1)), (k1, Zk(k1) + lo), (k0, Zk(k0) + lo)]);
+                }
+            }
+        }
+        // The walls under the wall line, a storey's top's worth down.
+        foreach (var (w0, w1) in RoofParts.Crossings(r.Outline, c, n))
+            foreach (var w in new[] { w0, w1 })
+                Add("wall", [(w - 0.15, r.PlateZ - 0.8), (w + 0.15, r.PlateZ - 0.8), (w + 0.15, r.PlateZ), (w - 0.15, r.PlateZ)]);
+
+        // Rafters and chords parallel to the cut: the nearest on each side (rising one way or the other), with what goes with them.
+        var parallel = members.Where(x => x.Profile != null && Math.Abs(Vec2.Dot(x.Side.Xy.Normalized(), axis)) > 0.99).ToList();
+        var chosen = new List<RoofParts.Member>();
+        // The one nearest the middle (the lower of two as near), then on each side the nearest to it.
+        var at = parallel.Count == 0 ? 0 : parallel.Select(x => Along(x.A)).OrderBy(v => Math.Round(Math.Abs(v), 6)).ThenBy(v => v).First();
+        foreach (var side in parallel.GroupBy(x => Math.Sign((x.B.Z - x.A.Z) * Vec2.Dot((x.B - x.A).Xy, n))))
+        {
+            var d = side.Min(x => Math.Abs(Along(x.A) - at));
+            chosen.AddRange(side.Where(x => Math.Abs(Math.Abs(Along(x.A) - at) - d) < 0.01));
+        }
+        var trusses = chosen.Where(x => x.Truss >= 0).Select(x => x.Truss).ToHashSet();
+        var near = chosen.Select(x => Along(x.A)).ToList();
+        foreach (var x in chosen) Add(x.Role, x.Profile!.Select(p => (X(p), p.Z)));
+        foreach (var x in members.Where(x => x.Profile == null && (x.Truss >= 0 && trusses.Contains(x.Truss) || x.Role == "collar" && near.Any(a => Math.Abs(Along(x.A) - a) < x.Width * 1.5 + 0.01))))
+        {
+            // A web, a bottom chord or a collar tie in the plane: its outline, as deep as its section.
+            var (a, b) = ((X(x.A), x.A.Z), (X(x.B), x.B.Z));
+            var len = Math.Sqrt(Math.Pow(b.Item1 - a.Item1, 2) + Math.Pow(b.Item2 - a.Item2, 2));
+            if (len < 1e-6) continue;
+            var (px, pz) = (-(b.Item2 - a.Item2) / len * x.Depth / 2, (b.Item1 - a.Item1) / len * x.Depth / 2);
+            Add(x.Role, [(a.Item1 + px, a.Item2 + pz), (b.Item1 + px, b.Item2 + pz), (b.Item1 - px, b.Item2 - pz), (a.Item1 - px, a.Item2 - pz)]);
+        }
+        // Level members the cut crosses (wall plates, purlins, the ridge beam, trimmers): their section.
+        foreach (var x in members.Where(x => x.Profile == null && x.Truss < 0 && x.Role != "collar"))
+        {
+            var (sa, sb) = (Along(x.A), Along(x.B));
+            if (sa * sb > 0 || Math.Abs(sb - sa) < 1e-9) continue;
+            var t = sa / (sa - sb);
+            var p = x.A + (x.B - x.A) * t;
+            var dir = (x.B - x.A).Normalized();
+            if (Math.Abs(dir.Z) > 0.3) continue;
+            var (cx, cz) = (X(p), p.Z);
+            Add(x.Role, [(cx - x.Width / 2, cz - x.Depth / 2), (cx + x.Width / 2, cz - x.Depth / 2), (cx + x.Width / 2, cz + x.Depth / 2), (cx - x.Width / 2, cz + x.Depth / 2)]);
+        }
+        var xs = items.SelectMany(i => ((JsonArray)i!["pts"]!).Where((_, k) => k % 2 == 0).Select(v => (double)v!)).DefaultIfEmpty(0).ToList();
+        var zs = items.SelectMany(i => ((JsonArray)i!["pts"]!).Where((_, k) => k % 2 == 1).Select(v => (double)v!)).DefaultIfEmpty(0).ToList();
+        var walls = RoofParts.Crossings(r.Outline, c, n);
+        return new JsonObject
+        {
+            ["items"] = items,
+            ["box"] = new JsonArray(xs.Min(), zs.Min(), xs.Max(), zs.Max()),
+            ["span"] = walls.Count > 0 ? Math.Round(walls[^1].T1 - walls[0].T0, 3) : null,
+            ["walls"] = new JsonArray(walls.SelectMany(w => new[] { (JsonNode)Math.Round(w.T0, 4), Math.Round(w.T1, 4) }).ToArray()),
+            ["plate"] = Math.Round(r.BaseZ, 4),
+            ["top"] = Math.Round(shape.Height, 4),
+        };
+    }
+}

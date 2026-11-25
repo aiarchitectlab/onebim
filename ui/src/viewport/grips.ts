@@ -1,0 +1,82 @@
+/**
+ * Grips as the views use them. The selection's grips at one point (within a
+ * few pixels) become one group: dragging it moves every element there, as one
+ * edit; Alt moves only the element the group is shown for, and Tab, over a
+ * shared grip, picks which one that is (each, then all). One element selected
+ * moves only its own end (its neighbours stay; the join holds while they meet).
+ */
+
+import type { NodeDto } from '../engine/protocol';
+import type { Grip, GripStep, Vec2 } from '../platform/module';
+import { create } from 'zustand';
+import { execute } from '../engine/session';
+
+/** Bumped when a module's grips change without the model or the selection changing (its own data arrived): the views take them again. */
+export const useGripRev = create<{ rev: number }>(() => ({ rev: 0 }));
+export const bumpGrips = (): void => useGripRev.setState((s) => ({ rev: s.rev + 1 }));
+
+export interface GripGroup { key: string; at: Vec2; members: Grip[] }
+
+/** Grips of different elements at one point (screen tolerance in model units) gathered; one element's own grips stay apart. */
+export function groupGrips(grips: Grip[], tol: number): GripGroup[] {
+  const groups: GripGroup[] = [];
+  for (const g of grips) {
+    // A flip arrow or slope indicator is its own element's alone.
+    const near = g.kind === 'flip' || g.kind === 'slope' ? undefined : groups.find((x) => Math.hypot(x.at.x - g.at.x, x.at.y - g.at.y) <= tol
+      && (g.kind ?? 'end') === (x.members[0].kind ?? 'end') && !x.members.some((m) => m.owner === g.owner));
+    if (near) near.members.push(g);
+    else groups.push({ key: `${g.owner ?? ''}:${g.key}`, at: g.at, members: [g] });
+  }
+  return groups;
+}
+
+/**
+ * Who a drag moves: everyone in the group, or (Alt, or a picked owner) one of
+ * them. `pick` counts through the members then "all" (members.length).
+ */
+export function movers(group: GripGroup, pick: number, alone: boolean): Grip[] {
+  const n = group.members.length;
+  const p = ((pick % (n + 1)) + n + 1) % (n + 1);
+  if (p < n) return [group.members[p]];
+  return alone ? [group.members[0]] : group.members;
+}
+
+/** Where a drag lands once the modules' `gripSnap`s have had their say (LapinModule.gripSnap): the first to answer wins. */
+export function snapGrip(snaps: (((element: NodeDto, grip: Grip, to: Vec2, free: boolean) => Vec2 | undefined) | undefined)[], element: NodeDto, grip: Grip, to: Vec2, free: boolean): Vec2 {
+  if (free) return to;
+  for (const s of snaps) {
+    const r = s?.(element, grip, to, free);
+    if (r) return r;
+  }
+  return to;
+}
+
+/** Run grip steps: one command alone, several as one edit. */
+export async function runSteps(steps: (GripStep | null | undefined)[]): Promise<unknown> {
+  const list = steps.filter((s): s is GripStep => !!s);
+  if (!list.length) return null;
+  if (list.length === 1) return execute(list[0].command, list[0].args);
+  return execute('edit.batch', { steps: list });
+}
+
+/**
+ * The grip under the cursor that takes out a thing of its own (`removeLabel`), so Delete removes that and not the
+ * selection (decision 280); set by the view the cursor is over, cleared when it leaves the grip.
+ */
+let hotRemove: Grip | null = null;
+export function setHotRemove(g: Grip | null): void { hotRemove = g?.remove && g.removeLabel ? g : null; }
+/** Delete pressed: true when a grip under the cursor took it (its thing removed). */
+export function takeHotRemove(): boolean {
+  const g = hotRemove;
+  if (!g?.remove) return false;
+  hotRemove = null;
+  void runSteps([g.remove()]);
+  return true;
+}
+
+/** A drag let go: each mover goes to the point (its step, else its own move). */
+export async function dropGrips(members: Grip[], to: Vec2): Promise<unknown> {
+  const withSteps = members.filter((g) => g.step);
+  for (const g of members) if (!g.step && g.move) await g.move(to);
+  return runSteps(withSteps.map((g) => g.step!(to)));
+}

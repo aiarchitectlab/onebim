@@ -1,0 +1,36 @@
+<Project>
+  <!--
+    The libraries are trimmable: the engine also runs in the browser, trimmed
+    (docs/plan-browser-engine.md), so reflection that trimming would break is a
+    build error here, on the desktop too. The hosts and the tests are not libraries.
+  -->
+  <PropertyGroup Condition="'$(OutputType)' != 'Exe' And !$(MSBuildProjectName.EndsWith('Tests')) And '$(IsTestProject)' != 'true'">
+    <IsTrimmable>true</IsTrimmable>
+  </PropertyGroup>
+
+  <!--
+    A module is a project that sets <LapinModuleId>. After each build its own
+    assemblies (never the platform's: those references are Private=false) and
+    its module.json are copied to artifacts/modules/<id>/: the folder layout
+    the host loads and a product build ships, one folder per module.
+  -->
+  <Target Name="CopyLapinModule" AfterTargets="Build" Condition="'$(LapinModuleId)' != ''">
+    <ItemGroup>
+      <_LapinModuleFiles Include="$(OutDir)*.dll;$(OutDir)*.pdb" Exclude="$(OutDir)Lapin.Model.*;$(OutDir)Lapin.Platform.*;$(OutDir)Lapin.Geometry.*;$(OutDir)Lapin.Booleans.*;$(OutDir)Lapin.Alignments.*" />
+    </ItemGroup>
+    <!--
+      A module that brings packages of its own (CopyLocalLockFileAssemblies: the Speckle connector's SDK) brings their
+      native libraries too, under runtimes/<rid>/native as NuGet lays them (the host finds them there, ModuleLoader;
+      a product build keeps only its platform's); and its third-party notices, NOTICE.md beside module.json.
+    -->
+    <ItemGroup>
+      <_LapinModuleNative Include="$(OutDir)runtimes/**/native/*" />
+      <_LapinModuleNotice Include="$(MSBuildProjectDirectory)/NOTICE.md" Condition="Exists('$(MSBuildProjectDirectory)/NOTICE.md')" />
+    </ItemGroup>
+    <RemoveDir Directories="$(LapinModulesDir)$(LapinModuleId)" />
+    <Copy SourceFiles="@(_LapinModuleFiles);$(MSBuildProjectDirectory)/module.json;@(_LapinModuleNotice)"
+          DestinationFolder="$(LapinModulesDir)$(LapinModuleId)" SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(_LapinModuleNative)"
+          DestinationFiles="@(_LapinModuleNative->'$(LapinModulesDir)$(LapinModuleId)/runtimes/%(RecursiveDir)%(Filename)%(Extension)')" SkipUnchangedFiles="false" />
+  </Target>
+</Project>

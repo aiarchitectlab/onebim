@@ -1,0 +1,936 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Drawing.Import;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Drafting.Cad;
+
+/// <summary>A plane transform: x' = A x + B y + Tx, y' = C x + D y + Ty.</summary>
+public readonly record struct Affine(double A, double B, double C, double D, double Tx, double Ty)
+{
+    public static readonly Affine Identity = new(1, 0, 0, 1, 0, 0);
+    public static Affine Translate(Vec2 t) => new(1, 0, 0, 1, t.X, t.Y);
+    public static Affine Scale(double sx, double sy) => new(sx, 0, 0, sy, 0, 0);
+    public static Affine Rotate(double deg) { var (s, c) = (Math.Sin(deg * Math.PI / 180), Math.Cos(deg * Math.PI / 180)); return new(c, -s, s, c, 0, 0); }
+
+    public Vec2 Apply(Vec2 p) => new(A * p.X + B * p.Y + Tx, C * p.X + D * p.Y + Ty);
+    public Vec2 Linear(Vec2 v) => new(A * v.X + B * v.Y, C * v.X + D * v.Y);
+    /// <summary>This transform, then <paramref name="m"/>.</summary>
+    public Affine Then(Affine m) => new(m.A * A + m.B * C, m.A * B + m.B * D, m.C * A + m.D * C, m.C * B + m.D * D, m.A * Tx + m.B * Ty + m.Tx, m.C * Tx + m.D * Ty + m.Ty);
+    public double Det => A * D - B * C;
+    public bool Flips => Det < 0;
+    /// <summary>A similarity: circles stay circles (equal scale both ways, axes still square).</summary>
+    public bool Uniform => Math.Abs(A * A + C * C - (B * B + D * D)) < 1e-9 * Math.Max(1, A * A + C * C) && Math.Abs(A * B + C * D) < 1e-9 * Math.Max(1, A * A + C * C);
+    public double Factor => Math.Sqrt(Math.Abs(Det));
+    /// <summary>Where the x axis points after it (°).</summary>
+    public double AngleDeg => Math.Atan2(C, A) * 180 / Math.PI;
+}
+
+/// <summary>
+/// What an import asks for: the view, metres per drawing unit (null: the file's, or a guess), where the origin lands, the turn, whether to mirror (null: by the view), an extra factor, which layers, and what to bring.
+/// <see cref="Map"/>: the file's x and y are the map's eastings and northings (a cadastral plan in Stereo 70), laid through the project's survey point and its angle to true north, in metres unless told; the origin, the turn and the factor do not apply.
+/// </summary>
+public sealed record DxfImportOptions(string ViewId, double? UnitFactor = null, Vec2 At = default, double RotationDeg = 0, bool? Flip = null, double Scale = 1,
+    HashSet<string>? Layers = null, string? LayerPrefix = null, bool Texts = true, bool Hatches = true, string Dimensions = "native",
+    bool Link = false, string? LinkId = null, string? Path = null, JsonObject? Raw = null, bool JoinDimensions = true, bool Map = false, bool BlocksAsSymbols = false);
+
+/// <summary>
+/// A DXF brought into a view as Lapin's own drafting: its layers as drafting
+/// layers, lines, polylines, circles and arcs as drafted shapes (bulged
+/// segments as arcs, ellipses and splines as polylines), hatches with the
+/// pattern the file carries (registered in the project), texts in paper
+/// height, linear and aligned dimensions as Lapin dimensions, blocks
+/// exploded. In a plan the DXF's x and y are the view's. In a section or an
+/// elevation the DXF's plane is the view's plane: x along it, y up; when the
+/// view looks towards −X or −Y the drawing is mirrored about its y axis, so
+/// that what the file drew from the left still reads from the left.
+/// </summary>
+public static class DxfImport
+{
+    /// <summary>A DXF text's width as Lapin prints it (Helvetica, <see cref="TextMeasure"/>): where its aligned point puts its start.</summary>
+    static double TextWidth(string value, double h) => TextMeasure.Width(value.Length == 0 ? "x" : value, h);
+
+    static readonly Dictionary<string, string> KnownPatterns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["SOLID"] = "SOLID", ["ANSI31"] = "LINES45", ["ANSI32"] = "STEEL", ["ANSI37"] = "CROSS", ["AR-CONC"] = "CONCRETE", ["AR-B816"] = "BRICK", ["AR-BRSTD"] = "BRICK", ["BRICK"] = "BRICK",
+        ["INSUL"] = "BATT", ["EARTH"] = "EARTH", ["AR-SAND"] = "GRAVEL", ["GRAVEL"] = "GRAVEL", ["DOTS"] = "GRAVEL", ["AR-RROOF"] = "WOOD", ["WOOD"] = "WOOD", ["NET"] = "TILES", ["GRID"] = "TILES", ["LINE"] = "HORIZONTAL",
+    };
+
+    /// <summary>The file named by the arguments: by path, or its bytes base64 in <c>data</c> with its <c>name</c>.</summary>
+    public static (DxfDocument Doc, string Name) Load(JsonObject a)
+    {
+        if ((string?)a["data"] is { Length: > 0 } data)
+            return (Read(Convert.FromBase64String(data)), (string?)a["name"] ?? "drawing.dxf");
+        var path = HostFiles.Check((string?)a["path"] ?? throw new CommandException("Which DXF file?"));
+        if (!File.Exists(path)) throw new CommandException($"There is no file at {path}.");
+        return (Read(File.ReadAllBytes(path)), Path.GetFileName(path));
+    }
+
+    /// <summary>The bytes as a DXF, or a sentence saying why not (a binary DXF, a DWG, a file with no DXF sections): never an empty drawing in silence.</summary>
+    static DxfDocument Read(byte[] bytes)
+    {
+        DxfDocument doc;
+        try { doc = DxfReader.Read(bytes); }
+        catch (InvalidDataException e) { throw new CommandException(e.Message); }
+        if (doc.Sections == 0 && !doc.Ended) throw new CommandException("This file is not a DXF Lapin can read: it has no DXF sections (HEADER, ENTITIES…).");
+        return doc;
+    }
+
+    public static DxfImportOptions Options(JsonObject a)
+    {
+        var viewId = (string?)a["viewId"] ?? throw new CommandException("A DXF is imported into a view.");
+        double? units = a["units"] switch
+        {
+            JsonValue v when v.TryGetValue<double>(out var n) && n > 0 => n,
+            JsonValue v when v.TryGetValue<string>(out var s) && s != "auto" => DxfUnits.Factor(s) ?? throw new CommandException($"„{s}” is not a unit (mm, cm, m, in, ft)."),
+            _ => null,
+        };
+        var at = Args.PointOf(a["at"]);
+        bool? flip = a["flip"] is JsonValue fv && fv.TryGetValue<bool>(out var fb) ? fb : null;
+        var layers = a["layers"] is JsonArray la ? la.Select(x => (string?)x).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
+        static bool B(JsonNode? x, bool d) => x is JsonValue v && v.TryGetValue<bool>(out var b) ? b : d;
+        var dims = (string?)a["dimensions"];
+        if (dims is not ("native" or "geometry" or "skip")) dims = "native";
+        var scale = Json.Number(a["scale"]) ?? 1;
+        if (!(scale > 0)) throw new CommandException("The scale factor must be positive.");
+        // As a link (Manage → Links): read-only, kept with the options it came with so it can be read again from its path.
+        var raw = new JsonObject();
+        foreach (var k in new[] { "units", "at", "rotation", "flip", "scale", "layers", "layerPrefix", "texts", "hatches", "dimensions", "joinDimensions", "map", "blocks" }) if (a[k] != null) raw[k] = a[k]!.DeepClone();
+        return new DxfImportOptions(viewId, units, at, Json.Number(a["rotation"]) ?? 0, flip, scale, layers, ((string?)a["layerPrefix"])?.Trim() is { Length: > 0 } pre ? pre : null, B(a["texts"], true), B(a["hatches"], true), dims,
+            B(a["link"], false) || (string?)a["linkId"] != null, (string?)a["linkId"], (string?)a["path"], raw, B(a["joinDimensions"], true), B(a["map"], false),
+            // The file's blocks as symbols of the project, each insert an instance (docs/plan-user-extensibility.md §3.2); else exploded, as always.
+            (string?)a["blocks"] == "symbols");
+    }
+
+    /// <summary>Whether a view mirrors an imported drawing: a section or elevation looking towards −X or −Y does; a plan never.</summary>
+    public static bool FlipFor(Entity view) => Views.Look(view) is { } look && (Math.Abs(look.X) >= Math.Abs(look.Y) ? look.X : look.Y) < 0;
+
+    // ------------------------------------------------------------ walking the file
+
+    /// <summary>An entity as the drawing shows it: in its frame, on its effective layer, with the colour it ends up with (null: its layer's).</summary>
+    public readonly record struct Placed(DxfEntity Entity, Affine Frame, string Layer, string? Color);
+
+    /// <summary>Model space with its blocks exploded: every entity with the transform that places it, and the layer and colour it takes.</summary>
+    public static IEnumerable<Placed> Walk(DxfDocument doc, Affine root)
+    {
+        var stack = new Stack<string>();
+        return Walk(doc, doc.Entities, root, null, null, stack);
+    }
+
+    /// <summary>
+    /// The most entities a file's blocks may unfold into (forum topic 217): blocks inserting blocks, or an array
+    /// insert (MINSERT) of thousands of rows and columns, multiply what the file holds, and an exponential nest
+    /// would keep the reader at it for hours, the dialog on "Reading the file…". Past it the import is refused,
+    /// saying which block, rather than left running. 440,000 lines import in about half a minute.
+    /// </summary>
+    public const int MaxPlaced = 2_000_000;
+
+    /// <summary>What is left of <see cref="MaxPlaced"/> for one walk (and the walks it starts).</summary>
+    sealed class Budget { public int Left = MaxPlaced; }
+
+    static IEnumerable<Placed> Walk(DxfDocument doc, List<DxfEntity> entities, Affine frame, string? blockLayer, string? blockColor, Stack<string> stack, Budget? budget = null)
+    {
+        if (budget == null)
+        {
+            // Counted first, from the blocks' sizes (each block once), so a drawing past the limit is refused at once, not after placing millions.
+            Precount(doc, entities, stack);
+            budget = new Budget();
+        }
+        foreach (var e in entities)
+        {
+            var layer = e.Layer == "0" && blockLayer != null ? blockLayer : e.Layer;
+            var color = e.ByBlock ? blockColor : e.Color;
+            if (e is DxfInsert ins)
+            {
+                foreach (var t in ins.Attribs) { Spend(budget, stack, ins.Block); yield return new Placed(t, frame, t.Layer == "0" && blockLayer != null ? blockLayer : t.Layer, t.ByBlock ? color : t.Color); }
+                if (!doc.Blocks.TryGetValue(ins.Block, out var block) || stack.Contains(ins.Block) || stack.Count > 32) continue;
+                stack.Push(ins.Block);
+                var turn = Affine.Rotate(ins.RotationDeg);
+                for (var r = 0; r < ins.Rows; r++)
+                    for (var c = 0; c < ins.Cols; c++)
+                    {
+                        var at = ins.At + turn.Linear(new Vec2(c * ins.ColSpacing, r * ins.RowSpacing));
+                        var local = Affine.Translate(-block.Base).Then(Affine.Scale(ins.Sx, ins.Sy)).Then(turn).Then(Affine.Translate(at)).Then(frame);
+                        foreach (var p in Walk(doc, block.Entities, local, layer, color, stack, budget)) yield return p;
+                    }
+                stack.Pop();
+                continue;
+            }
+            Spend(budget, stack, null);
+            yield return new Placed(e, frame, layer, color);
+        }
+    }
+
+    /// <summary>How many entities these unfold into, past <see cref="MaxPlaced"/> refused naming the insert that took it there.</summary>
+    static void Precount(DxfDocument doc, List<DxfEntity> entities, Stack<string> stack)
+    {
+        var memo = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var visiting = new HashSet<string>(stack, StringComparer.OrdinalIgnoreCase);
+        long Of(List<DxfEntity> list)
+        {
+            long n = 0;
+            foreach (var e in list)
+            {
+                n = Math.Min(n + (e is DxfInsert i ? Insert(i) : 1), MaxPlaced + 1L);
+                if (n > MaxPlaced) break;
+            }
+            return n;
+        }
+        long Insert(DxfInsert ins)
+        {
+            long n = ins.Attribs.Count;
+            if (!doc.Blocks.TryGetValue(ins.Block, out var block) || visiting.Contains(ins.Block)) return n;
+            if (!memo.TryGetValue(ins.Block, out var inside))
+            {
+                visiting.Add(ins.Block);
+                inside = Of(block.Entities);
+                visiting.Remove(ins.Block);
+                memo[ins.Block] = inside;
+            }
+            var copies = (long)ins.Rows * ins.Cols;
+            return inside == 0 ? n : Math.Min(n + (copies > (MaxPlaced + 1L) / inside ? MaxPlaced + 1L : copies * inside), MaxPlaced + 1L);
+        }
+        long total = 0;
+        foreach (var e in entities)
+        {
+            total += e is DxfInsert i ? Insert(i) : 1;
+            if (total > MaxPlaced) Refuse(e is DxfInsert big ? big.Block : stack.Count > 0 ? stack.ToArray()[^1] : null);
+        }
+    }
+
+    static void Spend(Budget budget, Stack<string> stack, string? block)
+    {
+        if (--budget.Left >= 0) return;
+        Refuse(block ?? (stack.Count > 0 ? stack.ToArray()[^1] : null));
+    }
+
+    static void Refuse(string? name)
+    {
+        throw new CommandException(name != null
+            ? $"The drawing unfolds into more than 2,000,000 entities through its block „{name}” (blocks inserted inside blocks, or an array insert), more than Lapin brings in at once. Purge or explode what is not needed in the CAD program, then import it again."
+            : $"The drawing has more than 2,000,000 entities, more than Lapin brings in at once. Split it, or purge what is not needed in the CAD program, then import it again.");
+    }
+
+    /// <summary>The points an entity reaches (drawing frame), for extents.</summary>
+    static IEnumerable<Vec2> Reach(DxfEntity e) => e switch
+    {
+        DxfLine l => [l.A, l.B],
+        DxfPolyline p => DxfCurves.Polyline(p.Vertices, p.Closed),
+        DxfCircle c => [c.C - new Vec2(c.R, c.R), c.C + new Vec2(c.R, c.R)],
+        DxfArc a => DxfCurves.Arc(a.C, a.R, a.StartDeg, a.EndDeg),
+        DxfEllipse el => DxfCurves.Ellipse(el.C, el.Major, el.Ratio, el.Start, el.End),
+        DxfSpline s => DxfCurves.Spline(s.Degree, s.Knots, s.Controls, s.Weights, s.Fits),
+        DxfText t => [t.At],
+        DxfHatch h => h.Loops.SelectMany(l => l),
+        DxfSolid s => s.Pts,
+        DxfDimension d => [d.P13, d.P14, d.DefPoint],
+        DxfLeader l => l.Pts,
+        _ => [],
+    };
+
+    /// <summary>The drawing's extents (drawing units, blocks exploded); null when it has nothing to measure.</summary>
+    public static (Vec2 Min, Vec2 Max)? Extents(DxfDocument doc)
+    {
+        double x0 = double.PositiveInfinity, y0 = double.PositiveInfinity, x1 = double.NegativeInfinity, y1 = double.NegativeInfinity;
+        foreach (var p in Walk(doc, Affine.Identity))
+            foreach (var q0 in Reach(p.Entity))
+            {
+                var q = p.Frame.Apply(q0);
+                if (!double.IsFinite(q.X) || !double.IsFinite(q.Y)) continue;
+                x0 = Math.Min(x0, q.X); y0 = Math.Min(y0, q.Y); x1 = Math.Max(x1, q.X); y1 = Math.Max(y1, q.Y);
+            }
+        return x0 <= x1 ? (new Vec2(x0, y0), new Vec2(x1, y1)) : null;
+    }
+
+    /// <summary>
+    /// Metres per drawing unit: the file's, else a guess from its extents. A file
+    /// that says millimetres but is a few dozen units across (ArchiCAD writes
+    /// metres under $INSUNITS = 4) is read by the guess too.
+    /// </summary>
+    public static (double Factor, bool Guessed) Units(DxfDocument doc) => Units(doc, Extents(doc));
+
+    static (double Factor, bool Guessed) Units(DxfDocument doc, (Vec2 Min, Vec2 Max)? ext)
+    {
+        var size = ext is { } e ? Math.Max(e.Max.X - e.Min.X, e.Max.Y - e.Min.Y) : 0;
+        var guess = DxfUnits.Guess(size);
+        if (doc.UnitFactor is not { } f) return (guess, true);
+        if (size <= 0 || size * f >= 1 || guess == f || size * guess < 1) return (f, false);
+        return (guess, true);
+    }
+
+    /// <summary>A site this big (m) is no map drawing: read in metres, a millimetre plan would be tens of kilometres across.</summary>
+    const double MapSize = 10000;
+
+    /// <summary>
+    /// Metres per unit of a drawing in map coordinates (eastings and northings), or null when it is not one (a tester's report,
+    /// 03.11.2026: a plan in millimetres 69,600 units tall was taken for a map in metres, its 8,000 mm bays made 8 km). Its
+    /// lower-left corner far from zero in the file's own unit; else in metres, a file that says millimetres while its
+    /// coordinates are a cadastral plan's (ArchiCAD writes metres under $INSUNITS = 4); never a drawing that would be bigger
+    /// than a site in that unit.
+    /// </summary>
+    public static double? MapUnits(DxfDocument doc) => MapUnits(doc, Extents(doc));
+
+    static double? MapUnits(DxfDocument doc, (Vec2 Min, Vec2 Max)? ext)
+    {
+        if (ext is not { } e) return null;
+        var size = Math.Max(e.Max.X - e.Min.X, e.Max.Y - e.Min.Y);
+        bool Map(double f) => size * f <= MapSize && GeoRef.LooksLikeMap([(e.Min.X * f, e.Min.Y * f)]);
+        if (doc.UnitFactor is { } declared && Map(declared)) return declared;
+        return Map(1) ? 1 : null;
+    }
+
+    // ------------------------------------------------------------ the summary (before importing)
+
+    public static JsonObject Info(IModelView m, DxfDocument doc, string? viewId)
+    {
+        // The extents once (a big drawing's walk takes seconds), for the units, the summary and the map's test.
+        var ext = Extents(doc);
+        var (factor, guessed) = Units(doc, ext);
+        var mapUnits = MapUnits(doc, ext);
+        var counts = new Dictionary<string, int>();
+        var other = new Dictionary<string, int>();
+        var perLayer = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in Walk(doc, Affine.Identity))
+        {
+            if (p.Entity is DxfOther o) { other[o.Type] = other.GetValueOrDefault(o.Type) + 1; continue; }
+            var kind = p.Entity switch
+            {
+                DxfLine => "lines", DxfPolyline => "polylines", DxfCircle => "circles", DxfArc => "arcs", DxfEllipse => "ellipses", DxfSpline => "splines",
+                DxfText => "texts", DxfHatch => "hatches", DxfSolid => "solids", DxfDimension => "dimensions", DxfLeader => "leaders", _ => "other",
+            };
+            counts[kind] = counts.GetValueOrDefault(kind) + 1;
+            perLayer[p.Layer] = perLayer.GetValueOrDefault(p.Layer) + 1;
+        }
+        var layers = new JsonArray();
+        foreach (var name in perLayer.Keys.Concat(doc.Layers.Keys).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase))
+        {
+            var l = doc.Layers.GetValueOrDefault(name);
+            layers.Add((JsonNode)new JsonObject { ["name"] = name, ["color"] = l?.Color ?? "#18181b", ["visible"] = l?.Visible ?? true, ["locked"] = l?.Locked ?? false, ["count"] = perLayer.GetValueOrDefault(name), ["lineType"] = DxfCurves.LineType(l?.LineType, l != null ? doc.LineTypes.GetValueOrDefault(l.LineType) : null) });
+        }
+        var view = viewId != null ? Views.Find(m, viewId) : null;
+        return new JsonObject
+        {
+            ["version"] = doc.Version,
+            ["units"] = new JsonObject { ["factor"] = factor, ["name"] = DxfUnits.Name(factor), ["guessed"] = guessed },
+            ["extents"] = ext is { } x ? new JsonObject { ["min"] = new JsonArray(x.Min.X, x.Min.Y), ["max"] = new JsonArray(x.Max.X, x.Max.Y) } : null,
+            ["counts"] = new JsonObject(counts.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+            ["unsupported"] = new JsonObject(other.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+            ["layers"] = layers,
+            ["blocks"] = doc.Blocks.Count,
+            ["view"] = view == null ? null : new JsonObject { ["kind"] = view.Str("kind") ?? "plan", ["scale"] = view.NumOrNull("scale") ?? 100, ["flip"] = FlipFor(view) },
+            // Whether it is in map coordinates (a cadastral plan): its corner far from zero, as metres; and whether the project is tied to the map.
+            ["map"] = new JsonObject
+            {
+                ["likely"] = mapUnits != null,
+                ["units"] = DxfUnits.Name(mapUnits ?? 1),
+                ["georeferenced"] = GeoRef.Georeferenced(m), ["crs"] = Location.Crs(m),
+            },
+        };
+    }
+
+    // ------------------------------------------------------------ the import
+
+    sealed class Namer(IModelView m, string viewId)
+    {
+        readonly HashSet<string> _taken = Drafts.On(m, viewId).Select(x => x.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        readonly Dictionary<string, int> _next = [];
+
+        public string Next(string word)
+        {
+            if (!_next.TryGetValue(word, out var n))
+                n = 1 + _taken.Select(x => x.StartsWith(word + " ", StringComparison.OrdinalIgnoreCase) && int.TryParse(x[(word.Length + 1)..], out var k) ? k : 0).DefaultIfEmpty(0).Max();
+            while (_taken.Contains($"{word} {n}")) n++;
+            _next[word] = n + 1;
+            var name = $"{word} {n}";
+            _taken.Add(name);
+            return name;
+        }
+    }
+
+    sealed class Run(ICommandContext ctx, Entity view, DxfDocument doc, DxfImportOptions o, double factor, string? linkId = null, string? importId = null)
+    {
+        /// <summary>A new entity, the link's when importing as one, else the import's (<see cref="Underlays3d"/>: shown in 3D by it).</summary>
+        /// <summary>While a block is read into a symbol: what is made is kept here too, to be read into the symbol and taken away.</summary>
+        public List<string>? Capture { get; set; }
+
+        void Put(Entity e)
+        {
+            Capture?.Add(e.Id);
+            if (linkId != null) { var attrs = e.CloneAttrs(); attrs[Links.Key] = linkId; e = e.With(attrs: attrs); }
+            else if (importId != null) { var attrs = e.CloneAttrs(); attrs[Underlays3d.ImportKey] = importId; e = e.With(attrs: attrs); }
+            ctx.Add(e);
+        }
+        public readonly Dictionary<string, CadLayer> NewLayers = new(StringComparer.OrdinalIgnoreCase);
+        public readonly List<HatchPattern> NewPatterns = [];
+        public readonly Dictionary<string, int> Skipped = [];
+        public int Shapes, Hatches, Texts, Dimensions, Symbols, Instances;
+
+        public void PutInstance(Entity e) { Put(e); Instances++; }
+
+        /// <summary>A block's entity drawn as drafting (lines, polylines, circles, arcs, ellipses, splines, texts, hatches, solids), for a symbol to read.</summary>
+        public void EmitBasic(Placed p)
+        {
+            var layer = Layer(p.Layer);
+            var f = p.Frame;
+            switch (p.Entity)
+            {
+                case DxfLine l when (l.B - l.A).Length > 1e-12: Add(Map(f, new Line(l.A, l.B)), layer, p.Color); break;
+                case DxfPolyline pl: foreach (var s in PolylineShapes(pl)) Add(Map(f, s), layer, p.Color); break;
+                case DxfCircle c: Add(Map(f, new Circle(c.C, c.R)), layer, p.Color); break;
+                case DxfArc a: Add(Map(f, new Arc(a.C, a.R, a.StartDeg * Math.PI / 180, a.EndDeg * Math.PI / 180)), layer, p.Color); break;
+                // Kept an ellipse (audit S4), not its chords.
+                case DxfEllipse el: Add(Map(f, EllipseOf(el)), layer, p.Color); break;
+                case DxfSpline sp:
+                {
+                    var pts = DxfCurves.Spline(sp.Degree, sp.Knots, sp.Controls, sp.Weights, sp.Fits);
+                    if (pts.Count >= 2) Add(Map(f, new Polyline(pts, sp.Closed)), layer, p.Color);
+                    break;
+                }
+                case DxfText t when o.Texts: Text(this, t, f, layer, p.Color, _mm); break;
+                case DxfHatch h when o.Hatches:
+                {
+                    var loops = h.Loops.Select(l => (IReadOnlyList<Vec2>)l.Select(f.Apply).ToList()).Where(l => l.Count >= 3).ToList();
+                    if (loops.Count == 0) break;
+                    var (name, scale, angle) = Pattern(h, f);
+                    AddHatch(loops, name, scale, angle, layer, p.Color);
+                    break;
+                }
+                case DxfSolid so when o.Hatches: AddHatch([so.Pts.Select(f.Apply).ToList()], "SOLID", 1, 0, layer, p.Color); break;
+                case DxfLeader ld: Add(Map(f, new Polyline(ld.Pts, false)), layer, p.Color); break;
+            }
+        }
+        readonly Namer _names = new(ctx.Model, view.Id);
+        readonly Dictionary<string, CadLayer> _layers = Drafts.Layers(ctx.Model).ToDictionary(l => l.Name, StringComparer.OrdinalIgnoreCase);
+        readonly List<HatchPattern> _patterns = [.. DraftingResources.Patterns(ctx.Model)];
+        /// <summary>Metres of model per paper millimetre in this view.</summary>
+        readonly double _mm = (view.NumOrNull("scale") ?? 100) / 1000;
+
+        public void Skip(string what) => Skipped[what] = Skipped.GetValueOrDefault(what) + 1;
+
+        /// <summary>The drafting layer a DXF layer becomes (made from the table's entry, once); an existing Lapin layer of that name is kept as it is.</summary>
+        public string Layer(string dxfLayer)
+        {
+            var name = (o.LayerPrefix ?? "") + dxfLayer;
+            if (_layers.ContainsKey(name)) return _layers[name].Name;
+            var l = doc.Layers.GetValueOrDefault(dxfLayer);
+            var made = l == null ? new CadLayer(name)
+                : new CadLayer(name, l.Color, Math.Clamp(l.Weight, 0.05, 2), DxfCurves.LineType(l.LineType, doc.LineTypes.GetValueOrDefault(l.LineType)), l.Visible, l.Locked);
+            _layers[name] = made;
+            NewLayers[name] = made;
+            return name;
+        }
+
+        /// <summary>Metres per drawing unit for the heights (kept as <c>heights</c>, one a vertex), which the plan's frame does not touch.</summary>
+        public double ZScale { get; set; } = 1;
+
+        /// <summary>The heights of a line's ends or a polyline's vertices, in metres; null when the file gave none (or the shape is not the polyline itself).</summary>
+        public IReadOnlyList<double>? Z(DxfEntity entity, Shape shape) => Heights(entity, shape) is { } z && z.Any(v => Math.Abs(v) > 1e-9) ? z.Select(v => v * ZScale).ToList() : null;
+
+        // A flat line's zeros are no heights: a plan drawing stays a drawing, not lines in space at ±0.00.
+        static IReadOnlyList<double>? Heights(DxfEntity entity, Shape shape) => entity switch
+        {
+            DxfLine l when shape is Line && (l.ZA ?? l.ZB) != null => [l.ZA ?? l.ZB ?? 0, l.ZB ?? l.ZA ?? 0],
+            DxfPolyline { Zs: { } zs } when shape is Polyline sp && sp.Pts.Count == zs.Count => zs,
+            // A vertex repeated (common in a survey's contours) went from the shape: its height goes with it.
+            DxfPolyline { Zs: { } zs } pl when shape is Polyline sp && zs.Count == pl.Vertices.Count && DedupeHeights(pl) is { } kept && kept.Count == sp.Pts.Count => kept,
+            DxfPolyline { Zs: { } zs } when shape is Line && zs.Count == 2 => zs,
+            DxfPolyline { Elevation: { } el } pl when shape is Polyline sp && sp.Pts.Count == pl.Vertices.Count => Enumerable.Repeat(el, sp.Pts.Count).ToList(),
+            DxfPolyline { Elevation: { } el } pl when shape is Line && pl.Vertices.Count == 2 => [el, el],
+            _ => null,
+        };
+
+        public void Add(Shape shape, string layer, string? color, IReadOnlyList<double>? z = null)
+        {
+            // dxf: a drawing brought in, kept on its view (only its lines with heights stand in the 3D view).
+            var attrs = new JsonObject { ["viewId"] = view.Id, ["layer"] = layer, ["shape"] = shape.ToJson(), ["dxf"] = true };
+            if (color != null) attrs["color"] = color;
+            // The heights the file gave the line: kept, for the 3D view and for what the civil module makes of the line.
+            if (z is { Count: >= 2 }) attrs["heights"] = new JsonArray(z.Select(v => (JsonNode)Math.Round(v, 4)).ToArray());
+            var word = shape switch { Line => "Line", Polyline { Closed: true } => "Polygon", Polyline => "Polyline", Circle => "Circle", Arc => "Arc", _ => "Shape" };
+            Put(new Entity(ctx.NewId(), IfcClass.Annotation, _names.Next(word), attrs, Drafts.Predefined));
+            Shapes++;
+        }
+
+        public void AddHatch(IReadOnlyList<IReadOnlyList<Vec2>> loops, string pattern, double scale, double angle, string layer, string? color)
+        {
+            var hatch = new JsonObject
+            {
+                ["pattern"] = pattern, ["scale"] = Math.Round(scale, 6), ["angle"] = Math.Round(angle, 4),
+                ["loops"] = new JsonArray(loops.Select(l => (JsonNode)new JsonArray(l.Select(q => (JsonNode)new JsonArray(Math.Round(q.X, 9), Math.Round(q.Y, 9))).ToArray())).ToArray()),
+            };
+            // dxf: the file's drawing, its hatches too (drawn faint in 3D on the view's plane: Underlays3d).
+            var attrs = new JsonObject { ["viewId"] = view.Id, ["layer"] = layer, ["hatch"] = hatch, ["dxf"] = true };
+            if (color != null) attrs["color"] = color;
+            Put(new Entity(ctx.NewId(), IfcClass.Annotation, $"Hatch {pattern}", attrs, Drafts.Predefined));
+            Hatches++;
+        }
+
+        public void AddText(Vec2 at, string text, double heightMm, double angleDeg, string layer, string? color)
+        {
+            var attrs = new JsonObject { ["viewId"] = view.Id, ["at"] = new JsonArray(Math.Round(at.X, 9), Math.Round(at.Y, 9)), ["text"] = text, ["angle"] = Math.Round(angleDeg, 4), ["layer"] = layer, ["overrides"] = new JsonObject { ["height"] = Math.Round(heightMm, 3) } };
+            if (color != null) attrs["overrides"]!["color"] = color;
+            Put(new Entity(ctx.NewId(), IfcClass.Annotation, text.Length > 24 ? text[..24] + "…" : text, attrs, "TEXT"));
+            Texts++;
+        }
+
+        /// <summary>The file's linear and aligned dimensions, made when the walk is done (continued ones joined into strings).</summary>
+        readonly List<JsonObject> _dims = [];
+
+        public void AddDimension(Vec2 a, Vec2 b, Vec2 at, Vec2? dir, string layer)
+        {
+            var attrs = new JsonObject { ["viewId"] = view.Id, ["at"] = new JsonArray(at.X, at.Y), ["layer"] = layer };
+            Lapin.Drafting.Dimensions.Write(attrs, [(a, null), (b, null)]);
+            if (dir is { } d) attrs["dir"] = new JsonArray(d.X, d.Y);
+            _dims.Add(attrs);
+            Dimensions++;
+        }
+
+        /// <summary>
+        /// The dimensions made: AutoCAD's continued dimensions (DIMCONTINUE: one per
+        /// segment) joined into one string each when asked: on one layer, along one
+        /// direction, on one dimension line, each starting where another ends.
+        /// </summary>
+        void PutDimensions()
+        {
+            var made = _dims.Select(x => new Entity("dxf", IfcClass.Annotation, "Dimension", x, "DIMENSION")).ToList();
+            var groups = new List<List<Entity>>();
+            if (o.JoinDimensions)
+            {
+                // Each dimension joins the first group it continues; groups that meet through it are one.
+                foreach (var d in made)
+                {
+                    var into = groups.Where(g => g[0].Str("layer") == d.Str("layer") && g.Any(x => Touch(x, d)) && Lapin.Drafting.DimensionStrings.Joined(g.Append(d).Select(Lapin.Drafting.DimensionStrings.PieceOf).ToList(), JoinTolerance) != null).ToList();
+                    if (into.Count == 0) { groups.Add([d]); continue; }
+                    into[0].Add(d);
+                    foreach (var other in into.Skip(1))
+                    {
+                        var merged = into[0].Concat(other).ToList();
+                        if (Lapin.Drafting.DimensionStrings.Joined(merged.Select(Lapin.Drafting.DimensionStrings.PieceOf).ToList(), JoinTolerance) == null) continue;
+                        into[0].AddRange(other);
+                        groups.Remove(other);
+                    }
+                }
+            }
+            else groups.AddRange(made.Select(d => new List<Entity> { d }));
+            foreach (var g in groups)
+            {
+                var attrs = g.Count == 1 ? g[0].Attrs : Lapin.Drafting.DimensionStrings.Joined(g.Select(Lapin.Drafting.DimensionStrings.PieceOf).ToList(), JoinTolerance)!;
+                Put(new Entity(ctx.NewId(), IfcClass.Annotation, "Dimension", attrs, "DIMENSION"));
+            }
+            DimensionStrings = groups.Count(g => g.Count > 1);
+        }
+
+        /// <summary>Whether two dimensions share an end point.</summary>
+        static bool Touch(Entity x, Entity y)
+        {
+            var (a, b) = (Lapin.Drafting.Dimensions.Stations(x), Lapin.Drafting.Dimensions.Stations(y));
+            return new[] { a[0].P, a[^1].P }.Any(p => (p - b[0].P).Length <= JoinTolerance || (p - b[^1].P).Length <= JoinTolerance);
+        }
+
+        /// <summary>How close (m) a continued dimension's first point is to where the one before it ends.</summary>
+        const double JoinTolerance = 1e-5;
+
+        public int DimensionStrings;
+
+        /// <summary>The hatch pattern a DXF hatch draws with, and Lapin's scale and angle for it.</summary>
+        public (string Name, double Scale, double Angle) Pattern(DxfHatch h, Affine f)
+        {
+            if (h.Solid || h.Pattern.Equals("SOLID", StringComparison.OrdinalIgnoreCase)) return ("SOLID", 1, 0);
+            var turn = f.AngleDeg;
+            if (h.Definition.Count > 0)
+            {
+                // The file's lines, normalised back to the pattern's own definition (scale 1, angle 0, offsets along and across each line),
+                // mirrored when the view mirrors; registered once in the project, under the file's name.
+                var families = h.Definition.Select(l =>
+                {
+                    var a = l.AngleDeg - h.AngleDeg;
+                    var (s, c) = (Math.Sin(l.AngleDeg * Math.PI / 180), Math.Cos(l.AngleDeg * Math.PI / 180));
+                    var (dx, dy) = ((l.Offset.X * c + l.Offset.Y * s) / h.Scale, (-l.Offset.X * s + l.Offset.Y * c) / h.Scale);
+                    var (bs, bc) = (Math.Sin(-h.AngleDeg * Math.PI / 180), Math.Cos(-h.AngleDeg * Math.PI / 180));
+                    var b = new Vec2((l.Base.X * bc - l.Base.Y * bs) / h.Scale, (l.Base.X * bs + l.Base.Y * bc) / h.Scale);
+                    var dashes = l.Dashes.Select(d => R(d / h.Scale)).ToList();
+                    return f.Flips ? new HatchLineFamily(R(-a), new Vec2(R(-b.X), R(b.Y)), R(-dx), R(dy), dashes) : new HatchLineFamily(R(a), new Vec2(R(b.X), R(b.Y)), R(dx), R(dy), dashes);
+                }).ToList();
+                var name = Register(h.Pattern, families);
+                return (name, h.Scale * factor * o.Scale / _mm, f.Flips ? turn - h.AngleDeg : turn + h.AngleDeg);
+            }
+            var known = KnownPatterns.GetValueOrDefault(h.Pattern) ?? HatchLibrary.Find(h.Pattern, _patterns)?.Name ?? "LINES45";
+            return (known, 1, f.Flips ? turn - h.AngleDeg : turn + h.AngleDeg);
+        }
+
+        static double R(double v) => Math.Round(v, 6);
+
+        string Register(string dxfName, List<HatchLineFamily> families)
+        {
+            var stem = new string(dxfName.Trim().ToUpperInvariant().Select(ch => char.IsLetterOrDigit(ch) || ch is '-' or '_' ? ch : '_').ToArray()) is { Length: > 0 } s ? s : "DXF";
+            for (var n = 1; ; n++)
+            {
+                var name = n == 1 ? stem : $"{stem}-{n}";
+                var existing = HatchLibrary.Find(name, _patterns);
+                if (existing == null)
+                {
+                    var made = new HatchPattern(name, $"From DXF ({dxfName})", families);
+                    _patterns.Add(made);
+                    NewPatterns.Add(made);
+                    return name;
+                }
+                if (existing.Tile == null && existing.Families.SequenceEqual(families)) return existing.Name;
+            }
+        }
+
+        public void Finish()
+        {
+            PutDimensions();
+            if (NewLayers.Count > 0) Drafts.WriteLayers(ctx, _layers.Values);
+            if (NewPatterns.Count > 0)
+            {
+                var project = Spatial.Project(ctx.Model) ?? throw new CommandException("The model has no project.");
+                var attrs = project.CloneAttrs();
+                attrs["hatchPatterns"] = Pat.Serialize(_patterns);
+                ctx.Replace(project.With(attrs: attrs));
+            }
+        }
+    }
+
+    /// <summary>
+    /// A drawing in map coordinates into a plan: its units to metres, then eastings and northings through the
+    /// survey point and the angle to true north (<see cref="GeoRef.ToPlan"/>). A project not yet tied to the map
+    /// is tied by it: the survey point at the plan's origin, on the drawing's lower-left corner rounded to the metre,
+    /// in the system its coordinates look like when the project has none.
+    /// </summary>
+    static Affine MapFrame(ICommandContext ctx, DxfDocument doc, Entity view, double factor)
+    {
+        if (view.Str("kind") is not (null or "plan")) throw new CommandException("A drawing in map coordinates goes into a plan.");
+        if (!GeoRef.Georeferenced(ctx.Model))
+        {
+            var ext = Extents(doc) ?? throw new CommandException("The drawing is empty.");
+            var (e0, n0) = (ext.Min.X * factor, ext.Min.Y * factor);
+            if (!GeoRef.LooksLikeMap([(e0, n0)])) throw new CommandException("The drawing's coordinates are not a map's (eastings and northings): place it by its origin instead, or tie the project to the map first (Manage → Location).");
+            Location.Georeference(ctx, Location.Crs(ctx.Model) ?? GeoRef.Guess([(e0, n0)]), Math.Round(e0), Math.Round(n0));
+        }
+        // plan = survey + R·(e − E0, n − N0), R the turn from the map's axes to the plan's (GeoRef.ToPlan).
+        var o = GeoRef.ToPlan(ctx.Model, 0, 0);
+        var ex = GeoRef.ToPlan(ctx.Model, 1, 0) - o;
+        var ny = GeoRef.ToPlan(ctx.Model, 0, 1) - o;
+        return Affine.Scale(factor, factor).Then(new Affine(ex.X, ny.X, ex.Y, ny.Y, o.X, o.Y));
+    }
+
+    public static JsonObject Import(ICommandContext ctx, DxfDocument doc, DxfImportOptions o, string fileName)
+    {
+        var view = Views.Find(ctx.Model, o.ViewId) ?? throw new CommandException("There is no such view.");
+        if (view.Str("kind") == "3d") throw new CommandException("A DXF is imported into a plan, a section or an elevation.");
+        // In map coordinates a drawing is in its own unit when that is a map's, else in metres (a cadastral plan's kilometres would read as millimetres).
+        var (factor, guessed) = o.UnitFactor is { } uf ? (uf, false) : o.Map ? (MapUnits(doc) ?? 1, false) : Units(doc);
+        var flip = !o.Map && (o.Flip ?? FlipFor(view));
+        var root = o.Map ? MapFrame(ctx, doc, view, factor)
+            : Affine.Scale(flip ? -factor * o.Scale : factor * o.Scale, factor * o.Scale).Then(Affine.Rotate(o.RotationDeg)).Then(Affine.Translate(o.At));
+        // A link: made now, or (a reload) emptied of what it held.
+        Entity? link = null;
+        if (o.Link)
+        {
+            if (o.LinkId != null) { link = Links.Require(ctx.Model, o.LinkId); Links.RemoveElements(ctx, link.Id); }
+            else link = Links.Create(ctx, "dxf", fileName, o.Path, o.Raw, view.Id);
+        }
+        // Not a link: the import is recorded, so its drawing is shown in 3D or not as one (decision 382).
+        var importId = link == null ? Underlays3d.Record(ctx, fileName, view.Id) : null;
+        var run = new Run(ctx, view, doc, o, factor, link?.Id, importId) { ZScale = factor * o.Scale };
+        var scaleMm = (view.NumOrNull("scale") ?? 100) / 1000; // metres per paper mm
+        var total = 0;
+        // The blocks as symbols: each top-level insert (scaled the same both ways) an instance, its block read once into a symbol.
+        var inserts = o.BlocksAsSymbols && !o.Map ? BlockSymbols(ctx, doc, o, view, run, factor, flip, root) : [];
+        var walked = inserts.Count == 0 ? Walk(doc, root)
+            : Walk(doc, [.. doc.Entities.Where(e => !inserts.Contains(e)), .. doc.Entities.OfType<DxfInsert>().Where(inserts.Contains).SelectMany(i => i.Attribs)], root, null, null, new Stack<string>());
+        foreach (var p in walked) Emit(p);
+        void Emit(Placed p)
+        {
+            if (o.Layers != null && !o.Layers.Contains(p.Entity.Layer) && !o.Layers.Contains(p.Layer)) return;
+            if (p.Entity is DxfOther other) { run.Skip(other.Type); return; }
+            total++;
+            var layer = run.Layer(p.Layer);
+            var f = p.Frame;
+            switch (p.Entity)
+            {
+                case DxfLine l:
+                    if ((l.B - l.A).Length > 1e-12) { var shape = new Line(l.A, l.B); run.Add(Map(f, shape), layer, p.Color, run.Z(l, shape)); }
+                    else run.Skip("zero-length line");
+                    break;
+                case DxfPolyline pl:
+                    foreach (var s in PolylineShapes(pl)) run.Add(Map(f, s), layer, p.Color, run.Z(pl, s));
+                    break;
+                case DxfCircle c:
+                    run.Add(Map(f, new Circle(c.C, c.R)), layer, p.Color);
+                    break;
+                case DxfArc a:
+                    run.Add(Map(f, new Arc(a.C, a.R, a.StartDeg * Math.PI / 180, a.EndDeg * Math.PI / 180)), layer, p.Color);
+                    break;
+                case DxfEllipse el:
+                    run.Add(Map(f, EllipseOf(el)), layer, p.Color);
+                    break;
+                case DxfSpline sp:
+                {
+                    var pts = DxfCurves.Spline(sp.Degree, sp.Knots, sp.Controls, sp.Weights, sp.Fits);
+                    if (pts.Count < 2) { run.Skip("empty spline"); break; }
+                    var closed = sp.Closed || (pts.Count > 3 && (pts[0] - pts[^1]).Length < 1e-9);
+                    if (closed && (pts[0] - pts[^1]).Length < 1e-9) pts.RemoveAt(pts.Count - 1);
+                    run.Add(Map(f, new Polyline(pts, closed)), layer, p.Color);
+                    break;
+                }
+                case DxfText t:
+                    if (!o.Texts) { run.Skip("text"); break; }
+                    Text(run, t, f, layer, p.Color, scaleMm);
+                    break;
+                case DxfHatch h:
+                {
+                    if (!o.Hatches) { run.Skip("hatch"); break; }
+                    var loops = h.Loops.Select(l => (IReadOnlyList<Vec2>)l.Select(f.Apply).ToList()).Where(l => l.Count >= 3).ToList();
+                    if (loops.Count == 0) { run.Skip("empty hatch"); break; }
+                    var (name, scale, angle) = run.Pattern(h, f);
+                    run.AddHatch(loops, name, scale, angle, layer, p.Color);
+                    break;
+                }
+                case DxfSolid so:
+                    if (!o.Hatches) { run.Skip("solid"); break; }
+                    run.AddHatch([so.Pts.Select(f.Apply).ToList()], "SOLID", 1, 0, layer, p.Color);
+                    break;
+                case DxfLeader ld:
+                    run.Add(Map(f, new Polyline(ld.Pts, false)), layer, p.Color);
+                    break;
+                case DxfDimension d:
+                {
+                    if (o.Dimensions == "skip") { run.Skip("dimension"); break; }
+                    if (o.Dimensions == "native" && d.Kind is 0 or 1 && (d.P14 - d.P13).Length > 1e-9)
+                    {
+                        Vec2? dir = d.Kind == 0 ? f.Linear(new Vec2(Math.Cos(d.RotationDeg * Math.PI / 180), Math.Sin(d.RotationDeg * Math.PI / 180))).Normalized() : null;
+                        run.AddDimension(f.Apply(d.P13), f.Apply(d.P14), f.Apply(d.DefPoint), dir, layer);
+                        break;
+                    }
+                    // The other kinds (and all of them when asked for geometry): the lines and texts the file rendered them with.
+                    if (d.Block != null && doc.Blocks.TryGetValue(d.Block, out var block))
+                    {
+                        foreach (var q in Walk(doc, block.Entities, f, p.Layer, p.Color, new Stack<string>()))
+                        {
+                            var ql = run.Layer(q.Layer);
+                            switch (q.Entity)
+                            {
+                                case DxfLine l when (l.B - l.A).Length > 1e-12: { var shape = new Line(l.A, l.B); run.Add(Map(q.Frame, shape), ql, q.Color, run.Z(l, shape)); break; }
+                                case DxfPolyline pl: foreach (var s in PolylineShapes(pl)) run.Add(Map(q.Frame, s), ql, q.Color, run.Z(pl, s)); break;
+                                case DxfArc a: run.Add(Map(q.Frame, new Arc(a.C, a.R, a.StartDeg * Math.PI / 180, a.EndDeg * Math.PI / 180)), ql, q.Color); break;
+                                case DxfCircle c: run.Add(Map(q.Frame, new Circle(c.C, c.R)), ql, q.Color); break;
+                                case DxfSolid so: run.AddHatch([so.Pts.Select(q.Frame.Apply).ToList()], "SOLID", 1, 0, ql, q.Color); break;
+                                case DxfText t when o.Texts: Text(run, t, q.Frame, ql, q.Color, scaleMm); break;
+                            }
+                        }
+                        run.Dimensions++;
+                    }
+                    else run.Skip($"dimension (kind {d.Kind})");
+                    break;
+                }
+                default:
+                    run.Skip(p.Entity.GetType().Name);
+                    break;
+            }
+        }
+        run.Finish();
+        return new JsonObject
+        {
+            ["file"] = fileName,
+            ["entities"] = total,
+            ["shapes"] = run.Shapes, ["hatches"] = run.Hatches, ["texts"] = run.Texts, ["dimensions"] = run.Dimensions, ["dimensionStrings"] = run.DimensionStrings,
+            ["layers"] = new JsonArray(run.NewLayers.Keys.Select(x => (JsonNode)x).ToArray()),
+            ["patterns"] = new JsonArray(run.NewPatterns.Select(x => (JsonNode)x.Name).ToArray()),
+            ["skipped"] = new JsonObject(run.Skipped.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)kv.Value))),
+            ["units"] = DxfUnits.Name(factor), ["unitsGuessed"] = guessed, ["flipped"] = flip, ["linkId"] = link?.Id, ["importId"] = importId,
+            ["symbols"] = run.Symbols, ["instances"] = run.Instances,
+        };
+    }
+
+    /// <summary>
+    /// The file's top-level inserts placed as symbol instances, each block read once into a model symbol (its drawing in the
+    /// building's mm from its base point, converted as the rest of the file is); an insert scaled differently across and along,
+    /// or of a block that draws nothing, stays exploded. Returns the inserts placed.
+    /// </summary>
+    static HashSet<DxfEntity> BlockSymbols(ICommandContext ctx, DxfDocument doc, DxfImportOptions o, Entity view, Run run, double factor, bool flip, Affine root)
+    {
+        var placed = new HashSet<DxfEntity>();
+        var defs = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        var k = factor * o.Scale;
+        foreach (var ins in doc.Entities.OfType<DxfInsert>())
+        {
+            if (o.Layers != null && !o.Layers.Contains(ins.Layer)) continue;
+            if (!doc.Blocks.TryGetValue(ins.Block, out var block) || Math.Abs(Math.Abs(ins.Sx) - Math.Abs(ins.Sy)) > 1e-9 * Math.Max(1, Math.Abs(ins.Sx)) || Math.Abs(ins.Sx) < 1e-12) continue;
+            if (!defs.TryGetValue(ins.Block, out var symbolId))
+            {
+                // The block's drawing made in its own frame (metres, its base at the origin), read into a symbol, then taken away.
+                var counts = (run.Shapes, run.Hatches, run.Texts);
+                run.Capture = [];
+                var local = Affine.Translate(-block.Base).Then(Affine.Scale(k, k));
+                foreach (var q in Walk(doc, block.Entities, local, ins.Layer, ins.Color, new Stack<string>([ins.Block])))
+                    if (q.Entity is not DxfDimension) run.EmitBasic(q);
+                var made = run.Capture.Select(id => ctx.Model.Get(id)).OfType<Entity>().ToList();
+                run.Capture = null;
+                (run.Shapes, run.Hatches, run.Texts) = counts;
+                symbolId = null;
+                if (made.Count > 0)
+                {
+                    var (items, attributes) = SymbolInstances.ItemsOf(ctx.Model, view, made, default, 0, model: true);
+                    foreach (var e in made) ctx.Remove(e.Id);
+                    if (items.Count > 0)
+                    {
+                        var def = SymbolDef.Parse(new SymbolDef("model", "other", items, attributes, $"Block {ins.Block} of a DXF").ToJson());
+                        var same = ctx.Model.OfClass(Symbols.Class).FirstOrDefault(e => e.Name.Equals(ins.Block, StringComparison.OrdinalIgnoreCase) && SymbolDef.From(e.Attrs["def"]) is { } d && JsonNode.DeepEquals(d.ToJson(), def.ToJson()));
+                        symbolId = (same ?? Symbols.Create(ctx, ins.Block, def)).Id;
+                        if (same == null) run.Symbols++;
+                    }
+                }
+                defs[ins.Block] = symbolId;
+            }
+            if (symbolId == null) continue;
+            // Where it lands: its point through the file's frame; turned the way the frame turns it; a flip of the frame or of its scale turns it over.
+            var (a, b) = ((flip ? -1 : 1) * Math.Sign(ins.Sx), Math.Sign(ins.Sy));
+            var angle = o.RotationDeg + (flip ? -ins.RotationDeg : ins.RotationDeg) + (a < 0 && b < 0 ? 180 : 0);
+            var turn = Affine.Rotate(ins.RotationDeg);
+            for (var r = 0; r < Math.Max(1, ins.Rows); r++)
+                for (var c = 0; c < Math.Max(1, ins.Cols); c++)
+                {
+                    var at = root.Apply(ins.At + turn.Linear(new Vec2(c * ins.ColSpacing, r * ins.RowSpacing)));
+                    var attrs = new JsonObject
+                    {
+                        ["symbolId"] = symbolId, ["viewId"] = view.Id, ["at"] = new JsonArray(Math.Round(at.X, 9), Math.Round(at.Y, 9)),
+                        ["angle"] = Math.Round(((angle % 360) + 360) % 360, 9), ["layer"] = run.Layer(ins.Layer), ["dxf"] = true,
+                    };
+                    if (Math.Abs(Math.Abs(ins.Sx) - 1) > 1e-9) attrs["scale"] = Math.Abs(ins.Sx);
+                    if (a < 0 && b > 0) attrs["flipX"] = true;
+                    if (a > 0 && b < 0) attrs["flipY"] = true;
+                    if (ins.Color != null) attrs["color"] = ins.Color;
+                    run.PutInstance(new Entity(ctx.NewId(), IfcClass.Annotation, ins.Block, attrs, Symbols.Predefined));
+                }
+            placed.Add(ins);
+        }
+        return placed;
+    }
+
+    /// <summary>A text placed: its box's centre goes through the frame, its height scales, and it stays readable (never upside down).</summary>
+    static void Text(Run run, DxfText t, Affine f, string layer, string? color, double scaleMm)
+    {
+        var u = new Vec2(Math.Cos(t.RotationDeg * Math.PI / 180), Math.Sin(t.RotationDeg * Math.PI / 180));
+        var n = u.Perp;
+        var w = TextWidth(t.Value, t.Height);
+        var start = t.At - u * (t.HAlign == 1 ? w / 2 : t.HAlign == 2 ? w : 0) - n * (t.VAlign == 2 ? t.Height / 2 : t.VAlign == 3 ? t.Height : 0);
+        var centre = f.Apply(start + u * (w / 2) + n * (t.Height / 2));
+        var u2 = f.Linear(u);
+        var angle = Math.Atan2(u2.Y, u2.X) * 180 / Math.PI;
+        if (angle > 90 + 1e-9 || angle <= -90 + 1e-9) angle += angle > 0 ? -180 : 180;
+        var h = t.Height * f.Factor;
+        var dir = new Vec2(Math.Cos(angle * Math.PI / 180), Math.Sin(angle * Math.PI / 180));
+        var at = centre - dir * (TextWidth(t.Value, h) / 2) - dir.Perp * (h / 2);
+        run.AddText(at, t.Value, h / scaleMm, angle, layer, color);
+    }
+
+    /// <summary>A DXF polyline as Lapin shapes: one polyline when every segment is straight; else straight runs as polylines (or lines) and each bulged segment as an arc.</summary>
+    public static List<Shape> PolylineShapes(DxfPolyline p)
+    {
+        var verts = p.Vertices;
+        var n = verts.Count;
+        var segs = p.Closed ? n : n - 1;
+        if (verts.All(v => Math.Abs(v.Bulge) < 1e-12))
+        {
+            var pts = Dedupe(verts.Select(v => v.P).ToList(), p.Closed);
+            return pts.Count < 2 ? [] : pts.Count == 2 && !p.Closed ? [new Line(pts[0], pts[1])] : [new Polyline(pts, p.Closed && pts.Count >= 3)];
+        }
+        var o = new List<Shape>();
+        var run = new List<Vec2> { verts[0].P };
+        void Flush()
+        {
+            var pts = Dedupe(run, false);
+            if (pts.Count == 2) o.Add(new Line(pts[0], pts[1]));
+            else if (pts.Count > 2) o.Add(new Polyline(pts, false));
+            run = [];
+        }
+        for (var i = 0; i < segs; i++)
+        {
+            var (a, b) = (verts[i], verts[(i + 1) % n]);
+            if ((b.P - a.P).Length < 1e-12) continue;
+            if (Math.Abs(a.Bulge) < 1e-12) { if (run.Count == 0) run.Add(a.P); run.Add(b.P); continue; }
+            Flush();
+            var arc = DxfCurves.BulgeArc(a.P, b.P, a.Bulge);
+            o.Add(new Arc(arc.C, arc.R, arc.StartDeg * Math.PI / 180, arc.EndDeg * Math.PI / 180));
+            run = [b.P];
+        }
+        Flush();
+        return o;
+    }
+
+    /// <summary>A straight polyline's heights for the vertices <see cref="Dedupe"/> keeps of it (the first of a repeated vertex).</summary>
+    static List<double>? DedupeHeights(DxfPolyline p)
+    {
+        if (p.Zs is not { } zs || zs.Count != p.Vertices.Count || p.Vertices.Any(v => Math.Abs(v.Bulge) >= 1e-12)) return null;
+        var (pts, o) = (new List<Vec2>(), new List<double>());
+        for (var i = 0; i < zs.Count; i++)
+            if (pts.Count == 0 || (pts[^1] - p.Vertices[i].P).Length > 1e-12) { pts.Add(p.Vertices[i].P); o.Add(zs[i]); }
+        if (p.Closed && pts.Count > 2 && (pts[0] - pts[^1]).Length <= 1e-12) o.RemoveAt(o.Count - 1);
+        return o;
+    }
+
+    /// <summary>A DXF ELLIPSE as an ellipse: its centre, major axis, ratio, and its start and end parameters (a whole one: none).</summary>
+    static Ellipse EllipseOf(DxfEllipse el)
+    {
+        var sweep = el.End - el.Start;
+        var whole = Math.Abs(sweep) < 1e-9 || Math.Abs(Math.Abs(sweep) - 2 * Math.PI) < 1e-9;
+        return new Ellipse(el.C, el.Major, el.Ratio, whole ? 0 : Geo.NormAngle(el.Start), whole ? 0 : Geo.NormAngle(el.End));
+    }
+
+    static List<Vec2> Dedupe(List<Vec2> pts, bool closed) => Polyline2.Dedupe(pts, closed, 1e-12);
+
+    /// <summary>A shape through a transform: circles and arcs stay round under a similarity (an arc's ends swap when it mirrors); otherwise they become polylines.</summary>
+    public static Shape Map(Affine f, Shape s)
+    {
+        switch (s)
+        {
+            case Circle c when f.Uniform: return new Circle(f.Apply(c.C), c.R * f.Factor);
+            case Arc a when f.Uniform:
+            {
+                var c = f.Apply(a.C);
+                var (p0, p1) = (f.Apply(a.At(a.Start)), f.Apply(a.At(a.End)));
+                var (s0, s1) = (Math.Atan2(p0.Y - c.Y, p0.X - c.X), Math.Atan2(p1.Y - c.Y, p1.X - c.X));
+                return f.Flips ? new Arc(c, a.R * f.Factor, Geo.NormAngle(s1), Geo.NormAngle(s0)) : new Arc(c, a.R * f.Factor, Geo.NormAngle(s0), Geo.NormAngle(s1));
+            }
+            // An ellipse under a similarity stays one: its centre and major axis carried; mirrored, that axis taken the other way
+            // (t goes to π − t, so its ends swap).
+            case Ellipse e when f.Uniform:
+            {
+                var c = f.Apply(e.C);
+                var m = f.Apply(e.C + e.M) - c;
+                if (!f.Flips) return e with { C = c, M = m };
+                return new Ellipse(c, m * -1, e.Ratio, e.Whole ? 0 : Geo.NormAngle(Math.PI - e.End), e.Whole ? 0 : Geo.NormAngle(Math.PI - e.Start));
+            }
+            case Circle or Arc or Ellipse:
+            {
+                var pts = Geo.Polylines(s)[0].Select(f.Apply).ToList();
+                var closed = s is Circle || s is Ellipse { Whole: true };
+                if (closed) pts.RemoveAt(pts.Count - 1);
+                return new Polyline(pts, closed);
+            }
+            default: return Geo.Map(s, f.Apply);
+        }
+    }
+
+    public static void Register(IModuleRegistry r)
+    {
+        // What a DXF holds, before importing it: its units (or a guess), extents, layers with their counts, what Lapin leaves out, and whether this view mirrors it.
+        r.Query("dxfInfo", (q, a) =>
+        {
+            var (doc, _) = Load(a);
+            return Info(q.Model, doc, (string?)a["viewId"]);
+        });
+
+        // The DXF into a view, as drafting: one undo step.
+        r.Command("importDxf", "Import DXF", (ctx, a) =>
+        {
+            var (doc, name) = Load(a);
+            return Import(ctx, doc, Options(a), name);
+        });
+    }
+}

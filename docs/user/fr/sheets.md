@@ -1,0 +1,64 @@
+---
+title: Feuilles, PDF et DXF
+order: 100
+summary: Disposez les vues sur des feuilles avec un cartouche, et imprimez-les en PDF ou en DXF.
+---
+
+<!-- video sheets -->
+
+## Créer une feuille
+
+Cliquez sur **+** à côté de **Feuilles** dans l’arborescence du projet. Pour placer une vue, faites-la glisser de l’arborescence sur la feuille, ou choisissez-la dans **Placer une vue…** dans la barre de la feuille. Chaque vue garde sa propre échelle et reste liée au modèle : la feuille change quand le modèle change. Sur la feuille, faites glisser une vue pour la déplacer : elle seule bouge, avec son titre, tandis que le cadre, le cartouche et les autres vues restent en place ; elle s’accroche aux bords et au milieu du cadre et aux autres vues, et les flèches la décalent de 1 mm (10 mm avec Maj).
+
+![Une feuille A3 avec un plan et une coupe](shots/sheet.webp)
+
+Sélectionnez la feuille pour remplir son **cartouche** dans le panneau des propriétés : le projet, le client, qui l’a dessinée, qui l’a vérifiée, la date et l’indice de révision. Son numéro, son format de papier et son orientation se règlent aussi à cet endroit. Le papier est un format A (A0 à A4), un des formats allongés ISO (A0×2, A1×3, A2×3, A3×3, A3×4, A4×3), un format nord-américain (Letter, Tabloid, ARCH D, ARCH E) ou **personnalisé**, avec sa **Largeur du papier** et sa **Hauteur du papier** en millimètres. Laissé vide, le champ du projet affiche le nom du projet : le nom qui lui a été donné, sinon le nom de son fichier.
+
+## Ce que montre une vue
+
+Une vue sur la feuille montre ce que vous choisissez, sans la faire glisser à l’aveugle :
+
+- **La recadrer sur la feuille.** Cliquez une vue : des poignées apparaissent aux coins et sur les bords. Faites-les glisser et le cadre prend plus ou moins de la vue, tandis que le dessin reste en place sur le papier. **Maj**-glisser à l’intérieur fait glisser le dessin dans son cadre.
+- **Dessiner sa limite dans la vue.** **Annotate → View boundary** (<kbd>VB</kbd>) : dessinez un rectangle sur un plan, une coupe ou une façade et donnez-lui un nom, unique dans le projet. Dans **Place view…** la vue est alors proposée avec chacune de ses limites (« Ground floor plan › Aile est »), et une vue placée ainsi montre exactement ce rectangle et le suit quand vous le déplacez ou le redimensionnez dans la vue. La même vue peut aller sur plusieurs feuilles, une limite chacune. Une vue placée passe d’une limite à l’autre, ou au recadrage libre, dans la liste de son cadre. Les limites se voient à l’écran seulement, jamais sur le papier.
+- **L’épingler.** L’épingle sur le cadre la garde en place : elle se sélectionne, mais ne se déplace ni ne se recadre par erreur.
+
+Le cadre et le cartouche appartiennent au papier. Ils ne se sélectionnent ni ne se déplacent jamais, et un clic prend la plus petite vue sous le pointeur : une vue posée sur le cartouche se sélectionne toujours.
+
+![Une vue sélectionnée sur la feuille : ses poignées de recadrage, sa limite, l’épingle](shots/sheet-view-boundary.webp)
+
+## Votre propre cartouche
+
+**Gérer → Cartouches…** liste les cartouches : ceux de Lapin (**Lapin standard**, celui de toutes les feuilles jusqu’ici, le **cartuș** roumain et un cartouche **ISO 7200**), ceux du projet et ceux de la bibliothèque de cet ordinateur, proposés dans tous ses projets. Cliquez-en un pour le voir avec les valeurs du projet. **Dupliquer dans le projet** en fait une copie modifiable, **Nouveau** un vide ; **Définir par défaut pour le projet** le donne à toutes les feuilles qui n’en choisissent pas, et une feuille choisit le sien sous **Cartouche** dans ses propriétés.
+
+![Cartouches : ceux de Lapin, du projet et de cet ordinateur, celui choisi avec les valeurs du projet](shots/title-blocks.webp)
+
+**Modifier…** ouvre le cartouche sur une planche : une vue de dessin à lui, en millimètres papier, avec le cadre du cartouche en pointillés. Le cartouche est un cadre dans un coin du cadre de la feuille : le même convient du A4 au A0, en portrait ou en paysage. On le dessine avec les mêmes outils **Dessin** que dans toute vue (ligne, polyligne, rectangle, cercle, arc, texte, hachure et les outils de modification) ; les accroches et les poignées fonctionnent comme d’habitude. Les textes gardent leurs champs vivants tels qu’ils sont écrits, `{project.name}`, `{sheet.number}`. Le logo est une image : **Logo ou image…** dans le panneau ou **Dessin → Importer une image**. Le tableau des révisions apparaît comme son cadre ; déplacez-le ou redimensionnez-le. Un panneau à côté contient le **Nom**, la largeur et la hauteur du cadre (mm), le coin de la feuille, **Cadre autour de la feuille**, l’emplacement du tableau des révisions et les champs à copier. **Terminer l’esquisse** écrit le cartouche en une seule étape à annuler, et ses feuilles le suivent ; inchangé, il reste exactement comme il était. **Annuler** abandonne la modification.
+
+La liste **Champs** contient le texte vivant : du projet (nom, numéro, client, terrain, permis, concepteur, personnes et vos propres paramètres), de la feuille (numéro, nom, échelle, format, révision, statut, date, dessiné, vérifié et approuvé par, phase, feuille x sur y) et du système (date d’impression, nom du fichier). Un clic copie un champ, à coller dans un texte écrit avec **Texte** ; un texte peut mêler mots et champs, `Projet : {project.name}`. Un champ inconnu de Lapin est imprimé comme `<champ>`, et **Gérer → Vérifier** le signale.
+
+![Le cartouche sur la planche : son cadre en pointillés, le dessin et le panneau des champs à copier](shots/title-block-designer.webp)
+
+Les feuilles, leur PDF, l’impression et l’émission le dessinent avec les valeurs de chaque feuille. En DXF, c’est un bloc avec des attributs, un par texte vivant (`PROJECT_NAME`, `SHEET_NUMBER`…), comme les cartouches d’AutoCAD. **Exporter…** enregistre un cartouche en fichier `.json`, avec ses images, et **Importer…** le lit dans le projet ou la bibliothèque : une agence transporte ses cartouches d’un ordinateur à l’autre. Les anciens projets gardent Lapin standard et se dessinent exactement comme avant.
+
+![La feuille avec son propre cartouche](shots/sheet-title-block.webp)
+
+## Dessiner sur la feuille
+
+Les notes, repères et légendes qui appartiennent à la feuille plutôt qu'à l'une de ses vues se dessinent sur la feuille elle-même. Cliquez sur **Annoter** dans la barre de la feuille, ou double-cliquez sur le papier en dehors des vues (**Annoter → Annoter la feuille** fait de même). La feuille s'ouvre dans le panneau de dessin comme son papier, à 1:1, avec les vues, le cadre et le cartouche en dessous, et la barre indique *dessin sur la feuille*. Chaque outil de **Dessin** et d'**Annoter** y fonctionne comme sur une vue, en millimètres papier : tapez 50 et une ligne mesure 50 mm sur le papier, et la hauteur d'un texte est sa hauteur sur le papier. Les points s'accrochent au cadre, au cartouche, aux cadres des vues (bleu en pointillé) et à ce que dessinent les vues. **Feuille** dans la barre revient à la disposition des vues.
+
+- Les **textes** peuvent contenir des champs dynamiques, comme ceux d'un cartouche : `Feuille {sheet.number} sur {sheet.count}`, `{project.name}`, `{sheet.date}`. Sur une vue, un texte se lit tel qu'il a été tapé.
+- **Note avec repère** (Annoter → Texte) : cliquez où pointe la flèche, puis où va le texte, et tapez-le. Déplacée, la note emporte sa flèche ; **Ligne de rappel → supprimer** dans ses propriétés retire la flèche. Sélectionnée, la pointe de la flèche et chaque coude ont leurs propres poignées : faites-en glisser une pour la déplacer seule.
+- **Lignes, polylignes, rectangles, cercles, arcs, hachures, symboles et images** sont ceux des outils de Dessin, avec leurs poignées, calques et outils de modification. Une flèche du nord est l'un des symboles de Lapin (**Annoter → Symbole**). Les symboles placés avec **Placer un symbole…** dans la barre de la feuille se prennent aussi ici d’un clic et se déplacent en millimètres papier.
+- **Nuage de révision** (Dessin → Remplissage, Annoter → Feuilles, ou REVCLOUD dans la ligne de commande) : deux coins, ou **P** pour un polygone fermé avec Entrée. **Nuage de révision** dans les propriétés de toute polyligne fermée ou de tout cercle en fait un nuage ou le remet en forme simple, et règle son arc sur le papier.
+- **Légende** (Annoter → Feuilles) : une liste vivante de ce que dessinent les vues de la feuille : les matériaux dont leurs coupes sont hachurées et remplies ou, avec **Listes** dans ses propriétés, leurs lignes par rôle, type et épaisseur. Elle change avec les vues et le modèle, et son titre accepte aussi des champs. Ses propres mots (le titre, les rôles et les types des traits) sont écrits dans la langue qu’avait l’interface quand elle a été placée ; **Langue** dans ses propriétés les change.
+- **Échelle graphique** (Annoter → Feuilles) : à l'échelle de la première vue de la feuille ou à celle donnée dans ses propriétés, une longueur ronde d'environ 80 mm ou celle que vous fixez. Sur un plan, une coupe ou une élévation, l'échelle graphique prend l'échelle de la vue.
+
+Ce qui est dessiné sur la feuille s'imprime dessus, par-dessus les vues, exactement comme affiché : dans son PDF, à l'impression et dans son DXF. Cela appartient à la feuille : **Dupliquer la feuille** (son bouton dans le navigateur de projet) le copie, avec les symboles placés sur la feuille, et supprimer la feuille le supprime. Chaque dessin est une étape d'annulation. Les feuilles faites auparavant n'ont rien de dessiné et s'impriment comme avant. Une émission le compte aussi : une feuille changée seulement par ce qui est dessiné sur son papier ou par ses symboles est signalée changée depuis sa dernière émission (Gérer → Vérifier, CDE).
+
+![Dessin sur une feuille : une note avec repère, un nuage de révision, un texte dynamique, une légende des matériaux du plan et une échelle graphique](shots/sheet-annotations.webp)
+
+![La même feuille, telle qu'elle s'imprime](shots/sheet-annotated.webp)
+
+## Imprimer
+
+Les boutons **PDF** et **DXF** de la barre de la feuille exportent la feuille. Un PDF est prêt à imprimer ou à envoyer. Un DXF s’ouvre dans AutoCAD et dans les autres logiciels de DAO, avec ses calques, ses lignes et ses hachures ; les cercles, arcs et ellipses (dessinés, ou les bords courbes des planchers et d’autres contours sur un plan) sont écrits comme de vraies entités CIRCLE, ARC et ELLIPSE, pas en petits segments, et reviennent en courbes quand le DXF est réimporté. **Imprimer** envoie la feuille à une imprimante ou un traceur à son propre format, à 1:1, en traits vectoriels : choisissez le traceur et le papier dans la boîte d’impression. Sur une imprimante plus petite, choisissez l’ajustement à la page.

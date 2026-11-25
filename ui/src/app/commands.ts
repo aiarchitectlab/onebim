@@ -1,0 +1,256 @@
+/**
+ * Every command the keyboard can reach, for the shortcuts' registry
+ * (shortcuts.ts): the app's own (undo, save, the panels, the zoom…), the
+ * quick tool slots 1–9, and each tool of the ribbon under its tab and group.
+ * The keymap in force (`keymap()`) is the registry's resolution of the
+ * user's bindings over these; `hint(id)` is what tooltips show.
+ */
+
+import { useMemo } from 'react';
+import { cycleTab, select, useUi } from './store';
+import { toggleBothPanels, togglePanel, showOverlay, showPropsTab, usePanels, applyPanelsPart } from './panels';
+import { assistantAvailable } from '../assistant/available';
+import { toggleGrid, toggleThinLines } from './display';
+import { chooseWorkspace, onInterfaceChange, useInterface, WORKSPACE_IDS, WORKSPACE_LABELS } from './interface';
+import { effectiveBindings, formatBinding, resolveAlias, resolveKeymap, useKeymap, type Binding, type CommandDef, type Keymap } from './shortcuts';
+import { anchorFor, setAnchor, stepAnchor } from '../platform/anchor';
+import { datumHere } from '../viewport/datum';
+import { findTool, activate, activateSlot, allTools, defaultHotbar, hotbarSlots, ribbonTabs } from '../platform/modules';
+import { extraTools, extraToolsRev } from '../platform/extraTools';
+import { tabHandlers } from '../platform/scope';
+import { redo, undo, useSession } from '../engine/session';
+import { deleteElements } from '../engine/dependents';
+import { previousSelection } from '../shell/selectionHistory';
+import { selectAll } from '../shell/selectAll';
+import { selectSimilarHere } from '../shell/selectionMenu';
+import { runFileAction } from '../shell/fileActions';
+import { COMMANDS, TOOL_WORDS, findCommand, setAliasHook, setCommandFallback, startCommand, useCad } from '../viewport/cad/session';
+import { zoomHost } from '../viewport/zoom';
+import { takeHotRemove } from '../viewport/grips';
+import { pickCycleTab } from '../viewport/pickCycle';
+import { takeSheetDelete } from '../viewport/sheetDelete';
+import { carrying } from '../viewport/moveTrace';
+import { NUDGES } from './nudge';
+import { nudgeSelection } from '../viewport/nudge';
+import { useMove3d } from '../viewport/moveIn3d';
+import { cancel as cancelStep } from '../viewport/cad/session';
+import { notify } from './store';
+import { canPlace, findInBrowser, placeOnSheet, viewIdOfTab } from '../shell/browserFind';
+
+/**
+ * Undo and redo while a gesture is under way (audit U11): a CAD step is cancelled first; a body drag or a 3D move is not
+ * the key's to cancel, so the key says so and does nothing.
+ */
+export function gestureFree(): boolean {
+  if (carrying() || useMove3d.getState().ids.length) { notify('Finish or cancel (Esc) what you are doing first, then undo or redo.'); return false; }
+  if (useCad.getState().step) cancelStep(true);
+  return true;
+}
+
+/** F4: the active tool's insertion anchor one step on (a column's nine points, a door's three along the wall). */
+function stepToolAnchor(by: number): void {
+  const tool = findTool(useUi.getState().tool);
+  if (!tool?.anchor) { notify('Start a tool that places by an anchor (Column, Door, Window), then press this key to step through its anchors.'); return; }
+  setAnchor(tool.id, stepAnchor(anchorFor(tool.id), tool.anchor, by), tool.anchor);
+}
+
+const dialog = (id: string) => () => useUi.setState({ dialog: id });
+/** The view, sheet or schedule the active pane shows. */
+const shownViewId = () => viewIdOfTab(useUi.getState(), useSession.getState().nodes);
+const zoom = (f: (h: NonNullable<ReturnType<typeof zoomHost>>) => void) => () => { const h = zoomHost(); if (h) f(h); };
+
+/** The app's own commands, with Lapin's classic bindings. */
+function appCommands(): CommandDef[] {
+  const general = 'General', views = 'Views', panels = 'Panels', draw = 'Drawing aids';
+  return [
+    { id: 'app.undo', label: 'Undo', category: general, defaults: ['Ctrl+Z'], run: () => { if (gestureFree()) void undo(); } },
+    { id: 'app.redo', label: 'Redo', category: general, defaults: ['Ctrl+Y', 'Ctrl+Shift+Z'], run: () => { if (gestureFree()) void redo(); } },
+    { id: 'app.new', label: 'New project', category: general, defaults: ['Ctrl+N'], run: () => void runFileAction('file.new') },
+    { id: 'app.open', label: 'Open…', category: general, defaults: ['Ctrl+O'], run: () => void runFileAction('file.open') },
+    { id: 'app.save', label: 'Save', category: general, defaults: ['Ctrl+S'], run: () => void runFileAction('file.save') },
+    { id: 'app.saveAs', label: 'Save as…', category: general, defaults: ['Ctrl+Shift+S'], run: () => void runFileAction('file.saveAs') },
+    { id: 'app.delete', label: 'Delete the selection', category: general, defaults: ['Delete', 'Backspace'], run: () => {
+      // Over a roof window's grip on its selected roof: that window, not the roof (decision 280).
+      if (takeHotRemove()) return;
+      // Viewports active on a sheet: those come off the sheet, never the sheet itself (forum topic 91).
+      if (takeSheetDelete()) return;
+      // A view selected by its crop frame is not deleted by the key: views are deleted from the project browser (forum topic 68).
+      const nodes = useSession.getState().nodes;
+      const ids = useUi.getState().selected.filter((id) => nodes.get(id)?.type !== 'LapinView');
+      if (ids.length) { void deleteElements(ids); select(null); }
+    } },
+    // The last ten selections (forum topic 73): this takes the newest again, and the right-click menu lists them all.
+    { id: 'app.previousSelection', label: 'Select the previous selection', category: general, defaults: ['Ctrl+Alt+Z'], run: previousSelection },
+    { id: 'app.selectAll', label: 'Select all', category: general, defaults: ['Ctrl+A'], run: selectAll },
+    // The selection's class and type in the view in front (forum topic 250); the right-click menu's Select similar in this view.
+    { id: 'app.selectSimilar', label: 'Select similar in this view', category: general, defaults: ['Ctrl+Shift+A'], run: selectSimilarHere },
+    { id: 'app.palette', label: 'Commands…', category: general, defaults: ['Ctrl+K'], run: dialog('palette') },
+    { id: 'app.commandLine', label: 'Command line: take all typing', category: general, defaults: ['Backquote'], run: () => useCad.setState((s) => ({ takeAll: !s.takeAll })) },
+    { id: 'app.shortcuts', label: 'Keyboard shortcuts…', category: general, defaults: [], run: dialog('shortcuts') },
+    { id: 'app.interface', label: 'Interface…', category: general, defaults: ['Ctrl+.'], run: dialog('interface') },
+    { id: 'app.preferences', label: 'Preferences…', category: general, defaults: ['Ctrl+,'], run: dialog('preferences') },
+    { id: 'app.quickTools', label: 'Quick tools…', category: general, defaults: [], run: dialog('quickTools') },
+    { id: 'app.myTools', label: 'Customize My tools…', category: general, defaults: [], run: dialog('myTools') },
+    // The workspaces (decision 243), each a command of its own: Commands… → "Workspace: MEP".
+    ...WORKSPACE_IDS.map((w) => ({ id: `app.workspace.${w}`, label: `Workspace: ${WORKSPACE_LABELS[w]}`, category: general, defaults: [], run: () => chooseWorkspace(w) })),
+    // Ctrl (Control on a Mac too: Cmd+Tab is the system's) with Tab or Page Down/Up: the next and previous view tab (forum topic 63).
+    { id: 'app.nextTab', label: 'Next view tab', category: views, defaults: ['Ctrl+Tab', 'Ctrl+PageDown'], run: () => cycleTab(1) },
+    { id: 'app.previousTab', label: 'Previous view tab', category: views, defaults: ['Ctrl+Shift+Tab', 'Ctrl+PageUp'], run: () => cycleTab(-1) },
+    // The view or sheet in front, found in the project browser, or placed on a sheet (forum topic 207); no keys by default.
+    { id: 'app.findInBrowser', label: 'Find in project browser', category: views, defaults: [], run: () => { const id = shownViewId(); if (id) findInBrowser(id); } },
+    { id: 'app.placeOnSheet', label: 'Place on sheet…', category: views, defaults: [], run: () => {
+      const id = shownViewId();
+      if (id && canPlace(id, useSession.getState().nodes)) placeOnSheet(id); else notify('This view cannot go on a sheet.');
+    } },
+    { id: 'app.osnap', label: 'Object snap', category: draw, defaults: ['F3'], run: () => useCad.setState((s) => ({ osnap: !s.osnap })) },
+    { id: 'app.ortho', label: 'Ortho', category: draw, defaults: ['F8'], run: () => useCad.setState((s) => ({ ortho: !s.ortho })) },
+    { id: 'app.grid', label: 'Grid', category: draw, defaults: ['F7'], run: toggleGrid },
+    { id: 'app.thinLines', label: 'Thin lines', category: views, defaults: [], same: 'TL', run: toggleThinLines },
+    { id: 'app.anchorNext', label: 'Insertion anchor: next', category: draw, defaults: ['F4'], run: () => stepToolAnchor(1) },
+    { id: 'app.anchorPrev', label: 'Insertion anchor: previous', category: draw, defaults: ['Shift+F4'], run: () => stepToolAnchor(-1) },
+    { id: 'app.datum', label: 'Temporary reference point at the cursor (again: drop it)', category: draw, defaults: ['F6'], run: () => { if (!datumHere()) notify('Start a drawing or placing tool, point at a spot, then press this key: the next point is measured from it.'); } },
+    { id: 'app.polar', label: 'Polar tracking', category: draw, defaults: ['F10'], run: () => useCad.setState((s) => ({ polar: !s.polar })) },
+    { id: 'app.zoomIn', label: 'Zoom in', category: views, defaults: ['Plus', '='], same: 'ZI', run: zoom((h) => h.zoomBy(1.25)) },
+    { id: 'app.zoomOut', label: 'Zoom out', category: views, defaults: ['-'], same: 'ZO', run: zoom((h) => h.zoomBy(0.8)) },
+    { id: 'app.zoomSelection', label: 'Zoom to the selection', category: views, defaults: ['Shift+Z'], same: 'ZS', run: zoom((h) => h.fitSelection()) },
+    { id: 'app.zoomFit', label: 'Zoom to fit', category: views, defaults: [], same: 'ZE', run: zoom((h) => h.fitAll()) },
+    { id: 'app.zoomRegion', label: 'Zoom region', category: views, defaults: [], same: 'ZOOM', run: () => void startCommand('ZOOM') },
+    { id: 'app.zoomPrevious', label: 'Zoom before', category: views, defaults: [], same: 'ZP', run: zoom((h) => h.previous()) },
+    { id: 'app.toggleBrowser', label: 'Project browser: fold or unfold', category: panels, defaults: ['Ctrl+B'], run: () => togglePanel('browser') },
+    { id: 'app.toggleProps', label: 'Properties: fold or unfold', category: panels, defaults: ['Ctrl+Shift+B'], run: () => togglePanel('props') },
+    { id: 'app.togglePanels', label: 'Both panels: fold or unfold', category: panels, defaults: ['Tab'], run: () => {
+      // Over several elements in a plan, section or elevation Tab lights the next one (forum topic 105); else the modules', else the panels fold.
+      if (pickCycleTab(false, useSession.getState().nodes)) return;
+      for (const h of tabHandlers) if (h()) return;
+      toggleBothPanels();
+    } },
+    { id: 'app.rotateCopy', label: 'Rotate a copy', category: 'Modify', defaults: ['Ctrl+Shift+E'], run: () => void startCommand('ROTATECOPY') },
+    // The arrow keys nudge the selection (forum topic 212): an arrow, Shift+arrow ten times as far; Ctrl (⌘) with them too. Only when the selection is the arrows' (keys.ts gates them).
+    ...NUDGES.map((n) => ({ id: n.id, label: n.label, category: 'Modify', defaults: [n.big ? `Shift+${n.key}` : n.key, `${n.big ? 'Ctrl+Shift+' : 'Ctrl+'}${n.key}`], run: () => { nudgeSelection(n.dir, n.big); } })),
+    { id: 'app.pickCycleBack', label: 'Light the previous element under the pointer', category: views, defaults: ['Shift+Tab'], run: () => void pickCycleTab(true, useSession.getState().nodes) },
+    { id: 'app.propsOverlay', label: 'All properties (over the view)', category: panels, defaults: [], run: () => { if (usePanels.getState().propsOpen) return; showOverlay('props'); } },
+    // The model assistant: the desktop's only (docs/plan-assistant.md); not in the web build at all.
+    ...(import.meta.env.VITE_ENGINE !== 'worker' && assistantAvailable()
+      ? [{ id: 'app.assistant', label: 'Assistant', category: panels, defaults: [], run: () => showPropsTab('assistant') }] : []),
+  ];
+}
+
+const hotbarCommands = (): CommandDef[] => Array.from({ length: 9 }, (_, i) => ({
+  id: `hotbar.${i + 1}`, label: `Quick tool ${i + 1}`, category: 'Quick tools', defaults: [String(i + 1)],
+  run: () => { const t = hotbarSlots()[i]; if (t) activateSlot(t); },
+}));
+
+/** The command-line command a tool starts, when it is one (the Modify and Draft tools). */
+const SAME: Record<string, string> = {
+  'modify.move': 'MOVE', 'modify.copy': 'COPY', 'modify.rotate': 'ROTATE', 'modify.mirror': 'MIRROR', 'modify.delete': 'ERASE', 'modify.match': 'MATCHPROP', 'modify.align': 'ALIGN',
+  'cad.line': 'LINE', 'cad.pline': 'PLINE', 'cad.rect': 'RECTANGLE', 'cad.circle': 'CIRCLE', 'cad.arc': 'ARC', 'cad.move': 'MOVE', 'cad.copy': 'COPY',
+  'cad.rotate': 'ROTATE', 'cad.mirror': 'MIRROR', 'cad.scale': 'SCALE', 'cad.array': 'ARRAY', 'modify.array': 'ARRAY', 'cad.erase': 'ERASE', 'cad.offset': 'OFFSET', 'cad.trim': 'TRIM', 'cad.extend': 'EXTEND',
+  'cad.fillet': 'FILLET', 'cad.chamfer': 'CHAMFER', 'cad.explode': 'EXPLODE', 'cad.hatch': 'HATCH', 'cad.tag': 'TAG', 'drafting.dimension': 'DIMENSION', 'architecture.stair': 'STAIR', 'architecture.ramp': 'RAMP',
+};
+
+/** Ctrl+D drags (Move), Ctrl+Shift+D drags a copy (Copy), Ctrl+E rotates (issue 86, the forum); Ctrl+Shift+E rotates a copy is `app.rotateCopy`. */
+export const MODIFY_CHORDS: Record<string, string[]> = { 'modify.move': ['Ctrl+D'], 'modify.copy': ['Ctrl+Shift+D'], 'modify.rotate': ['Ctrl+E'] };
+
+let cached: CommandDef[] | null = null;
+/** The extra tools (a script's) the cache was made with: a change makes it again. */
+let cachedRev = -1;
+
+/** Every command, once: the app's, the quick tool slots, then the ribbon's tools tab by tab (and the quick tools no tab has), then the scripts' tools. */
+export function commands(): CommandDef[] {
+  if (cached && cachedRev === extraToolsRev()) return cached;
+  cachedRev = extraToolsRev();
+  memo = null;
+  const out = [...appCommands(), ...hotbarCommands()];
+  const seen = new Set(out.map((c) => c.id));
+  const tool = (t: ReturnType<typeof allTools>[number], category: string, group?: string) => {
+    if (seen.has(t.id)) return;
+    seen.add(t.id);
+    out.push({
+      id: t.id, label: t.label, category, group,
+      // Letters (WA), or a chord a tool says (Ctrl+], the draw order's).
+      defaults: t.shortcut && (/^[A-Z]{1,3}$/.test(t.shortcut) || /^(Ctrl|Alt|Shift)\+./.test(t.shortcut)) ? [t.shortcut] : [], chords: MODIFY_CHORDS[t.id],
+      fixed: t.shortcut === 'Esc' ? ['Escape'] : undefined,
+      same: SAME[t.id], run: () => activate(t),
+    });
+  };
+  for (const t of defaultHotbar()) if (!ribbonTabs().some((tab) => tab.groups.some((g) => [...g.tools, ...(g.small ?? [])].some((x) => x.id === t.id)))) tool(t, 'Quick tools');
+  // A pulldown's tools under its tab and group too (audit S14: a crowded tab's tools gathered under fewer buttons).
+  for (const tab of ribbonTabs()) for (const g of tab.groups) for (const t of [...g.tools, ...(g.small ?? [])]) { tool(t, tab.label, g.label); for (const x of t.items ?? []) tool(x, tab.label, g.label); }
+  for (const t of extraTools()) tool(t, 'Scripts');
+  for (const t of allTools()) tool(t, 'Other');
+  cached = out;
+  return out;
+}
+
+export const findCommandDef = (id: string) => commands().find((c) => c.id === id) ?? null;
+
+/** The command line's names, each with the command it is. */
+export const cliNames = () => COMMANDS.flatMap((c) => c.names.map((name) => ({ name, command: c.names[0] })));
+
+let memo: { state: unknown; map: Keymap; bindings: Record<string, Binding[]> } | null = null;
+
+/** The bindings in force and their keymap (recomputed when the user changes them). */
+export function current(): { map: Keymap; bindings: Record<string, Binding[]> } {
+  const state = useKeymap.getState();
+  if (memo?.state === state && cachedRev === extraToolsRev()) return memo;
+  const cmds = commands();
+  const bindings = effectiveBindings(cmds, state);
+  const map = resolveKeymap(cmds, bindings, cliNames(), state.aliases);
+  memo = { state, map, bindings };
+  return memo;
+}
+
+export const keymap = () => current().map;
+
+export function runCommand(id: string): void {
+  findCommandDef(id)?.run();
+}
+
+/** A command's bindings as the interface shows them ("WA", "Ctrl ⇧ S"), joined; '' when it has none. */
+export function bindingText(id: string, bindings = current().bindings): string {
+  const c = findCommandDef(id);
+  return [...(c?.fixed ?? []), ...(bindings[id] ?? [])].map((b) => formatBinding(b)).join(', ');
+}
+
+/** A tooltip: "Name — keys · group" (the keys and group when there are). */
+export function hint(id: string, label: string, group?: string): string {
+  const keys = bindingText(id);
+  return `${label}${keys ? ` — ${keys}` : ''}${group ? ` · ${group}` : ''}`;
+}
+
+/** For components: re-renders when the bindings change. */
+export function useBindings(): Record<string, Binding[]> {
+  const state = useKeymap();
+  return useMemo(() => { void state; return current().bindings; }, [state]);
+}
+
+// A word typed on the command line and ended with Enter that no command-line command knows: a sequence's command (ZF ↵).
+setCommandFallback((text) => {
+  const word = text.trim().toUpperCase();
+  const id = current().map.sequences[word] ?? TOOL_WORDS[word];
+  if (!id) return false;
+  runCommand(id);
+  return true;
+});
+
+// The user's own aliases (decision 473): typed on the command line, they come before the built-in names.
+setAliasHook((text) => {
+  const target = resolveAlias(text, useKeymap.getState().aliases);
+  if (!target) return null;
+  if (target.startsWith('cad:')) return findCommand(target.slice(4)) ? { cad: target.slice(4) } : null;
+  if (!findCommandDef(target)) return null;
+  runCommand(target);
+  return { done: true };
+});
+
+// The panels follow the interface's choice of them; Compact narrows the properties.
+onInterfaceChange((s, before) => {
+  if (s.parts.panels !== before.parts.panels) applyPanelsPart(s.parts.panels, s.preset === 'compact' && before.preset !== 'compact' ? 260 : undefined);
+  else if (s.preset === 'compact' && before.preset !== 'compact') applyPanelsPart(s.parts.panels, 260);
+});
+{
+  const s = useInterface.getState();
+  usePanels.setState({ railsHidden: s.parts.panels === 'hidden' });
+  // The first start in Compact (the web build on a short window): its panels, until the user chooses.
+  if (!s.chosen && s.preset === 'compact') applyPanelsPart(s.parts.panels, 260);
+}

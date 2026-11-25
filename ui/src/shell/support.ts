@@ -1,0 +1,132 @@
+/** What the help menu reports with and links to: the app's last errors, the community and the site. */
+
+import { notify } from '../app/store';
+import { engine, engineInBrowser, useSession } from '../engine/session';
+import { type Lang, useLang } from '../i18n';
+
+/** The app's last errors, newest last (at most 20). */
+export const RECENT: string[] = [];
+let installed = false;
+
+/** Browser messages that are not errors of the app: a ResizeObserver whose callback resized something again (benign, the browser delivers it next frame). */
+const BENIGN = [/ResizeObserver loop completed with undelivered notifications/i, /ResizeObserver loop limit exceeded/i];
+
+/** Whether a message is noise a report need not carry. */
+export const benignError = (text: string): boolean => BENIGN.some((re) => re.test(text));
+
+/** Add an error to the recent ones, newest last (at most 20), leaving out the benign ones. */
+export function keepRecentError(text: string, now = new Date()): void {
+  if (benignError(text)) return;
+  RECENT.push(`${now.toISOString().slice(11, 19)} ${text}`.slice(0, 400));
+  if (RECENT.length > 20) RECENT.shift();
+}
+
+/** Keep the app's last errors (uncaught, rejected, console.error), for the next report. */
+export function installRecentErrors(): void {
+  if (installed || typeof window === 'undefined') return;
+  installed = true;
+  const keep = (text: string) => keepRecentError(text);
+  window.addEventListener('error', (e) => keep(`error: ${e.message} @ ${e.filename}:${e.lineno}`));
+  window.addEventListener('unhandledrejection', (e) => keep(`rejection: ${e.reason instanceof Error ? e.reason.message : String(e.reason)}`));
+  const original = console.error.bind(console);
+  console.error = (...args: unknown[]) => { keep(`console: ${args.map((a) => (a instanceof Error ? a.message : String(a))).join(' ')}`); original(...args); };
+}
+
+/** What the help menu links to: the guide, the forum (Lapin's users and fans, docs/plan-forum.md), the community on Skool (courses), the site, the source. */
+export const LINKS = { guide: 'https://lapinbim.com/docs/', forum: 'https://forum.lapinbim.com', community: 'https://www.skool.com/bubblebim-club-1376/about', site: 'https://lapinbim.com', source: 'https://github.com/Ciuntuc-BIM-Studio/lapin' } as const;
+
+/** The languages the user guide is written in (scripts/user-docs/languages.mjs); an interface language not among them (Lao) opens it in English. */
+const GUIDED: readonly Lang[] = ['en', 'ro', 'es', 'de', 'fr', 'da', 'it', 'pl', 'pt'];
+const guided = (lang: Lang): Lang => (GUIDED.includes(lang) ? lang : 'en');
+
+/** The user guide in a language: /docs/ for English, /docs/<lang>/ for the others. */
+export const guideUrl = (lang: Lang): string => (guided(lang) === 'en' ? LINKS.guide : `${LINKS.guide}${guided(lang)}/`);
+
+/** The engine's name for the guide in a language (Support.cs): guide, guideRo, guideEs, guideDe, guideFr, guideDa, guideIt, guidePl, guidePt. */
+export const guideLink = (lang: Lang): string => {
+  const g = guided(lang);
+  return g === 'en' ? 'guide' : `guide${g[0].toUpperCase()}${g.slice(1)}`;
+};
+
+/** Open the community or the site: in the system's browser (the engine does it on the desktop), in a new tab on the web. The guide opens in the interface's language. */
+export const openLink = (which: keyof typeof LINKS) => {
+  const lang = useLang.getState().lang;
+  if (engineInBrowser) { window.open(which === 'guide' ? guideUrl(lang) : LINKS[which], '_blank', 'noopener'); return; }
+  void engine.call('support.open', { link: which === 'guide' ? guideLink(lang) : which }).catch(() => notify('The link could not be opened.'));
+};
+
+/** The forum's category for Lapin's topics. */
+export const FORUM_CATEGORY = 'lapin';
+
+/**
+ * A new topic on the forum, its title and text filled in (Discourse's /new-topic, in
+ * Lapin's category; the visitor signs in there and posts it, or not). The same
+ * address as the engine's (Support.ForumTopic): the title cut to 200 characters, the text to 4000.
+ */
+export function forumTopicUrl(title?: string, body?: string): string {
+  const q: string[] = [];
+  const t = (title ?? '').trim().slice(0, 200);
+  const b = (body ?? '').trim().slice(0, 4000);
+  if (t) q.push(`title=${encodeURIComponent(t)}`);
+  if (b) q.push(`body=${encodeURIComponent(b)}`);
+  q.push(`category=${FORUM_CATEGORY}`);
+  return `${LINKS.forum}/new-topic?${q.join('&')}`;
+}
+
+/** What a new topic's text starts with: room for the question, then the app's version and where it runs (nothing else of the computer or the project). */
+export const forumTopicBody = (question: string, version: string | undefined, where: 'desktop' | 'web'): string =>
+  `${question.trim()}\n\n\n---\nLapin ${version ?? ''} · ${where}`.trim();
+
+/** A new topic for a question: a short one is its title; a long one is cut for the title and given whole in the text. */
+export function forumQuestion(question: string, version: string | undefined, where: 'desktop' | 'web'): { title: string; body: string } {
+  const q = question.trim();
+  const long = q.length > 200;
+  return { title: long ? `${q.slice(0, 197)}…` : q, body: forumTopicBody(long ? q : '', version, where) };
+}
+
+/** Ask on the forum: a new topic with the question (if any), opened like the help menu's other links. */
+export const openForumTopic = (question = '') => {
+  const { title, body } = forumQuestion(question, useSession.getState().info?.engineVersion, engineInBrowser ? 'web' : 'desktop');
+  if (engineInBrowser) { window.open(forumTopicUrl(title, body), '_blank', 'noopener'); return; }
+  void engine.call('support.open', { link: 'forumTopic', title, body }).catch(() => notify('The link could not be opened.'));
+};
+
+/** Where the web build posts reports: the Lapin server it is served from. */
+export const FEEDBACK_URL: string = import.meta.env.VITE_FEEDBACK_URL ?? '/api/feedback';
+
+/** What the report form holds. */
+export interface ReportForm {
+  kind: 'bug' | 'idea' | 'question'; title: string; description: string; expected: string; email: string; screenshot: string | null;
+}
+
+/**
+ * The report to send from the form: anonymous unless `contact` is given (the
+ * sender asked for a reply: their nickname and their key's id, never the
+ * secret itself; docs/decisions-pending.md 177).
+ */
+export function reportParams(f: ReportForm, errors: string[], screen: string, contact?: { nickname?: string; keyId: string }): Record<string, unknown> {
+  return {
+    kind: f.kind, title: f.title, description: f.description, expected: f.expected || undefined, email: f.email || undefined, consent: Boolean(f.email),
+    screenshot: f.screenshot ?? undefined, website: '', errors: [...errors], screen, ...(contact ? { contact } : {}),
+  };
+}
+
+/**
+ * Send a report; its number back. The desktop's engine posts it; in the
+ * browser the engine hands back the same body (a worker cannot wait for the
+ * network inside a call) and the page posts it.
+ */
+export async function sendReport(params: Record<string, unknown>, post: typeof fetch = fetch): Promise<number> {
+  const r = await engine.call<{ number?: number; send?: unknown }>('support.report', { ...params, userAgent: navigator.userAgent });
+  if (r.send === undefined) return r.number ?? 0;
+  let res: Response;
+  try {
+    res = await post(FEEDBACK_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(r.send) });
+  } catch (e) {
+    throw new Error(`The report could not be sent: ${e instanceof Error ? e.message : String(e)}`, { cause: e });
+  }
+  let answer: { number?: number; error?: string } = {};
+  try { answer = await res.json(); } catch { if (res.ok) throw new Error("The report could not be sent: the server's answer was unreadable."); }
+  if (!res.ok) throw new Error(answer.error ?? `The report could not be sent (${res.status}).`);
+  return Number(answer.number ?? 0);
+}

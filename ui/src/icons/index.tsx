@@ -1,0 +1,94 @@
+/**
+ * Lapin's own icons for the modelling tools: each is the element's symbol as
+ * a designer reads it on a sheet (the door's swing, the column cut, the
+ * section marker), not a generic object. A 24-unit grid, lines of 1.5, round
+ * caps, the same optical weight as lucide, which keeps the generic interface
+ * (files, undo, theme). The shapes live in icons.json so a script can lay
+ * them out on a sheet (docs/mock/icons.svg) to check them at 22 px.
+ */
+
+import { createElement, forwardRef, type ComponentType, type SVGProps } from 'react';
+import shapes from './icons.json';
+
+export interface IconProps extends Omit<SVGProps<SVGSVGElement>, 'ref'> {
+  size?: number | string;
+  strokeWidth?: number | string;
+}
+export type Icon = ComponentType<IconProps>;
+
+export type IconName = keyof typeof shapes;
+type Node = [string, Record<string, string | number>];
+
+function icon(name: IconName): Icon {
+  const nodes = shapes[name] as Node[];
+  const C = forwardRef<SVGSVGElement, IconProps>(({ size = 24, strokeWidth = 1.5, color = 'currentColor', className, ...rest }, ref) => (
+    <svg ref={ref} xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none" stroke={color} strokeWidth={strokeWidth}
+      strokeLinecap="round" strokeLinejoin="round" className={className ? `lapin-icon ${className}` : 'lapin-icon'} aria-hidden="true" {...rest}>
+      {nodes.map(([tag, attrs], i) => createElement(tag, { key: i, ...attrs }))}
+    </svg>
+  ));
+  C.displayName = `Icon(${name})`;
+  return C;
+}
+
+const named = new Map<string, Icon>();
+/** One of Lapin's own icons by its name in icons.json (a script's tool names one: `wall`, `door`…); null when there is none. */
+export function lapinIcon(name: string): Icon | null {
+  if (!Object.prototype.hasOwnProperty.call(shapes, name)) return null;
+  let i = named.get(name);
+  if (!i) named.set(name, (i = icon(name as IconName)));
+  return i;
+}
+
+export const WallIcon = icon('wall');
+/** Ask Me (the FAQ assistant): a minimal rabbit's head, Lapin's own. */
+export const BunnyIcon = icon('bunny');
+export const CurvedWallIcon = icon('curvedWall');
+export const CurtainWallIcon = icon('curtainWall');
+export const CurvedBeamIcon = icon('curvedBeam');
+export const MoveToStoreyIcon = icon('moveToStorey');
+export const CopyToStoreysIcon = icon('copyToStoreys');
+export const ElevatorIcon = icon('elevator');
+export const DoorIcon = icon('door');
+export const WindowIcon = icon('window');
+export const SlabIcon = icon('slab');
+export const RoofIcon = icon('roof');
+export const ColumnIcon = icon('column');
+export const BeamIcon = icon('beam');
+export const StripFootingIcon = icon('stripFooting');
+export const PadFootingIcon = icon('padFooting');
+export const PadsUnderColumnsIcon = icon('padsUnderColumns');
+export const StairIcon = icon('stair');
+export const RampIcon = icon('ramp');
+export const RoomIcon = icon('room');
+export const SectionIcon = icon('section');
+export const ElevationIcon = icon('elevation');
+export const LevelIcon = icon('level');
+export const GridAxisIcon = icon('gridAxis');
+export const DimensionIcon = icon('dimension');
+export const TerrainIcon = icon('terrain');
+export const PlatformIcon = icon('platform');
+export const SlabOpeningIcon = icon('slabOpening');
+export const RoofWindowIcon = icon('roofWindow');
+export const DormerIcon = icon('dormer');
+export const DownpipeIcon = icon('downpipe');
+export const RailingIcon = icon('railing');
+/** A balcony (a tester's report, #96): seen in section, its slab out of the wall on a bracket, its railing. */
+export const BalconyIcon = icon('balcony');
+export const WallTypesIcon = icon('wallTypes');
+export const AttachRoofIcon = icon('attachRoof');
+export const DetachRoofIcon = icon('detachRoof');
+export const AngleIcon = icon('angle');
+export const RadiusIcon = icon('radius');
+/** Coincident: two lines running into one ringed point. */
+export const CoincidentIcon = icon('coincident');
+export const DiameterIcon = icon('diameter');
+export const ArcLengthIcon = icon('arcLength');
+export const SlopeIcon = icon('slope');
+export const OrdinateIcon = icon('ordinate');
+/** A wall sweep (decision 297): a cornice and a band standing out of a wall's face, seen in section. */
+export const WallSweepIcon = icon('wallSweep');
+/** A wall reveal: a groove in the wall's face, seen in section. */
+export const WallRevealIcon = icon('wallReveal');
+/** A profile: a stepped footing's outline and its insertion point. */
+export const ProfileIcon = icon('profile');

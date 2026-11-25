@@ -1,0 +1,55 @@
+/**
+ * What the 2D views draw for the user's eyes only (a tester's report, decision 247): the plan's background
+ * grid (F7, as AutoCAD's), and thin lines (TL, as Revit's; AutoCAD's LWT off): every line one pixel, whatever
+ * its pen. Kept per user; the drawings themselves, sheets, PDF and DXF keep their pens, and snapping to the
+ * grid stays as it is. The grid shows in the 3D view too, on the active storey (a tester's report, decision 312),
+ * and so do the shapes drafted on plans, sections and reference planes, as lines on their view's plane (Drafts in
+ * 3D, on by default), and an imported DXF's drawing on its view's plane (DXF in 3D, on by default: decision 382). In 3D the wheel zooms to the point under the cursor and a drag orbits round the selection
+ * (else the point under the cursor), both on by default (report #89, viewport/navigate3d.ts). Picking can drill into
+ * assemblies (a whole first, then its parts click by click; platform/assemblies.ts), off by default. SketchUp's
+ * one-letter shortcuts in the 3D view (L line, R rectangle, P push/pull…; viewport/Sketch3D.tsx) are off by default too.
+ */
+
+import { create } from 'zustand';
+
+export interface Display { grid: boolean; thinLines: boolean; drafts3d: boolean; dxf3d: boolean; zoomToCursor: boolean; orbitSelection: boolean; drillSelect: boolean; sketchupKeys: boolean; dragMove3d: boolean }
+
+const KEY = 'lapin.display';
+
+/** What was kept, anything unreadable left at its default (the grid shown, the pens' widths). */
+export function readDisplay(stored: unknown): Display {
+  const o = stored as Partial<Display> | null;
+  const obj = !!o && typeof o === 'object';
+  return { grid: !(obj && o.grid === false), thinLines: !!(obj && o.thinLines === true), drafts3d: !(obj && o.drafts3d === false), dxf3d: !(obj && o.dxf3d === false),
+    zoomToCursor: !(obj && o.zoomToCursor === false), orbitSelection: !(obj && o.orbitSelection === false),
+    drillSelect: !!(obj && o.drillSelect === true), sketchupKeys: !!(obj && o.sketchupKeys === true),
+    dragMove3d: !(obj && o.dragMove3d === false) };
+}
+
+function read(): Display {
+  try { return readDisplay(JSON.parse(localStorage.getItem(KEY) ?? 'null')); } catch { return readDisplay(null); }
+}
+
+export const useDisplay = create<Display>(() => read());
+
+export function setDisplay(patch: Partial<Display>): void {
+  useDisplay.setState(patch);
+  try { localStorage.setItem(KEY, JSON.stringify(useDisplay.getState())); } catch { /* kept for this session */ }
+}
+
+export const toggleGrid = () => setDisplay({ grid: !useDisplay.getState().grid });
+export const toggleThinLines = () => setDisplay({ thinLines: !useDisplay.getState().thinLines });
+export const toggleDrafts3d = () => setDisplay({ drafts3d: !useDisplay.getState().drafts3d });
+/** An imported DXF's drawing in the 3D view (decision 382), on by default. */
+export const toggleDxf3d = () => setDisplay({ dxf3d: !useDisplay.getState().dxf3d });
+export const toggleZoomToCursor = () => setDisplay({ zoomToCursor: !useDisplay.getState().zoomToCursor });
+export const toggleOrbitSelection = () => setDisplay({ orbitSelection: !useDisplay.getState().orbitSelection });
+export const toggleDrillSelect = () => setDisplay({ drillSelect: !useDisplay.getState().drillSelect });
+/** SketchUp's one-letter shortcuts in the 3D view (decision 376), off by default: they would shadow Lapin's two-letter ones. */
+export const toggleSketchupKeys = () => setDisplay({ sketchupKeys: !useDisplay.getState().sketchupKeys });
+
+/** Pressing on a selected element in 3D and dragging moves it (docs/plan-3d-modelling.md), on by default; off, the drag orbits. */
+export const toggleDragMove3d = () => setDisplay({ dragMove3d: !useDisplay.getState().dragMove3d });
+
+/** A pen's width on screen (px): its paper width at the view's scale, within what a screen shows well; one pixel with thin lines. */
+export const screenWidth = (paperMm: number, pxPerMm: number, thin: boolean): number => (thin ? 1 : Math.min(4, Math.max(0.5, paperMm * pxPerMm)));

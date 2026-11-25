@@ -1,0 +1,311 @@
+/**
+ * Sections along more than one line (docs/sections.md): jogged (a polyline;
+ * projected by default, the pieces parallel to the first cutting in one
+ * frame and the jogs cutting nothing, or developed, each straight piece a
+ * planar cut laid beside the previous at its length),
+ * curved (an arc through three points) and along an element (a road's axis,
+ * a wall, a drafted polyline: its line read live, with the stations along
+ * it). Their tools, their grips in plan and their fields in the view's
+ * settings. The engine keeps `pts`, `curve` and `along` on the view.
+ */
+
+import { GitCommitHorizontal, Route, Spline } from 'lucide-react';
+import { execute, useSession } from '../../engine/session';
+import type { NodeDto } from '../../engine/protocol';
+import type { Grip, GripView, RefLine, ToolDef, Vec2 } from '../../platform/module';
+import { useUi } from '../../app/store';
+import { frontDiscipline } from './disciplines';
+import { pt } from '../../platform/vec';
+import { formatLength, lengthText } from '../../engine/unitsStore';
+import { LengthField } from '../../shell/cells';
+
+/** The points a section's line is drawn through: `pts`, else its start and end. */
+export function sectionPoints(node: NodeDto): Vec2[] {
+  const pts = Array.isArray(node.props.pts) ? (node.props.pts as unknown[]).map(pt).filter((p): p is Vec2 => !!p) : [];
+  if (pts.length >= 2) return pts;
+  const a = pt(node.props.start), b = pt(node.props.end);
+  return a && b ? [a, b] : [];
+}
+
+/**
+ * A new section's line and the way it looks, from its three clicks (forum topic 247): its start, its end, then a point on the
+ * side it looks to. A section looks left of its line as drawn from start to end, so a third click on the right swaps the ends;
+ * one on the line (or none) keeps the left.
+ */
+export function sectionByThreeClicks(a: Vec2, b: Vec2, side?: Vec2 | null): { start: Vec2; end: Vec2 } {
+  const cross = side ? (b.x - a.x) * (side.y - a.y) - (b.y - a.y) * (side.x - a.x) : 0;
+  return cross < -1e-12 ? { start: b, end: a } : { start: a, end: b };
+}
+
+/**
+ * What the Section tool draws as the pointer moves: the line to the pointer, then, once both ends are down, the line with an
+ * arrow at each end towards the side the pointer is on (where the section will look), as one polyline in plan metres.
+ */
+export function sectionPreview(placed: Vec2[], aimed: Vec2): Vec2[] | null {
+  if (placed.length === 1) return [placed[0], aimed];
+  if (placed.length < 2) return null;
+  const { start, end } = sectionByThreeClicks(placed[0], placed[1], aimed);
+  const len = Math.hypot(end.x - start.x, end.y - start.y);
+  if (len < 1e-9) return null;
+  const u = { x: (end.x - start.x) / len, y: (end.y - start.y) / len };
+  const look = { x: -u.y, y: u.x };
+  const k = Math.max(0.3, Math.min(2, len * 0.12));
+  // An arrow from an end: its stem out towards the look, then its head.
+  const arrow = (p: Vec2): Vec2[] => {
+    const tip = { x: p.x + look.x * k, y: p.y + look.y * k };
+    const h = k * 0.35;
+    return [p, tip, { x: tip.x - look.x * h + u.x * h, y: tip.y - look.y * h + u.y * h }, tip, { x: tip.x - look.x * h - u.x * h, y: tip.y - look.y * h - u.y * h }, tip, p];
+  };
+  return [...arrow(start), ...arrow(end)];
+}
+
+const isSection = (n: NodeDto | undefined | null): boolean => n?.type === 'LapinView' && n.props.kind === 'section';
+const isCurvedSection = (n: NodeDto): boolean => n.props.curve === 'arc';
+const followedBy = (n: NodeDto): string | null => (typeof n.props.along === 'string' ? n.props.along : null);
+
+/** What a section can follow: anything with a line in plan the engine knows (roads, ditches, retaining walls, site lines, walls, beams, footings, drafted shapes). */
+const FOLLOWABLE = ['IfcPavement', 'IfcEarthworksCut', 'LapinRetainingWall', 'LapinSiteFeature', 'IfcWall', 'IfcBeam', 'IfcFooting', 'IfcAnnotation'];
+
+async function open(r: unknown) {
+  const id = (r as { id?: string } | null)?.id;
+  if (id) useUi.setState({ view: 'drawing', drawingViewId: id, tool: null });
+}
+
+/** The tools beside View → Section: a jogged, a curved and a following section. */
+export const sectionTools: ToolDef[] = [
+  {
+    id: 'view.sectionJogged', label: 'Jogged section', icon: GitCommitHorizontal, shortcut: 'SJ',
+    gesture: { kind: 'polyline' },
+    complete: async ({ points }, ctx) => {
+      if (points.length < 2) return;
+      await open(await ctx.execute('view.create', { kind: 'section', pts: points.map((p) => [p.x, p.y]), discipline: frontDiscipline() }));
+    },
+  },
+  {
+    id: 'view.sectionCurved', label: 'Curved section', icon: Spline, shortcut: 'SV',
+    gesture: { kind: 'threePoints', arc: true },
+    complete: async ({ points: [a, b, c] }, ctx) => {
+      // Three points: the arc's start, its end, then a point on it (as the curved wall is drawn).
+      if (!a || !b || !c) return;
+      await open(await ctx.execute('view.create', { kind: 'section', pts: [[a.x, a.y], [c.x, c.y], [b.x, b.y]], curve: 'arc', discipline: frontDiscipline() }));
+    },
+  },
+  {
+    id: 'view.sectionAlong', label: 'Section along', icon: Route, shortcut: 'SA',
+    gesture: { kind: 'pick', types: FOLLOWABLE },
+    complete: async ({ entity }, ctx) => {
+      if (!entity) return;
+      await open(await ctx.execute('view.create', { kind: 'section', along: entity.id, name: `Section along ${entity.name}`, discipline: frontDiscipline() }));
+    },
+  },
+];
+
+const isAcross = (n: NodeDto): boolean => typeof n.props.across === 'string';
+const num = (v: unknown, fallback: number): number => (typeof v === 'number' ? v : fallback);
+const r3 = (v: number) => Math.round(v * 1000) / 1000;
+
+/**
+ * A section across an element (decision 223): its line is derived, so its ends set the margin on their side (dragged along
+ * the line, the other end fixed) and its middle slides the station along the element (the drag projected on the element's
+ * tangent, which the line stands across).
+ */
+function acrossGrips(node: NodeDto): Grip[] {
+  const pts = sectionPoints(node);
+  if (pts.length < 2) return [];
+  const [a, b] = [pts[0], pts[pts.length - 1]];
+  const len = Math.hypot(b.x - a.x, b.y - a.y);
+  if (len < 1e-9) return [];
+  const u = { x: (b.x - a.x) / len, y: (b.y - a.y) / len };
+  // The section looks left of its line (flipped: right), along the element towards its end.
+  const t = node.props.flip === true ? { x: u.y, y: -u.x } : { x: -u.y, y: u.x };
+  const along = (p: Vec2, from: Vec2, d: Vec2) => (p.x - from.x) * d.x + (p.y - from.y) * d.y;
+  const margin = num(node.props.margin, 0.5);
+  const [mA, mB, station] = [num(node.props.marginA, margin), num(node.props.marginB, margin), num(node.props.station, 0)];
+  const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+  const id = node.id;
+  const set = (args: Record<string, number>) => ({ command: 'view.updateAcross', args: { id, ...args } });
+  return [
+    { key: 'a', kind: 'end', at: a, title: 'Drag along the line: the margin on this side', step: (to) => set({ marginA: r3(Math.max(0, mA - along(to, a, u))) }) },
+    { key: 'b', kind: 'end', at: b, title: 'Drag along the line: the margin on this side', step: (to) => set({ marginB: r3(Math.max(0, mB + along(to, b, u))) }) },
+    { key: 'station', kind: 'centre', at: mid, title: 'Drag along the element: the station the section cuts at', step: (to) => set({ station: r3(Math.max(0, station + along(to, mid, t))) }) },
+  ];
+}
+
+/** What an elevation's marker in plan tells of its line (decision 456): its ends, its right, and how far it reaches along it. */
+type ElevationLine = { ends?: number[][]; right?: number[]; min?: number; max?: number; symbol?: number[]; depth?: number; along?: number };
+
+/** A move by the step from a grip's point to where it is dragged, through element.transform (one undo step). */
+const moveBy = (id: string, from: Vec2, to: Vec2) => ({ command: 'element.transform', args: { ids: [id], op: 'move', by: [r3(to.x - from.x), r3(to.y - from.y)] } });
+
+/**
+ * An elevation's grips in plan (decision 456): its marker line's two ends, each dragged along the line, set how far the
+ * elevation reaches on that side (view.setExtent, one undo step; the other end stays where it is drawn).
+ */
+export function elevationGrips(node: NodeDto, view?: GripView): Grip[] {
+  if (node.type !== 'LapinView' || node.props.kind !== 'elevation') return [];
+  const line = view?.mark?.data as ElevationLine | undefined;
+  const { ends, right, min, max, symbol, depth, along: placed } = line ?? {};
+  if (!ends || ends.length < 2 || !right || typeof min !== 'number' || typeof max !== 'number') return [];
+  // Its symbol dragged: the marker goes there, its line along the look (into the building, the elevation starts seeing
+  // there, decision 460) and its symbol along the line (decision 460), through view.moveMarker.
+  const at = symbol ? { x: symbol[0], y: symbol[1] } : null;
+  const look = { x: -right[1], y: right[0] };
+  const mover: Grip[] = at && typeof depth === 'number'
+    ? [{ key: 'marker', kind: 'move', at, title: 'Drag: move the marker (moved into the building, the elevation starts seeing at its line)', step: (to) => {
+      const d = { x: to.x - at.x, y: to.y - at.y };
+      return { command: 'view.moveMarker', args: { id: node.id, depth: r3(depth + d.x * look.x + d.y * look.y), along: r3((placed ?? 0) + d.x * right[0] + d.y * right[1]) } };
+    } }]
+    : at ? [{ key: 'marker', kind: 'move', at, title: 'Drag: move the marker (moved into the building, the elevation starts seeing at its line)', step: (to) => moveBy(node.id, at, to) }] : [];
+  const along = (p: Vec2) => p.x * right[0] + p.y * right[1];
+  const [a, b] = ends.map(([x, y]) => ({ x, y }));
+  const set = (lo: number, hi: number) => ({ command: 'view.setExtent', args: { id: node.id, min: r3(lo), max: r3(hi) } });
+  const title = 'Drag along the line: how far the elevation reaches on this side';
+  return [
+    { key: 'extentMin', kind: 'end', at: a, title, step: (to) => set(Math.min(along(to), max - 0.1), max) },
+    { key: 'extentMax', kind: 'end', at: b, title, step: (to) => set(min, Math.max(along(to), min + 0.1)) },
+    ...mover,
+  ];
+}
+
+/** What a section's marker in plan tells of its heads (decision 460): each end's arrow tip and how far it stands off the end. */
+type SectionHead = { end: 'a' | 'b'; at: number[]; offset: number[] };
+
+/** A section's heads in plan: dragged, each moves off its line's end (the cut stays); Ctrl/⌘-click puts it back. */
+export function sectionHeadGrips(node: NodeDto, view?: GripView): Grip[] {
+  const heads = (view?.mark?.data as { heads?: SectionHead[] } | undefined)?.heads;
+  if (!heads) return [];
+  return heads.map((h) => {
+    const at = { x: h.at[0], y: h.at[1] };
+    const set = (offset: number[] | null) => ({ command: 'view.moveHead', args: { id: node.id, end: h.end, offset } });
+    return {
+      key: `head-${h.end}`, kind: 'move' as const, at, title: 'Drag: move the head (the section cuts the same); Ctrl/⌘-click: back on its end',
+      step: (to: Vec2) => set([r3(h.offset[0] + to.x - at.x), r3(h.offset[1] + to.y - at.y)]),
+      remove: () => (h.offset[0] || h.offset[1] ? set(null) : null),
+    };
+  });
+}
+
+/** Whether a section can be flipped to look the other way (forum topic 247): any of its own, not one following an element or a shop drawing's. */
+export const canFlipSection = (node: NodeDto): boolean => isSection(node) && !followedBy(node) && node.props.of == null;
+
+/** The command that turns a section to look the other way: one undo step (the engine's view.flipSection). */
+export const flipSectionCommand = (node: NodeDto) => ({ command: 'view.flipSection', args: { id: node.id } });
+
+/** The way a section looks in plan: left of its first piece as drawn (one across an element, flipped: right). */
+export function sectionLook(node: NodeDto): Vec2 | null {
+  const pts = sectionPoints(node);
+  if (pts.length < 2) return null;
+  const len = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+  if (len < 1e-9) return null;
+  const left = { x: -(pts[1].y - pts[0].y) / len, y: (pts[1].x - pts[0].x) / len };
+  return isAcross(node) && node.props.flip === true ? { x: -left.x, y: -left.y } : left;
+}
+
+/** A section's flip arrow in plan, beside the middle of its first piece, pointing the way it would look once flipped. */
+function sectionFlipGrip(node: NodeDto): Grip | null {
+  const pts = sectionPoints(node), look = sectionLook(node);
+  if (!canFlipSection(node) || !look) return null;
+  const at = { x: (pts[0].x + pts[1].x) / 2, y: (pts[0].y + pts[1].y) / 2 };
+  return { key: 'flip', kind: 'flip', at, dir: { x: -look.x, y: -look.y }, title: 'Flip: the section looks the other way', click: () => flipSectionCommand(node) };
+}
+
+/** A section's grips in plan: its points (dragged, or taken out), a new point on each piece; a curved section its three points; one that follows an element has none of its own; one across an element its margins and station. An elevation's line ends. */
+export function sectionGrips(node: NodeDto, view?: GripView): Grip[] {
+  if (node.props.kind === 'elevation') return elevationGrips(node, view);
+  if (!isSection(node)) return [];
+  const flip = sectionFlipGrip(node);
+  const heads = [...sectionHeadGrips(node, view), ...(flip ? [flip] : [])];
+  if (followedBy(node)) return heads;
+  if (isAcross(node)) return [...acrossGrips(node), ...heads];
+  const pts = sectionPoints(node);
+  if (pts.length < 2) return [];
+  const id = node.id;
+  const set = (next: Vec2[]) => ({ command: 'view.setLine', args: { id, pts: next.map((p) => [p.x, p.y]) } });
+  const grips: Grip[] = pts.map((p, i) => ({
+    key: `p${i}`, kind: i === 0 || i === pts.length - 1 ? 'end' : 'vertex', at: p,
+    title: isCurvedSection(node) ? 'Drag: the arc goes through the point' : 'Drag: move the point; Ctrl/⌘-click: take it out (a jog goes)',
+    step: (to: Vec2) => set(pts.map((q, k) => (k === i ? to : q))),
+    remove: () => (!isCurvedSection(node) && pts.length > 2 ? set(pts.filter((_, k) => k !== i)) : null),
+  }));
+  if (!isCurvedSection(node))
+    for (let i = 0; i + 1 < pts.length; i++) {
+      const m = { x: (pts[i].x + pts[i + 1].x) / 2, y: (pts[i].y + pts[i + 1].y) / 2 };
+      grips.push({
+        key: `e${i}`, kind: 'edgeMid', at: m, title: 'Drag: a new point here, a jog; Ctrl/⌘-click: one halfway',
+        step: (to: Vec2) => set([...pts.slice(0, i + 1), to, ...pts.slice(i + 1)]),
+        insert: () => set([...pts.slice(0, i + 1), m, ...pts.slice(i + 1)]),
+      });
+    }
+  return [...grips, ...heads];
+}
+
+export const sectionRefs = (node: NodeDto): RefLine[] => (isSection(node) && sectionPoints(node).length >= 2 ? [{ points: sectionPoints(node), closed: false, kind: 'axis' }] : []);
+
+/**
+ * Whether a section offers Limit to its ends (decision 802): a plain straight line of its own (not across an element, not
+ * an element's view). A jogged, curved or following section always sees each piece only between its ends.
+ */
+export function offersLimitEnds(node: NodeDto): boolean {
+  return isSection(node) && !followedBy(node) && !isCurvedSection(node) && !isAcross(node) && node.props.of == null && sectionPoints(node).length === 2;
+}
+
+/** Whether a section sees only between its two ends: `limitEnds` (a new section's default; one saved before has none and sees across). */
+export const limitsEnds = (node: NodeDto): boolean => node.props.limitEnds === true;
+
+/** The command that turns Limit to its ends on or off: one undo step. */
+export const limitEndsCommand = (node: NodeDto, on: boolean) => ({ command: 'view.setLine', args: { id: node.id, limitEnds: on } });
+
+/** In a section's settings: its line (how many pieces, how long), how a jogged one is drawn, what it follows, and the stations written along it. */
+export function SectionFields({ view }: { view: NodeDto }) {
+  const nodes = useSession((s) => s.nodes);
+  const pts = sectionPoints(view);
+  const along = followedBy(view);
+  const followed = along ? nodes.get(along) : undefined;
+  let length = 0;
+  for (let i = 0; i + 1 < pts.length; i++) length += Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y);
+  const kind = along ? 'Along an element' : isCurvedSection(view) ? 'Arc' : pts.length > 2 ? 'Jogged line' : 'Straight line';
+  // How a jogged line is drawn (report #146): projected (Revit's, the default) or developed; a curve and a followed line are always developed.
+  const jogged = !along && !isCurvedSection(view) && !isAcross(view) && pts.length > 2;
+  const mode = view.props.jogged === 'developed' ? 'developed' : 'projected';
+  const stations = typeof view.props.stations === 'number' ? view.props.stations : null;
+  const scale = Number(view.props.scale ?? 100);
+  return (
+    <>
+      <dt title="The line the section cuts along: straight, jogged, an arc, or an element's">Line</dt>
+      <dd className="muted small">{kind}{followed ? <>: <span data-no-i18n>{followed.name}</span></> : null}{pts.length >= 2 ? <span data-no-i18n> · {lengthText(length)}</span> : null}</dd>
+      {offersLimitEnds(view) && (
+        <>
+          <dt title="Cut and see only the strip between the line's two ends (its length), across its whole depth; off: everything the section's plane crosses, however wide">Limit to its ends</dt>
+          <dd><input type="checkbox" data-field="section-limit-ends" checked={limitsEnds(view)}
+            onChange={(e) => { const c = limitEndsCommand(view, e.target.checked); void execute(c.command, c.args); }} /></dd>
+        </>
+      )}
+      {jogged && (
+        <>
+          <dt title="Projected: the pieces parallel to the first cut the model and the jogs cut nothing, all drawn in one frame, so grids stand where they cross in plan. Developed: every piece cuts and is drawn beside the previous at its length">Jogged</dt>
+          <dd><select data-field="section-jogged" value={mode} onChange={(e) => void execute('view.setLine', { id: view.id, jogged: e.target.value })}>
+            <option value="projected">Projected</option>
+            <option value="developed">Developed</option>
+          </select></dd>
+        </>
+      )}
+      {canFlipSection(view) && (
+        <>
+          <dt title="The side the section looks to: flipped, it looks the other way (its line runs the other way round, its heads stay at their ends)">Direction</dt>
+          <dd><button type="button" className="btn small" data-action="section-flip" onClick={() => { const c = flipSectionCommand(view); void execute(c.command, c.args); }}>Flip direction</button></dd>
+        </>
+      )}
+      {along && (
+        <>
+          <dt title="The section follows the element's line as it is now; stop following to keep the line as it is and edit it">Follows</dt>
+          <dd><button type="button" className="btn small" onClick={() => void execute('view.setLine', { id: view.id, along: null })}>Stop following</button></dd>
+        </>
+      )}
+      <dt title="Ticks and chainage (0+020) along the bottom every so many metres, from the station the line starts at; empty: a tenth of the scale when the section follows an element, else none; 0: none">Stations</dt>
+      <dd>
+        <LengthField metres={stations} min={0} blank placeholder={along ? formatLength(Math.max(1, scale / 10)) : '0'} title="Stations step"
+          onCommit={(v) => void execute('view.setLine', { id: view.id, stations: v })} />
+      </dd>
+    </>
+  );
+}

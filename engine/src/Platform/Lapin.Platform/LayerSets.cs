@@ -1,0 +1,218 @@
+using System.Text.Json.Nodes;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>A layer as a command gives it: a material by name, a thickness in metres, the core mark, its priority at joins (null: its material's), its note (how it is laid in this build-up),
+/// its category (null: its material's), whether a wall's layer extends down and up into the floors' layers ranked under it, its own graphics over its material's (decision 758; <see cref="MaterialLayer"/>).</summary>
+public sealed record LayerSpec(string Material, double Thickness, bool Core = false, string? Color = null, string? Name = null, double? From = null, double? To = null, IReadOnlyList<LayerPartSpec>? Parts = null, int? Priority = null, string? Note = null,
+    string? Category = null, bool ExtendDown = false, bool ExtendUp = false, JsonObject? Graphics = null);
+
+/// <summary>A piece of a layer in its height as a command gives it (decision 264): a material by name, its height in metres.</summary>
+public sealed record LayerPartSpec(string Material, double Height, string? Name = null, string? Color = null);
+
+/// <summary>
+/// Layered types, whatever they are (a wall, a slab, a foundation's stem):
+/// the type carries an IfcMaterialLayerSet through an IfcRelAssociatesMaterial;
+/// its occurrences lay it with their own IfcMaterialLayerSetUsage. The
+/// platform's, since several modules build on it.
+/// </summary>
+/// <summary>One layer of an element's layer set as a band across its axis: from, to, its material, its name, its place in the set, whether it is the core; its own graphics (decision 758, <see cref="MaterialLayer.Graphics"/>).</summary>
+public readonly record struct LayerBand(double From, double To, string Material, string Name, int Index, bool Core, double? Z0 = null, double? Z1 = null, IReadOnlyList<LayerPart>? Parts = null, int Rank = 0,
+    string? Category = null, bool ExtendDown = false, bool ExtendUp = false, JsonObject? Graphics = null);
+
+public static class LayerSets
+{
+    /// <summary>A thickness (metres) in millimetres for a type's name, to a tenth (report #94: a 12.5 mm board), whole ones without decimals: "300", "12.5".</summary>
+    public static string Millimetres(double m) => (Math.Round(m * 10000) / 10).ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    public static Entity? Of(IModelView m, string typeId) =>
+        m.RelatingOf(typeId, IfcClass.RelAssociatesMaterial) is { Class: IfcClass.MaterialLayerSet } set ? set : null;
+
+    public static IReadOnlyList<MaterialLayer> LayersOf(IModelView m, string typeId) =>
+        Of(m, typeId) is { } set ? Layers.Read(set) : [];
+
+    /// <summary>Layers as a command gives them (material by name, thickness, core), checked.</summary>
+    public static IReadOnlyList<LayerSpec> Parse(JsonNode? node, string what = "A type")
+    {
+        if (node is not JsonArray arr) throw new CommandException($"{what} needs its layers.");
+        var o = new List<LayerSpec>();
+        foreach (var n in arr)
+        {
+            if (n is not JsonObject l) throw new CommandException("Every layer is an object: material and thickness.");
+            var material = ((string?)l["material"])?.Trim();
+            var thickness = Json.Number(l["thickness"]);
+            if (string.IsNullOrEmpty(material)) throw new CommandException("Every layer needs a material.");
+            // Zero is a layer of no thickness worth modelling (a membrane, paint, decision 291): drawn as a line, measured by area.
+            if (thickness is not >= 0) throw new CommandException("Every layer needs a thickness.");
+            // How high the layer goes over the element's base (null: the whole height).
+            var from = Json.Number(l["from"]) is { } f && f > 0 ? f : (double?)null;
+            var to = Json.Number(l["to"]) is { } t && t > 0 ? t : (double?)null;
+            if (to is { } tt && tt <= (from ?? 0) + 1e-6) throw new CommandException("A layer's top must be above its bottom.");
+            // Its priority where elements join (report #81), 0–100; none: its material's.
+            int? priority = null;
+            if (l["priority"] is JsonValue pv)
+            {
+                if (Json.Number(pv) is not { } pn || !(pn >= 0 && pn <= 100)) throw new CommandException("A layer's priority runs from 0 to 100.");
+                priority = (int)Math.Round(pn);
+            }
+            // How it is laid in this build-up (docs/plan-buildup-tags.md): free text, kept as given (its lines too), none when blank.
+            var note = l["note"] is JsonValue nv && nv.TryGetValue<string>(out var ns) && ns.Trim().Length > 0 ? ns.Trim() : null;
+            if (note is { Length: > 2000 }) throw new CommandException("A layer's note is at most 2000 characters.");
+            // What the layer is in this build-up (the forum's topic #30): one of the materials' categories; none: its material's.
+            string? category = null;
+            if (l["category"] is JsonValue cv && cv.TryGetValue<string>(out var cs) && cs.Trim().Length > 0)
+                category = Materials.Categories.FirstOrDefault(x => string.Equals(x, cs.Trim(), StringComparison.OrdinalIgnoreCase))
+                    ?? throw new CommandException($"„{cs.Trim()}” is not a layer's category ({string.Join(", ", Materials.Categories)}).");
+            // How it draws in this build-up over its material (decision 758): a kind of view's graphics, checked against the project as it is written (Resolve).
+            JsonObject? graphics = l["graphics"] switch
+            {
+                null => null,
+                JsonObject g => g.Count > 0 ? (JsonObject)g.DeepClone() : null,
+                _ => throw new CommandException("A layer's graphics are {cutLine?, separatorLine?, hatch?, fill?, …, byScale?}, as a material's kind of view."),
+            };
+            o.Add(new LayerSpec(material, thickness.Value, l["core"] is JsonValue c && c.TryGetValue<bool>(out var core) && core, (string?)l["color"], (string?)l["name"], from, to, ParseParts(l["parts"]), priority, note,
+                category, True(l["extendDown"]), True(l["extendUp"]), graphics));
+        }
+        Validate(o, what);
+        return o;
+    }
+
+    static bool True(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) && b;
+
+    /// <summary>A layer's pieces in its height (decision 264), bottom up: a material and a height each; none for a layer of one material.</summary>
+    static IReadOnlyList<LayerPartSpec>? ParseParts(JsonNode? node)
+    {
+        if (node is not JsonArray arr || arr.Count == 0) return null;
+        var o = new List<LayerPartSpec>();
+        foreach (var n in arr)
+        {
+            if (n is not JsonObject p) throw new CommandException("Every piece of a layer in its height is an object: material and height.");
+            var material = ((string?)p["material"])?.Trim();
+            if (string.IsNullOrEmpty(material)) throw new CommandException("Every piece of a layer in its height needs a material.");
+            if (Json.Number(p["height"]) is not { } h || !(h > 0)) throw new CommandException("Every piece of a layer in its height needs a height.");
+            o.Add(new LayerPartSpec(material, h, (string?)p["name"] is { Length: > 0 } name ? name : null, (string?)p["color"]));
+        }
+        return o;
+    }
+
+    public static void Validate(IReadOnlyList<LayerSpec> layers, string what = "A type")
+    {
+        if (layers.Count == 0) throw new CommandException($"{what} needs at least one layer.");
+        if (layers.Any(l => !(l.Thickness >= 0) || double.IsInfinity(l.Thickness))) throw new CommandException("Every layer needs a thickness.");
+        if (layers.Count(l => l.Core) > 1) throw new CommandException("Only one layer can be the core.");
+        // A layer of thickness 0 (a membrane, paint; decision 291) is kept, but the core and the build-up need a body.
+        if (!layers.Any(l => l.Thickness > 0)) throw new CommandException($"{what} needs at least one layer with a thickness.");
+        if (layers.Any(l => l.Core && !(l.Thickness > 0))) throw new CommandException("The core needs a thickness.");
+    }
+
+    /// <summary>The layers with their materials, made when the project has none of that name.</summary>
+    public static List<MaterialLayer> Resolve(IEdit edit, IReadOnlyList<LayerSpec> layers) =>
+        layers.Select((l, i) => new MaterialLayer(Materials.Ensure(edit, l.Material, l.Color).Id, l.Thickness, l.Core, l.Name, l.From, l.To,
+            l.Parts is { Count: > 0 } ps ? ps.Select(p => new LayerPart(Materials.Ensure(edit, p.Material, p.Color).Id, p.Height, p.Name)).ToList() : null, l.Priority, l.Note,
+            l.Category, l.ExtendDown ? true : null, l.ExtendUp ? true : null, DraftingResources.CheckLayerGraphics(edit.Model, l.Graphics, $"Layer {i + 1}'s graphics"))).ToList();
+
+    /// <summary>A stored layer as a command would give it again (materials by name), its pieces in height with it.</summary>
+    public static LayerSpec SpecOf(IModelView m, MaterialLayer l) =>
+        new(m.Get(l.Material)?.Name ?? "Material", l.Thickness, l.Core, Name: l.Name, From: l.From, To: l.To,
+            Parts: l.Parts?.Select(p => new LayerPartSpec(m.Get(p.Material)?.Name ?? "Material", p.Height, p.Name)).ToList(), Priority: l.Priority, Note: l.Note,
+            Category: l.Category, ExtendDown: l.ExtendDown == true, ExtendUp: l.ExtendUp == true, Graphics: l.Graphics?.DeepClone() as JsonObject);
+
+    /// <summary>A new layer set, associated with the type.</summary>
+    public static Entity Attach(IEdit edit, Entity type, IReadOnlyList<LayerSpec> layers)
+    {
+        var set = new Entity(edit.NewId(), IfcClass.MaterialLayerSet, type.Name, Layers.Write(Resolve(edit, layers)));
+        edit.Add(set);
+        edit.Relate(IfcClass.RelAssociatesMaterial, set.Id, type.Id);
+        return set;
+    }
+
+    /// <summary>The type's layers rewritten in its own set (made when it has none).</summary>
+    public static void Rewrite(IEdit edit, Entity type, IReadOnlyList<LayerSpec> layers)
+    {
+        var resolved = Resolve(edit, layers);
+        if (Of(edit.Model, type.Id) is { } set) edit.Replace(set.With(attrs: Layers.Write(resolved, set.CloneAttrs())));
+        else Attach(edit, type, layers);
+    }
+
+    /// <summary>
+    /// The occurrence's own usage of the type's set: made when it has none,
+    /// pointed at the set, its offset given by <paramref name="offset"/> (from
+    /// the layers and whether it runs the negative way); none when the type has
+    /// no layers.
+    /// </summary>
+    public static void LayOut(IEdit edit, Entity occurrence, Entity type, string direction, Func<IReadOnlyList<MaterialLayer>, bool, double> offset, bool? negativeWhenNew = null)
+    {
+        var set = Of(edit.Model, type.Id);
+        var usage = UsageOf(edit.Model, occurrence.Id);
+        if (set == null)
+        {
+            if (usage != null) edit.Remove(usage.Id);
+            return;
+        }
+        var layers = Layers.Read(set);
+        var negative = usage != null ? Layers.ReadUsage(usage) is { Negative: true } : negativeWhenNew ?? false;
+        var attrs = Layers.WriteUsage(new LayerUsage(set.Id, negative, offset(layers, negative)));
+        attrs["layerSetDirection"] = direction;
+        if (usage == null)
+        {
+            var made = new Entity(edit.NewId(), IfcClass.MaterialLayerSetUsage, "", attrs);
+            edit.Add(made);
+            edit.Relate(IfcClass.RelAssociatesMaterial, made.Id, occurrence.Id);
+        }
+        else edit.Replace(usage.With(attrs: attrs));
+    }
+
+    /// <summary>An occurrence's own layer set usage, if it has one.</summary>
+    /// <summary>The element's layers as bands across its axis (by its usage), with material, name, place, whether it is the core and its priority at joins (<see cref="Layers.Rank"/>); null when it has no layer set.</summary>
+    public static IReadOnlyList<LayerBand>? BandsOf(IModelView m, string occurrenceId)
+    {
+        if (UsageOf(m, occurrenceId) is not { } u || Layers.ReadUsage(u) is not { } usage || m.Get(usage.ForLayerSet) is not { } set) return null;
+        var layers = Layers.Read(set);
+        var bands = Layers.Bands(layers, usage);
+        var core = Layers.CoreIndex(layers);
+        var table = CutOrder.MaterialsOf(m);
+        return layers.Select((l, i) => new LayerBand(bands[i].From, bands[i].To, l.Material, l.Name ?? m.Get(l.Material)?.Name ?? $"Layer {i + 1}", i, i == core, l.From, l.To, l.Parts,
+            Layers.Rank(l.Priority, table != null && Json.Number(table[l.Material]) is { } n ? (int)n : null, i == core), l.Category, l.ExtendDown == true, l.ExtendUp == true, l.Graphics)).ToList();
+    }
+
+    /// <summary>
+    /// The layers an element draws by its part keys: its layer set's bands, else a column's finish layers round its core
+    /// (decision 719, <see cref="ColumnLayers.BandsOf"/>); null when it has neither. What reads an element's parts by their
+    /// <c>layer:&lt;n&gt;</c> keys in a view (subcategories, layers modes, a small-scale cut's core) asks this.
+    /// </summary>
+    public static IReadOnlyList<LayerBand>? DrawnBandsOf(IModelView m, string occurrenceId) => BandsOf(m, occurrenceId) ?? ColumnLayers.BandsOf(m, occurrenceId);
+
+    /// <summary>
+    /// A layer's role, as Visibility / Graphics names its subcategories: the core; else by the layer's own category when it gives
+    /// one (the forum's topic #30), else by its material's (a finish by <see cref="Materials.IsFinish"/>, by its name when it has
+    /// no category): finishes, insulation, membranes or other layers.
+    /// </summary>
+    public static string SubOf(IModelView m, LayerBand band)
+    {
+        if (band.Core) return "core";
+        var mat = m.Get(band.Material);
+        if (band.Category == null && mat != null && Materials.IsFinish(mat)) return "finishes";
+        return (band.Category ?? mat?.Str("category")?.Trim())?.ToLowerInvariant() switch
+        {
+            "finish" => "finishes",
+            "insulation" => "insulation",
+            "membrane" => "membranes",
+            _ => "otherLayers",
+        };
+    }
+
+    /// <summary>Whether a layer is a finish: by its own category, else its material's (<see cref="SubOf"/>).</summary>
+    public static bool IsFinish(IModelView m, LayerBand band) => SubOf(m, band) == "finishes";
+
+    /// <summary>Flips a layered element across its axis: its usage's sense turns and its offset changes sign (false: it has no layers).</summary>
+    public static bool Flip(IEdit edit, string occurrenceId)
+    {
+        if (UsageOf(edit.Model, occurrenceId) is not { } usage || Layers.ReadUsage(usage) is not { } u) return false;
+        edit.Replace(usage.With(attrs: Layers.WriteUsage(u with { Negative = !u.Negative, Offset = -u.Offset })));
+        return true;
+    }
+
+    public static Entity? UsageOf(IModelView m, string occurrenceId) =>
+        m.RelatingOf(occurrenceId, IfcClass.RelAssociatesMaterial) is { Class: IfcClass.MaterialLayerSetUsage } u ? u : null;
+}

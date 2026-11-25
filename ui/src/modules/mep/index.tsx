@@ -1,0 +1,600 @@
+/**
+ * MEP: the building's services drawn as schematics on the plan — systems
+ * with their defaults, nodes with ports placed by role, runs between them
+ * that snap to ports and to other runs, connections made and undone by hand,
+ * a system placed whole and shaped in its edit mode (docs/plan-mep.md). Tags
+ * come from Annotate's TAG, as for any element, and Tag system tags a plan's
+ * runs, rises and terminals at once; a plan of the MEP discipline is made from
+ * here (the services in their colours, the architecture halftone). The engineering on the network (checks, sizing, the
+ * assistants) is mep-pro's, which adds its groups to this tab.
+ */
+
+import { pulldownTool } from '../../shell/pulldown';
+import { Box, Container, CookingPot, Cylinder, Filter, Fuel, GitBranchPlus, Heater, ShieldCheck, Waypoints } from 'lucide-react';
+import { AlarmSmoke, BellRing, CloudDrizzle, Cog, Droplet, FireExtinguisher, GitMerge, Hand, PanelTop, RefreshCw, Siren, ThermometerSun } from 'lucide-react';
+import { ListOrdered, Shapes } from 'lucide-react';
+import { AirVent, ArrowDownToLine, Ban, Bath, CircleDot, Droplets, Fan, Flame, Gauge, GitFork, Lightbulb, Link2, Milestone, PencilLine, Route, SquarePen, Waves, MoveVertical, Plug, ScanSearch, ShowerHead, Spline, Thermometer, ToggleLeft, Toilet, Unlink, Utensils, Wind, Workflow, Wrench, Zap, Map as MapIcon } from 'lucide-react';
+import type { Icon } from '../../icons';
+import type { Grip, LapinModule, PlaceEntry, RefLine, ToolDef, Vec2 } from '../../platform/module';
+import type { NodeDto } from '../../engine/protocol';
+import { notify, useUi } from '../../app/store';
+import { activeStorey, ensureStorey, execute, useSession } from '../../engine/session';
+import { bypass, onLeg, runNear, squareOff } from './route';
+import { PICKABLE, RUN_CLASSES, endSpec, isNode, isRun, nearerEnd, nearestRun, networkQuery, openPortsQuery, runPoints, systemFor, systemMaterial } from './network';
+import { runSystem, schedule } from './tools';
+import { mepHooks } from './hooks';
+import { setMep, useMep } from './prefs';
+import { LevelCells, RunLevelOptions, endLegs, levelInfo, levelLetters, systemDefaults, trackLegs, type LevelSource } from './DrawLevel';
+import { redrawLegs, runHeights, squared, useDrawLevel, type Level } from './levels';
+import { useLive } from '../../viewport/liveInput';
+import { OpenEndsOverlay } from './openEnds';
+import { usePlaceRole } from './placeRole';
+import { activate, findTool } from '../../platform/modules';
+import { MepSection } from './MepSection';
+import { editSystem, editedSystem, toggleEdit } from './edit';
+import { Background } from './Background';
+import { mainArgs } from './gas';
+import { LengthField } from '../../shell/cells';
+import { ceilingFan, fanDuct, fanRoomCheck, fanSchedule, fanTypes, inlineFan, lightFan, panelFan, wallFan, windowFan } from './fans/tools';
+import { chooseFanType, kindOf as fanKindOf } from './fans/fans';
+import { relatingOf } from '../../engine/model';
+import { FanSection } from './fans/FanSection';
+import { CLASS as FAN_CLASS, TYPE_CLASS as FAN_TYPE, fanGrips, useFanTypesDialog } from './fans/fans';
+import { lazyPart } from '../../platform/lazyPart';
+import { cableTray, carrierSchedule, layInCarrier } from './carriers/tools';
+import { useCarrierPrefs } from './carriers/carriers';
+import { CarrierSection } from './carriers/CarrierSection';
+import { CLASS as CARRIER_CLASS, carrierPoints } from './carriers/carriers';
+import { CoverageOverlay, mepLegend, tagSystem } from './planGraphics';
+
+// Fetched the first time each is opened (platform/lazyPart.tsx).
+const SystemsDialog = lazyPart(() => import('./SystemsDialog').then((m) => m.SystemsDialog), { title: 'Systems' });
+const FanTypesDialog = lazyPart(() => import('./fans/FanTypesDialog').then((m) => m.FanTypesDialog), { title: 'Exhaust fan types' });
+const SymbolSetsDialog = lazyPart(() => import('./SymbolSetsDialog').then((m) => m.SymbolSetsDialog), { title: 'MEP symbols' });
+
+/** A role as its tool places it: its id in the engine's catalogue, the services it takes ("*": any), whether it sits on a run. */
+interface RoleTool { id: string; label: string; icon: Icon; services: string[]; inline?: boolean; shortcut?: string }
+
+/** The categories the Place tool's picker groups the roles in, with the roles of each (what the ribbon's groups were). */
+const CATEGORIES: [string, string[]][] = [
+  ['Heating', ['boiler', 'radiator', 'manifold']],
+  ['Plumbing', ['basin', 'wc', 'sink', 'shower', 'bath', 'waterMeter', 'stack', 'cleanout']],
+  ['Electrical', ['panel', 'outlet', 'light', 'switch']],
+  ['Air', ['fan', 'diffuser', 'grille']],
+  ['Fittings', ['valve', 'rise', 'cap', 'coupling']],
+  ['Gas', ['meterBox', 'regulator', 'gasMeter', 'gasShutoff', 'gasTap', 'flexConnector', 'gasBoiler', 'cooker', 'waterHeater', 'tappingTee']],
+  ['Fuel oil', ['oilTank', 'fillPoint', 'ventCap', 'oilFilter', 'oilBoiler']],
+  ['Fire alarm', ['firePanel', 'smokeDetector', 'heatDetector', 'callPoint', 'sounder', 'sounderBeacon']],
+  ['Fire hydrants', ['fireTank', 'firePump', 'hydrant', 'externalHydrant', 'breechingInlet', 'sprinkler']],
+];
+
+const ROLES: RoleTool[] = [
+  { id: 'boiler', label: 'Boiler', icon: Flame, services: ['heating'], shortcut: 'BO' },
+  { id: 'radiator', label: 'Radiator', icon: Thermometer, services: ['heating'], shortcut: 'RA' },
+  { id: 'manifold', label: 'Manifold', icon: GitFork, services: ['heating'] },
+  { id: 'waterMeter', label: 'Water meter', icon: Gauge, services: ['coldWater'], inline: true },
+  { id: 'basin', label: 'Wash basin', icon: Droplets, services: ['coldWater', 'hotWater', 'drainage'] },
+  { id: 'sink', label: 'Kitchen sink', icon: Utensils, services: ['coldWater', 'hotWater', 'drainage'] },
+  { id: 'wc', label: 'WC', icon: Toilet, services: ['coldWater', 'drainage'] },
+  { id: 'shower', label: 'Shower', icon: ShowerHead, services: ['coldWater', 'hotWater', 'drainage'] },
+  { id: 'bath', label: 'Bath', icon: Bath, services: ['coldWater', 'hotWater', 'drainage'] },
+  { id: 'stack', label: 'Stack', icon: ArrowDownToLine, services: ['drainage'] },
+  { id: 'cleanout', label: 'Cleanout', icon: Wrench, services: ['drainage'], inline: true },
+  { id: 'panel', label: 'Consumer unit', icon: Zap, services: ['electrical'] },
+  { id: 'outlet', label: 'Outlet', icon: Plug, services: ['electrical'] },
+  { id: 'light', label: 'Light fixture', icon: Lightbulb, services: ['electrical'] },
+  { id: 'switch', label: 'Switch', icon: ToggleLeft, services: ['electrical'], inline: true },
+  { id: 'fan', label: 'Fan', icon: Fan, services: ['supplyAir', 'extractAir'] },
+  { id: 'diffuser', label: 'Diffuser', icon: Wind, services: ['supplyAir'] },
+  { id: 'grille', label: 'Extract grille', icon: AirVent, services: ['extractAir'] },
+  { id: 'valve', label: 'Valve', icon: CircleDot, services: ['*'], inline: true },
+  { id: 'rise', label: 'Rise / drop', icon: MoveVertical, services: ['*'] },
+  { id: 'cap', label: 'Cap', icon: Ban, services: ['*'] },
+  // Put by Split element where a run is cut in two (audit §15), or placed on a run by hand.
+  { id: 'coupling', label: 'Coupling', icon: GitMerge, services: ['*'], inline: true },
+  // Gas: a residence's installation, from the meter box to the appliances; the street's tapping tee.
+  { id: 'meterBox', label: 'Meter box', icon: Box, services: ['gas'] },
+  { id: 'regulator', label: 'Gas regulator', icon: Gauge, services: ['gas'], inline: true },
+  { id: 'gasMeter', label: 'Gas meter', icon: Gauge, services: ['gas'], inline: true },
+  { id: 'gasShutoff', label: 'Main gas shut-off valve', icon: ShieldCheck, services: ['gas'], inline: true },
+  { id: 'gasTap', label: 'Appliance gas valve', icon: CircleDot, services: ['gas'], inline: true },
+  { id: 'flexConnector', label: 'Flexible connector', icon: Waypoints, services: ['gas', 'fuelOil'], inline: true },
+  { id: 'gasBoiler', label: 'Gas boiler', icon: Flame, services: ['gas', 'heating'] },
+  { id: 'cooker', label: 'Gas cooker', icon: CookingPot, services: ['gas'] },
+  { id: 'waterHeater', label: 'Gas water heater', icon: Heater, services: ['gas'] },
+  { id: 'tappingTee', label: 'Tapping tee', icon: GitBranchPlus, services: ['gas'], inline: true },
+  // Fuel oil: the tank, its fill point and vent cap, the filter, the oil boiler.
+  { id: 'oilTank', label: 'Fuel oil tank', icon: Cylinder, services: ['fuelOil'] },
+  { id: 'fillPoint', label: 'Fill point', icon: Fuel, services: ['fuelOil'] },
+  { id: 'ventCap', label: 'Vent cap', icon: Wind, services: ['fuelOil'] },
+  { id: 'oilFilter', label: 'Oil filter', icon: Filter, services: ['fuelOil'], inline: true },
+  { id: 'oilBoiler', label: 'Oil boiler', icon: Container, services: ['fuelOil', 'heating'] },
+  // Fire protection (report #89): the detection loop's panel and devices, each placed joining the loop's open end; the hydrants' water.
+  { id: 'firePanel', label: 'Fire alarm control panel', icon: PanelTop, services: ['fireAlarm'] },
+  { id: 'smokeDetector', label: 'Smoke detector', icon: AlarmSmoke, services: ['fireAlarm'], shortcut: 'SD' },
+  { id: 'heatDetector', label: 'Heat detector', icon: ThermometerSun, services: ['fireAlarm'], shortcut: 'HD' },
+  { id: 'callPoint', label: 'Manual call point', icon: Hand, services: ['fireAlarm'], shortcut: 'MC' },
+  { id: 'sounder', label: 'Sounder', icon: BellRing, services: ['fireAlarm'] },
+  { id: 'sounderBeacon', label: 'Sounder beacon', icon: Siren, services: ['fireAlarm'] },
+  { id: 'fireTank', label: 'Fire water reserve', icon: Cylinder, services: ['fireWater'] },
+  { id: 'firePump', label: 'Fire pump set', icon: Cog, services: ['fireWater'] },
+  { id: 'hydrant', label: 'Internal hydrant', icon: FireExtinguisher, services: ['fireWater'], shortcut: 'HY' },
+  { id: 'externalHydrant', label: 'External hydrant', icon: Droplet, services: ['fireWater'] },
+  { id: 'breechingInlet', label: 'Fire brigade inlet', icon: GitMerge, services: ['fireWater'] },
+  { id: 'sprinkler', label: 'Sprinkler', icon: CloudDrizzle, services: ['fireWater'] },
+];
+const role = (id: string) => ROLES.find((r) => r.id === id)!;
+
+/** What a node's placing does at a click, in the system that takes its role; an inline fitting dropped on a run of that system splits it. */
+const placeNode = async (r: RoleTool, p: Vec2, storeyId: string, execute: (command: string, args?: Record<string, unknown>) => Promise<unknown>) => {
+  const systemId = await systemFor(r.services);
+  if (!systemId) return;
+  // An endpoint joins the system's network by a run of its own (an inline fitting sits on a run instead).
+  const args: Record<string, unknown> = { systemId, role: r.id, storeyId, x: p.x, y: p.y, connect: !r.inline };
+  if (r.inline) {
+    const net = (await networkQuery(systemId))?.[0];
+    const on = net ? nearestRun(net.runs, p, 0.3) : null;
+    if (on) args.onRunId = on.id;
+  }
+  await execute('mep.placeNode', args);
+};
+
+/** The category and role to place, in the command line's bar and in Properties while the tool is on. */
+function RolePicker() {
+  const current = usePlaceRole((s) => s.role);
+  return (
+    <span className="cad-layer on">
+      <select value={current} data-testid="mep-role" title="What it places: a heating, plumbing, electrical, air, gas, fuel oil or fire protection fixture, or a fitting" onChange={(e) => usePlaceRole.setState({ role: e.target.value })}>
+        {CATEGORIES.map(([c, ids]) => <optgroup key={c} label={c}>{ids.map((id) => <option key={id} value={id}>{role(id).label}</option>)}</optgroup>)}
+      </select>
+    </span>
+  );
+}
+function PlaceProperties() { return <div className="pad new-element"><label className="field-line"><span className="eyebrow">Place</span><RolePicker /></label></div>; }
+
+/** One tool places every node (S8, audit 2026-11-15; it was one button per role): the role is chosen in the bar, one node at a click. */
+const place: ToolDef = {
+  id: 'mep.place', label: 'Place node', icon: Thermometer,
+  gesture: { kind: 'point' },
+  options: RolePicker,
+  properties: PlaceProperties,
+  complete: async ({ points: [p] }, ctx) => { await placeNode(role(usePlaceRole.getState().role), p, ctx.storeyId, ctx.execute); },
+};
+
+/** A role's old tool: the Place tool, set to that role (the id and the letters stay). */
+const nodeTool = (r: RoleTool): ToolDef => ({
+  id: `mep.node.${r.id}`, label: r.label, icon: r.icon, shortcut: r.shortcut,
+  run: () => { usePlaceRole.setState({ role: r.id }); if (useUi.getState().tool !== place.id) activate(place); },
+});
+const nodeTools = ROLES.map(nodeTool);
+const oldNode = (id: string) => nodeTools.find((t) => t.id === `mep.node.${id}`)!;
+
+/**
+ * Where a run's next point may go: as the material is laid when its rules are known (mep-pro: copper at 45° steps, PVC
+ * turning 45° at most, PEX-AL-PEX freely); without them square to the plan's axes, unless the bar's Ortho is off.
+ */
+const layRun = (systemId: string | null, placed: Vec2[], aimed: Vec2): Vec2 => {
+  const m = systemMaterial(systemId);
+  if (m && mepHooks.ruleText(m.service, m.material) != null) return mepHooks.nextPoint(m.service, m.material, placed, aimed);
+  return useMep.getState().square ? squared(placed, aimed) : aimed;
+};
+
+/** The Run tool's heights: its bar's plane or elevation, kept for the next run when a key changes it. */
+const runLevels: LevelSource = {
+  start: () => { const { plane, elevation } = useMep.getState(); return { plane, elevation }; },
+  defaults: () => systemDefaults(editedSystem() ?? useMep.getState().systemId),
+  sticky: true,
+};
+
+/**
+ * A run along a polyline (Enter or a click on the last point finishes it); an end on an open port or on a run of the system
+ * connects there. Its plane changed while drawing (F, C, W, E) makes it rise or drop at the last point: one run, one undo step.
+ */
+const run: ToolDef = {
+  id: 'mep.run', label: 'Run', icon: Spline, shortcut: 'RN',
+  gesture: {
+    kind: 'polyline',
+    constrain: (placed, aimed) => { trackLegs(placed, runLevels); return layRun(editedSystem() ?? useMep.getState().systemId, placed, aimed); },
+  },
+  options: RunLevelOptions,
+  letters: levelLetters(runLevels),
+  cursorInfo: levelInfo(runLevels),
+  complete: async ({ points }, ctx) => {
+    trackLegs(points, runLevels);
+    const legs = useDrawLevel.getState().legs;
+    endLegs();
+    const systemId = await runSystem();
+    if (!systemId || points.length < 2) return;
+    const start = await endSpec(systemId, points[0]);
+    const end = await endSpec(systemId, points[points.length - 1]);
+    const { pair } = useMep.getState();
+    await ctx.execute('mep.drawRun', {
+      systemId, storeyId: ctx.storeyId, points: points.map((p) => [p.x, p.y]),
+      ...(start ? { start } : {}), ...(end ? { end } : {}), ...(pair != null ? { pair } : {}), ...runHeights(points.length, legs, systemDefaults(systemId)),
+    });
+  },
+};
+
+/** The class fields a run and a node have (one class may hold both: a stack is an IfcPipeSegment). */
+const RUN_FIELDS = ['size', 'height', 'elevation', 'plane', 'pair', 'separation', 'slope', 'material', 'cover', 'warningTape'];
+const NODE_FIELDS = ['role', 'x', 'y', 'rotation', 'elevation', 'width', 'depth', 'height', 'duty', 'toElevation', 'consumption', 'flue', 'placement', 'capacity', 'coverage', 'hoseLength', 'jetLength'];
+
+/** Connect: a run (its end nearer the click), then the node or run it joins. */
+const connect: ToolDef = {
+  id: 'mep.connect', label: 'Connect', icon: Link2, shortcut: 'CN',
+  gesture: { kind: 'pick', types: PICKABLE },
+  complete: async ({ points: [p], entity }) => {
+    const pending = useMep.getState().pending;
+    if (!entity) return;
+    if (!pending) {
+      if (!isRun(entity)) { notify('Pick a run first.'); return; }
+      const end = nearerEnd(entity, p);
+      setMep({ pending: { runId: entity.id, end } });
+      notify(`${entity.name}, ${end}: now pick the node or run it connects to.`);
+      return;
+    }
+    setMep({ pending: null });
+    if (entity.id === pending.runId) return;
+    const to = isRun(entity) ? { runId: entity.id, at: [p.x, p.y] } : { nodeId: entity.id };
+    await execute('mep.connect', { runId: pending.runId, end: pending.end, to });
+  },
+};
+
+/** Disconnect: a run's end nearer the click is freed. */
+const disconnect: ToolDef = {
+  id: 'mep.disconnect', label: 'Disconnect', icon: Unlink,
+  gesture: { kind: 'pick', types: RUN_CLASSES },
+  complete: async ({ points: [p], entity }) => { if (entity && isRun(entity)) await execute('mep.disconnect', { runId: entity.id, end: nearerEnd(entity, p) }); },
+};
+
+/** A system placed whole from a click: its source there, an endpoint beside it, the run between them; then it opens for editing. */
+const newSystem = (service: string, label: string, icon: Icon): ToolDef => ({
+  id: `mep.new.${service}`, label, icon,
+  gesture: { kind: 'point' },
+  complete: async ({ points: [p] }, ctx) => {
+    const r = await ctx.execute('mep.placeSystem', { service, storeyId: ctx.storeyId, x: p.x, y: p.y }) as { id: string; endpointId: string } | null;
+    if (!r?.id) return;
+    useUi.setState({ tool: null });
+    editSystem(r.id);
+    useUi.setState({ selected: [r.endpointId], selection: r.endpointId });
+    notify('Move the source and the endpoint where they go; add endpoints from the inspector (+) or the tools; Done ends the edit.');
+  },
+});
+const newSystems: ToolDef[] = [
+  newSystem('heating', 'Heating', Flame), newSystem('coldWater', 'Water', Droplets), newSystem('hotWater', 'Hot water', Waves),
+  newSystem('drainage', 'Drainage', ArrowDownToLine), newSystem('electrical', 'Electrical', Zap), newSystem('supplyAir', 'Ventilation', Wind),
+  newSystem('gas', 'Gas', Flame), newSystem('fuelOil', 'Fuel oil', Fuel),
+  newSystem('fireAlarm', 'Fire alarm', AlarmSmoke), newSystem('fireWater', 'Fire hydrants', FireExtinguisher),
+];
+const edit: ToolDef = { id: 'mep.edit', label: 'Edit system', icon: SquarePen, shortcut: 'ES', run: () => toggleEdit(useMep.getState().systemId) };
+
+/** A handle on a run: click the run where it goes, then drag it. */
+const addHandle: ToolDef = {
+  id: 'mep.addHandle', label: 'Add handle', icon: Milestone,
+  gesture: { kind: 'pick', types: RUN_CLASSES },
+  complete: async ({ points: [p], entity }) => {
+    if (!entity || !isRun(entity)) return;
+    await execute('mep.addHandle', { runId: entity.id, x: p.x, y: p.y });
+    useUi.setState({ selected: [entity.id], selection: entity.id });
+  },
+};
+
+/** How near a run a click must fall to take it (m). */
+const ON_RUN = 0.3;
+const runAt = (p: Vec2) => runNear(useSession.getState().nodes, useUi.getState().selected, p, ON_RUN);
+
+/**
+ * Detour: a click on a run's leg, a second on the same leg (kept on it), then
+ * the side and distance (square off the leg; the distance can be typed): the
+ * span goes out, along and back round what is in the way.
+ */
+const detour: ToolDef = {
+  id: 'mep.detour', label: 'Detour', icon: Route, shortcut: 'DU',
+  gesture: {
+    kind: 'threePoints',
+    constrain: (placed, aimed) => {
+      const on = runAt(placed[0]);
+      if (!on) return aimed;
+      return placed.length === 1 ? onLeg(on.leg, aimed) : squareOff(on.leg, onLeg(on.leg, placed[1]), aimed);
+    },
+    preview: (placed, aimed) => {
+      const on = runAt(placed[0]);
+      if (!on) return null;
+      if (placed.length === 1) return [onLeg(on.leg, placed[0]), onLeg(on.leg, aimed)];
+      return [on.leg.a, ...bypass(on.leg, placed[0], placed[1], aimed), on.leg.b];
+    },
+  },
+  // Beside the cursor: the height of the run the detour is on.
+  cursorInfo: DetourInfo,
+  complete: async ({ points: [from, to, side] }) => {
+    const on = runAt(from);
+    if (!on) { notify('Start the detour on a run.'); return; }
+    await execute('mep.detour', { id: on.run.id, from: [from.x, from.y], to: [to.x, to.y], side: [side.x, side.y] });
+    useUi.setState({ selected: [on.run.id], selection: on.run.id });
+  },
+};
+
+/** The run a redrawn path is for: the one selected, else the one the path starts on. */
+const redrawTarget = (first: Vec2): NodeDto | null => {
+  const nodes = useSession.getState().nodes;
+  const sel = useUi.getState().selected.map((id) => nodes.get(id)).filter((n): n is NodeDto => !!n && isRun(n));
+  return sel.length === 1 ? sel[0] : runAt(first)?.run ?? null;
+};
+
+/** A run's own height: its elevation, else its plane (null: its system's). */
+const ownLevel = (n: NodeDto): Level => ({
+  plane: n.props.plane === 'floor' || n.props.plane === 'ceiling' || n.props.plane === 'wall' ? n.props.plane : null,
+  elevation: typeof n.props.elevation === 'number' ? n.props.elevation : null,
+});
+const systemOfRun = (n: NodeDto | null | undefined): string | null => (typeof n?.props.systemId === 'string' ? n.props.systemId : null);
+
+/** A redrawn path's heights: the run's own to start with; a key changes them for this path only. */
+const redrawLevels: LevelSource = {
+  start: (first: Vec2) => { const t = redrawTarget(first); return t ? ownLevel(t) : { plane: null, elevation: null }; },
+  defaults: (first: Vec2 | null) => systemDefaults(systemOfRun(first ? redrawTarget(first) : null)),
+};
+
+/** Beside the cursor in a detour: the plane and elevation of the run it goes round on. */
+function DetourInfo() {
+  const base = useLive((s) => s.base);
+  const on = base ? runAt(base) : null;
+  if (!on) return null;
+  return <LevelCells level={ownLevel(on.run)} defaults={systemDefaults(systemOfRun(on.run))} />;
+}
+
+/**
+ * Redraw path: the selected run (or the one the path starts on) takes a new path; its system, size and connections stay,
+ * its ends on their ports. F, C, W, E while drawing change the height of the legs from there on, as the Run tool's do.
+ */
+const redraw: ToolDef = {
+  id: 'mep.redrawRun', label: 'Redraw path', icon: PencilLine, shortcut: 'RP',
+  gesture: {
+    kind: 'polyline',
+    constrain: (placed, aimed) => { trackLegs(placed, redrawLevels); return layRun(systemOfRun(redrawTarget(placed[0])), placed, aimed); },
+  },
+  letters: levelLetters(redrawLevels),
+  cursorInfo: levelInfo(redrawLevels),
+  complete: async ({ points }) => {
+    trackLegs(points, redrawLevels);
+    const legs = useDrawLevel.getState().legs;
+    endLegs();
+    if (points.length < 2) return;
+    const target = redrawTarget(points[0]);
+    if (!target) { notify('Select the run first, or start the path on it.'); return; }
+    // The legs whose height was changed while drawing; the old run's levels (its rises) carried over the others by the engine.
+    const changed = redrawLegs(legs.slice(0, points.length - 1), ownLevel(target), systemDefaults(systemOfRun(target)));
+    await execute('mep.redrawRun', { id: target.id, points: points.map((p) => [p.x, p.y]), ...(changed ? { legs: changed } : {}) });
+    useUi.setState({ selected: [target.id], selection: target.id });
+  },
+};
+
+const systems: ToolDef = { id: 'mep.systems', label: 'Systems…', icon: Workflow, run: () => useUi.setState({ dialog: 'mepSystems' }) };
+/** The symbol set the plans draw with, and the symbol each role draws: Lapin's, or one drawn with Drafting. */
+const symbolSets: ToolDef = { id: 'mep.symbolSets', label: 'MEP symbols…', icon: Shapes, run: () => useUi.setState({ dialog: 'mepSymbols' }) };
+
+/** What is left open in every system: selected, and counted. */
+const openPorts: ToolDef = {
+  id: 'mep.openPorts', label: 'Open ports', icon: ScanSearch,
+  run: () => void openPortsQuery().then((items) => {
+    const ids = [...new Set((items ?? []).map((i) => i.id))];
+    if (ids.length === 0) { notify('No open ports.'); return; }
+    useUi.setState({ selected: ids, selection: ids[0] });
+    notify(`${items!.length} open port(s) on ${ids.length} element(s).`);
+  }),
+};
+
+/** A plan of the MEP discipline for the storey shown, opened in the pane (it lands in the browser's MEP set). */
+const mepPlan: ToolDef = {
+  id: 'mep.plan', label: 'MEP plan', icon: MapIcon,
+  run: () => void ensureStorey().then(async (storeyId) => {
+    if (!storeyId) return;
+    const storey = activeStorey();
+    const r = await execute('view.create', { kind: 'plan', storeyId, discipline: 'MEP', name: `${storey?.name ?? 'Plan'} – MEP` }) as { id: string } | null;
+    if (r?.id) useUi.setState({ view: 'plan', storeyId, planViewId: r.id });
+  }),
+};
+
+/** A gas main's offset to the left of its line and its cover, chosen in the command line's bar while the tool is on. */
+function MainOptions() {
+  const { mainOffset, mainDepth } = useMep();
+  return (
+    <span className="row" data-gas-main-options>
+      <span className="muted small">Offset from the line</span><LengthField metres={mainOffset} onCommit={(v) => { if (v != null) setMep({ mainOffset: v }); }} />
+      <span className="muted small">Depth (cover)</span><LengthField metres={mainDepth} min={0} onCommit={(v) => { if (v != null) setMep({ mainDepth: v }); }} />
+    </span>
+  );
+}
+
+/** A gas main along a road, an alignment, a drafted line or a wall: click it; the main lies at the offset to its left and the cover under the ground. */
+const gasMain: ToolDef = {
+  id: 'mep.gasMain', label: 'Gas main along…', icon: Waypoints, shortcut: 'GM',
+  gesture: { kind: 'pick', types: ['*'] },
+  options: MainOptions,
+  complete: async ({ entity }, ctx) => {
+    if (!entity) return;
+    const { mainOffset, mainDepth } = useMep.getState();
+    const r = await ctx.execute('mep.mainAlong', mainArgs({ alongId: entity.id }, mainOffset, mainDepth, ctx.storeyId)) as { id: string; systemId: string } | null;
+    if (r?.id) { setMep({ systemId: r.systemId }); useUi.setState({ selected: [r.id], selection: r.id }); }
+  },
+};
+
+/** A gas main drawn point by point (Enter finishes), at the cover under the ground. */
+const gasMainDrawn: ToolDef = {
+  id: 'mep.gasMainDrawn', label: 'Gas main', icon: Spline,
+  gesture: { kind: 'polyline' },
+  options: MainOptions,
+  complete: async ({ points }, ctx) => {
+    if (points.length < 2) return;
+    const { mainDepth } = useMep.getState();
+    const r = await ctx.execute('mep.mainAlong', mainArgs({ points }, 0, mainDepth, ctx.storeyId)) as { id: string; systemId: string } | null;
+    if (r?.id) { setMep({ systemId: r.systemId }); useUi.setState({ selected: [r.id], selection: r.id }); }
+  },
+};
+
+/** Service connection: the gas main, then the meter box; a tapping tee, the service pipe at its cover, the riser into the box. */
+const serviceConnection: ToolDef = {
+  id: 'mep.serviceConnection', label: 'Service connection', icon: GitBranchPlus, shortcut: 'GS',
+  gesture: { kind: 'pick', types: PICKABLE },
+  complete: async ({ points: [p], entity }) => {
+    if (!entity) return;
+    const main = useMep.getState().pendingMain;
+    if (!main) {
+      if (!isRun(entity)) { notify('Pick the gas main first.'); return; }
+      setMep({ pendingMain: entity.id });
+      notify('Now pick the meter box.');
+      return;
+    }
+    setMep({ pendingMain: null });
+    if (!isNode(entity)) { notify('Pick the meter box.'); return; }
+    const r = await execute('mep.serviceConnection', { mainId: main, toNodeId: entity.id, at: [p.x, p.y] }) as { id: string } | null;
+    if (r?.id) useUi.setState({ selected: [r.id], selection: r.id });
+  },
+};
+
+const gasSchedule = schedule('mep.scheduleGas', 'Gas and fuel oil bill of materials', 'mep-gas');
+const fireSchedule = schedule('mep.scheduleFire', 'Fire protection bill of materials', 'mep-fire');
+
+/** The fire detection loop closed back to its panel's return: the system being edited or the current one when it is a fire alarm, else the only one. */
+const closeLoop: ToolDef = {
+  id: 'mep.closeLoop', label: 'Close the loop', icon: RefreshCw,
+  run: () => {
+    const nodes = useSession.getState().nodes;
+    const fire = [...nodes.values()].filter((n) => n.type === 'IfcDistributionSystem' && n.props.service === 'fireAlarm');
+    const pick = [editedSystem(), useMep.getState().systemId].find((id) => id && fire.some((s) => s.id === id)) ?? (fire.length === 1 ? fire[0].id : null);
+    if (!pick) { notify(fire.length ? 'Edit the fire alarm system whose loop to close (Edit system).' : 'Make a fire alarm system first (New system → Fire alarm).'); return; }
+    void execute('mep.closeLoop', { systemId: pick }).then((r) => { if (r) notify('The loop is closed back to the panel.'); });
+  },
+};
+const equipmentSchedule = schedule('mep.scheduleEquipment', 'Equipment list', 'mep-equipment');
+const runSchedule = schedule('mep.scheduleRuns', 'Run list', 'mep-runs');
+
+/** A node: its point to move, a handle 0.6 m out along its rotation to turn it. */
+function nodeGrips(node: NodeDto): Grip[] {
+  const at: Vec2 = { x: Number(node.props.x ?? 0), y: Number(node.props.y ?? 0) };
+  const rotation = Number(node.props.rotation ?? 0);
+  const rad = (rotation * Math.PI) / 180;
+  const handle = { x: at.x + Math.cos(rad) * 0.6, y: at.y + Math.sin(rad) * 0.6 };
+  return [
+    { key: 'at', kind: 'move', at, step: (p) => ({ command: 'element.transform', args: { ids: [node.id], op: 'move', by: [p.x - at.x, p.y - at.y] } }) },
+    { key: 'rotate', kind: 'rotate', at: handle, step: (p) => ({ command: 'element.transform', args: { ids: [node.id], op: 'rotate', center: [at.x, at.y], angle: Math.round(((Math.atan2(p.y - at.y, p.x - at.x) * 180) / Math.PI - rotation) * 100) / 100 } }) },
+  ];
+}
+
+/** A run: its vertices to drag (Ctrl-click takes one out), its legs' middles to slide a leg (Ctrl-click adds a vertex there). */
+function runGrips(node: NodeDto): Grip[] {
+  const pts = runPoints(node);
+  const save = (next: Vec2[]) => ({ command: 'mep.setRunPoints', args: { id: node.id, points: next.map((q) => [q.x, q.y]) } });
+  const grips: Grip[] = pts.map((q, i) => ({
+    key: `v${i}`, kind: 'vertex', at: q, title: 'Drag the handle · Ctrl-click takes it out',
+    step: (p) => save(pts.map((x, k) => (k === i ? p : x))),
+    remove: pts.length > 2 ? () => save(pts.filter((_, k) => k !== i)) : undefined,
+  }));
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const a = pts[i], b = pts[i + 1];
+    const mid = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+    grips.push({
+      key: `e${i}`, kind: 'edgeMid', at: mid, title: 'Drag: slide the leg · Ctrl-click adds a handle here',
+      // Slid square to itself (the engine keeps the drag's part across the leg); a jog where it meets an end or a leg in line.
+      step: (p) => ({ command: 'mep.slideLeg', args: { id: node.id, leg: i, by: [p.x - mid.x, p.y - mid.y] } }),
+      insert: () => save([...pts.slice(0, i + 1), mid, ...pts.slice(i + 1)]),
+    });
+  }
+  return grips;
+}
+
+/** A cable carrier: its vertices to drag (Ctrl-click takes one out), a vertex added at a leg's middle; laid again at 45° steps. */
+function carrierGrips(node: NodeDto): Grip[] {
+  const pts = carrierPoints(node);
+  const save = (next: Vec2[]) => ({ command: 'mep.setCarrierPoints', args: { id: node.id, points: next.map((q) => [q.x, q.y]) } });
+  const grips: Grip[] = pts.map((q, i) => ({
+    key: `v${i}`, kind: 'vertex', at: q, title: 'Drag the handle · Ctrl-click takes it out',
+    step: (p) => save(pts.map((x, k) => (k === i ? p : x))),
+    remove: pts.length > 2 ? () => save(pts.filter((_, k) => k !== i)) : undefined,
+  }));
+  for (let i = 0; i + 1 < pts.length; i++) {
+    const mid = { x: (pts[i].x + pts[i + 1].x) / 2, y: (pts[i].y + pts[i + 1].y) / 2 };
+    grips.push({ key: `e${i}`, kind: 'edgeMid', at: mid, title: 'Ctrl-click adds a handle here', step: () => save(pts), insert: () => save([...pts.slice(0, i + 1), mid, ...pts.slice(i + 1)]) });
+  }
+  return grips;
+}
+
+const grips = (n: NodeDto): Grip[] => (isRun(n) ? runGrips(n) : isNode(n) ? nodeGrips(n) : []);
+const references = (n: NodeDto): RefLine[] => (isRun(n) ? [{ points: runPoints(n), closed: false, kind: 'axis' }] : []);
+const byClass = <T,>(f: (n: NodeDto) => T): Record<string, (n: NodeDto) => T> => Object.fromEntries(PICKABLE.map((c) => [c, f]));
+
+/** The Place catalogue's MEP equipment (S15): every role the Place node tool puts down, by its category. */
+function useMepEntries(): PlaceEntry[] {
+  return CATEGORIES.flatMap(([category, ids]) => ids.map((id) => ROLES.find((r) => r.id === id)).filter((r): r is RoleTool => !!r).map((r): PlaceEntry => ({
+    key: `mep:${r.id}`, name: r.label, group: category, thumb: <r.icon size={26} strokeWidth={1.3} />,
+    place: () => { usePlaceRole.setState({ role: r.id }); if (useUi.getState().tool !== place.id) activate(place); },
+  })));
+}
+
+const mep: LapinModule = {
+  id: 'mep',
+  name: 'MEP',
+  summary: 'Heating, water, drainage, ventilation, electrical, gas and fire protection systems drawn as schematics on the plan.',
+  tabs: [{
+    id: 'mep', label: 'MEP', order: 45, include: ['modify'],
+    // Fewer groups than the tools (audit S14): the tools used most stay buttons, the rest gathered under pulldowns; each keeps
+    // its id, letters and place in My tools.
+    groups: [
+      {
+        label: 'System',
+        tools: [pulldownTool('mep.more.newSystem', 'New system', Workflow, newSystems), edit],
+        small: [systems, symbolSets, mepPlan, openPorts, tagSystem, mepLegend,
+          pulldownTool('mep.more.schedules', 'Schedules', ListOrdered, [equipmentSchedule, runSchedule, gasSchedule, fireSchedule, carrierSchedule, fanSchedule, fanRoomCheck])],
+      },
+      {
+        label: 'Runs',
+        tools: [run, place],
+        small: [connect, disconnect, addHandle, detour, redraw,
+          // The fire alarm's loop, and what runs in the street to the building (gas mains, the service connection).
+          closeLoop, pulldownTool('mep.more.street', 'Street', Route, [gasMain, gasMainDrawn, serviceConnection])],
+      },
+      // Cable trays, ladders, trunking and conduit (report #147); exhaust fans and ventilators (report #55), configured by type.
+      {
+        label: 'Carriers and fans',
+        tools: [cableTray, pulldownTool('mep.more.fans', 'Fans', Fan, [wallFan, ceilingFan, inlineFan, windowFan, lightFan, panelFan])],
+        small: [layInCarrier, fanDuct, fanTypes],
+      },
+    ],
+  }],
+  // The old tool of each role (Radiator, Valve…): the Place tool set to it, off the ribbon; their ids and letters work as before.
+  legacyTools: nodeTools,
+  placeSources: [{ id: 'mep', label: 'MEP equipment', order: 60, useEntries: useMepEntries }],
+  hotbar: [run, oldNode('radiator'), oldNode('valve')],
+  propertySections: [
+    { id: 'mep', label: 'MEP', classes: PICKABLE, component: MepSection, fieldKeys: (n) => (isRun(n) ? RUN_FIELDS : isNode(n) ? NODE_FIELDS : null) },
+    { id: 'fan', label: 'Exhaust fan', classes: [FAN_CLASS], component: FanSection },
+    { id: 'carrier', label: 'Cable carrier', classes: [CARRIER_CLASS], component: CarrierSection },
+  ],
+  dialogs: { mepSystems: SystemsDialog, fanTypes: FanTypesDialog, mepSymbols: SymbolSetsDialog },
+  background: Background,
+  // The selected devices' coverage circles, where the plan or the system draws them on the selected only (the default),
+  // and every open end of the system being edited (and in an MEP plan), a red mark on the screen only (openEnds.tsx).
+  planOverlays: [CoverageOverlay, OpenEndsOverlay],
+  grips: { ...byClass(grips), [FAN_CLASS]: fanGrips, [CARRIER_CLASS]: carrierGrips },
+  // Create similar: a node by its role (its classes are many), a run on its system, a fan of its kind and type, a carrier of its type.
+  similarFor: (n) => {
+    if (n.type === FAN_CLASS) {
+      const type = relatingOf(useSession.getState(), n.id, 'IfcRelDefinesByType') ?? undefined;
+      const tool = findTool(`mep.fan.${fanKindOf(type)}`);
+      if (!tool) return null;
+      return () => { if (type) chooseFanType(fanKindOf(type), type.id); activate(tool); };
+    }
+    if (n.type === CARRIER_CLASS) {
+      const type = relatingOf(useSession.getState(), n.id, 'IfcRelDefinesByType') ?? undefined;
+      return () => { if (type) useCarrierPrefs.setState({ type: type.id }); activate(cableTray); };
+    }
+    if (isRun(n)) return () => { setMep({ systemId: n.props.systemId as string }); if (useUi.getState().tool !== run.id) activate(run); };
+    const r = typeof n.props.role === 'string' ? ROLES.find((x) => x.id === n.props.role) : undefined;
+    if (!r) return null;
+    return () => { usePlaceRole.setState({ role: r.id }); if (useUi.getState().tool !== place.id) activate(place); };
+  },
+  editType: { [FAN_TYPE]: (id) => { useFanTypesDialog.setState({ typeId: id }); useUi.setState({ dialog: 'fanTypes' }); } },
+  setType: { [FAN_CLASS]: (ids, typeId) => execute('mep.setFanType', { ids, typeId }) },
+  references: { ...byClass(references), [CARRIER_CLASS]: (n: NodeDto): RefLine[] => [{ points: carrierPoints(n), closed: false, kind: 'axis' }] },
+};
+
+export default mep;

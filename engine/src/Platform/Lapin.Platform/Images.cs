@@ -1,0 +1,95 @@
+using System.Text.Json.Nodes;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// Images the user brings into the project (a material's own texture): each a
+/// resource of its own (<see cref="Class"/>) holding the file as it came, PNG
+/// or JPEG, base64, its name and MIME type. Kept in the project like any other
+/// entity: saved in the .lapin, undone, versioned. A material refers to one
+/// by <c>textureImage</c> and lays it on <c>textureSize</c> metres (width,
+/// height); an image no material uses any more goes with the change that let
+/// it go.
+/// </summary>
+public static class Images
+{
+    public const string Class = "LapinImage";
+    public const int MaxBytes = 8 * 1024 * 1024;
+    public static readonly string[] Mimes = ["image/png", "image/jpeg"];
+
+    public static void Register(IModuleRegistry r)
+    {
+        r.Class(new(Class, "Image", [new("mime", "Type", "text", ReadOnly: true)], "#888888", Kind: "resource"));
+
+        // An image file as base64 (PNG or JPEG, what its bytes say it is), at most 8 MB.
+        r.Command("image.add", "Import image", (ctx, a) =>
+        {
+            var mime = (string?)a["mime"] ?? "";
+            var data = Checked(mime, (string?)a["data"]);
+            var name = ((string?)a["name"])?.Trim() is { Length: > 0 } n ? n : "Image";
+            var image = new Entity(ctx.NewId(), Class, name, new JsonObject { ["mime"] = mime, ["data"] = data });
+            ctx.Add(image);
+            return new JsonObject { ["id"] = image.Id };
+        });
+    }
+
+    /// <summary>What an image's first bytes say it is: PNG, JPEG, or neither.</summary>
+    public static string? Sniff(byte[] b) =>
+        b.Length > 8 && b[0] == 0x89 && b[1] == 0x50 && b[2] == 0x4E && b[3] == 0x47 ? "image/png"
+        : b.Length > 3 && b[0] == 0xFF && b[1] == 0xD8 && b[2] == 0xFF ? "image/jpeg"
+        : null;
+
+    /// <summary>
+    /// The attributes a material names its images by: its own texture (<c>textureImage</c>), its normal map (<c>normalImage</c>),
+    /// its bump map (<c>bumpImage</c>, a height image: white high), its roughness map (<c>roughnessImage</c>, white rough) and its
+    /// ambient occlusion map (<c>aoImage</c>, white open), all laid on at its <c>textureSize</c> and turned by its <c>textureRotation</c>
+    /// (docs/plan-render.md, S1).
+    /// </summary>
+    public static readonly string[] MaterialKeys = ["textureImage", "normalImage", "bumpImage", "roughnessImage", "aoImage"];
+
+    /// <summary>
+    /// A material's maps by what they are for, as a texture set gives them (<c>material.textures</c>) and IFC's textures name them:
+    /// colour, normal, bump (height), roughness, occlusion; each with the material attribute that holds it.
+    /// </summary>
+    public static readonly (string Map, string Key)[] MapKeys =
+        [("color", "textureImage"), ("normal", "normalImage"), ("bump", "bumpImage"), ("roughness", "roughnessImage"), ("ao", "aoImage")];
+
+    /// <summary>The image already in the project with these bytes and type (a set chosen twice shares its images), or null.</summary>
+    public static Entity? Same(IModelView m, string mime, string data) =>
+        m.Entities.FirstOrDefault(e => e.Class == Class && e.Str("mime") == mime && e.Str("data") == data);
+
+    /// <summary>An image file checked as image.add checks it (PNG or JPEG, what its bytes say, at most 8 MB): its bytes as base64.</summary>
+    public static string Checked(string? mime, string? data)
+    {
+        if (mime is null || !Mimes.Contains(mime)) throw new CommandException("An image is a PNG or a JPEG.");
+        byte[] bytes;
+        try { bytes = Convert.FromBase64String(data ?? ""); }
+        catch (FormatException) { throw new CommandException("The image's data is not base64."); }
+        if (bytes.Length == 0 || bytes.Length > MaxBytes) throw new CommandException($"An image is at most {MaxBytes / 1024 / 1024} MB.");
+        if (Sniff(bytes) != mime) throw new CommandException($"The file is not a {(mime == "image/png" ? "PNG" : "JPEG")} image.");
+        return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>A material's own image (or, by <paramref name="key"/>, its normal or bump map), or null.</summary>
+    public static Entity? Of(IModelView m, Entity material, string key = "textureImage") =>
+        material.Str(key) is { } id && m.Get(id) is { Class: Class } image ? image : null;
+
+    /// <summary>How large a material's image lies on the model, metres (width, height); 1 × 1 when unset.</summary>
+    public static double[] SizeOf(Entity material) =>
+        material.Attrs["textureSize"] is JsonArray { Count: 2 } s && Json.Number(s[0]) is { } w && Json.Number(s[1]) is { } h && w > 0 && h > 0 ? [w, h] : [1.0, 1.0];
+
+    /// <summary>The file's bytes.</summary>
+    public static byte[] Bytes(Entity image) => Convert.FromBase64String(image.Str("data") ?? "");
+
+    /// <summary>The attributes an entity names an image by: a material's maps (<see cref="MaterialKeys"/>), an orthophoto's or an entourage kind's <c>image</c>.</summary>
+    static readonly string[] Uses = [.. MaterialKeys, "image"];
+
+    /// <summary>Removes the image when nothing refers to it (but <paramref name="except"/>, the one changing): no material, orthophoto or entourage kind.</summary>
+    public static void DropIfUnused(ICommandContext ctx, string? imageId, string except)
+    {
+        if (imageId == null || ctx.Model.Get(imageId) is not { Class: Class }) return;
+        if (ctx.Model.Entities.Any(e => e.Id != except && e.Class != Class && Uses.Any(k => e.Str(k) == imageId))) return;
+        ctx.Remove(imageId);
+    }
+}

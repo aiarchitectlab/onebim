@@ -1,0 +1,213 @@
+/**
+ * The connection to the local Lapin engine: request/response over one
+ * WebSocket, plus the diffs the engine pushes after every change. Calls go
+ * out as JSON text; everything comes back as binary frames (frame.ts).
+ * Reconnects by itself: the engine may still be starting when the window opens.
+ * A question that gets no answer in time fails, so a stalled engine never
+ * leaves the interface hanging on a promise; an edit (doc.execute, undo,
+ * redo) is waited for as long as the connection lives, since the engine
+ * finishes it anyway and a retry would make it twice: past the usual wait it
+ * is said to be slow (onSlow), and a dropped connection fails it.
+ */
+
+import { decodeFrame } from './frame';
+import type { Diff } from './protocol';
+
+interface Message { id?: number; result?: unknown; error?: string | null; event?: string; data?: unknown }
+
+export interface CallOptions {
+  /**
+   * How long to wait for the answer, ms. Default 30 s; long work (opening, saving, exporting) passes more. null: as
+   * long as the connection lives, said to be slow (onSlow) past the default wait. An edit (EDIT_METHODS) is always
+   * waited for: its timeout only says when it is slow.
+   */
+  timeoutMs?: number | null;
+}
+
+/** One who hears each call as it is sent (EngineClient.onCall): what it gives back is told the call's answer. */
+export type CallListener = (method: string, params: Record<string, unknown>) => ((outcome: { result?: unknown; error?: Error }) => void) | void;
+
+/** The default wait for an answer; a stall beyond it is reported, not sat out. */
+export const DEFAULT_TIMEOUT_MS = 30_000;
+/** The calls that change the model: never given up on while the engine is connected (it finishes them whatever we do). */
+export const EDIT_METHODS: ReadonlySet<string> = new Set(['doc.execute', 'doc.undo', 'doc.redo']);
+/** Opening, saving, importing and exporting may legitimately take long. */
+export const LONG_TIMEOUT_MS = 10 * 60_000;
+
+/** An open connection to the engine: messages go out as JSON text. */
+export interface EngineLink { send(text: string): void; close(): void }
+
+/**
+ * How the interface reaches the engine: the local engine over a WebSocket
+ * (the desktop app and pnpm dev), or the engine in a Web Worker (the web
+ * build). Frames come back to `onMessage`; `onClose` when the link drops.
+ */
+export interface EngineTransport {
+  /** Calls `onOpen` as soon as the link is up (before the promise settles), then resolves. */
+  connect(handlers: { onOpen(link: EngineLink): void; onMessage(data: ArrayBuffer | string): void; onClose(): void }): Promise<void>;
+  /** False: one failed start is final (an engine in a worker that would not load will not load the next time either). */
+  readonly retries?: boolean;
+  /** What the user reads for an error the engine answered with, when the transport knows better (a lazy part that could not be fetched). */
+  explain?(error: string): string;
+}
+
+/** The local engine, over a WebSocket at the URL given (resolved at each connection: the engine may move ports). */
+export function webSocketTransport(resolveUrl: () => Promise<string>): EngineTransport {
+  return {
+    connect: ({ onOpen, onMessage, onClose }) => resolveUrl().then((url) => new Promise<void>((resolve, reject) => {
+      const ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+      let open = false;
+      ws.onopen = () => { open = true; onOpen({ send: (t) => ws.send(t), close: () => ws.close() }); resolve(); };
+      ws.onerror = () => { if (!open) reject(new Error('engine unreachable')); };
+      ws.onclose = () => { if (open) onClose(); else reject(new Error('engine unreachable')); };
+      ws.onmessage = (ev) => onMessage(ev.data as ArrayBuffer | string);
+    })),
+  };
+}
+
+export class EngineClient {
+  private link: EngineLink | null = null;
+  private seq = 0;
+  private pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void; timer: ReturnType<typeof setTimeout>; done?: () => void }>();
+  private slowListeners = new Set<(method: string, slow: boolean, params: Record<string, unknown>) => void>();
+  private diffListeners = new Set<(d: Diff) => void>();
+  private eventListeners = new Map<string, Set<(data: unknown) => void>>();
+  private statusListeners = new Set<(connected: boolean) => void>();
+  private callListeners = new Set<CallListener>();
+  private closed = false;
+  private readonly transport: EngineTransport;
+
+  /** By the engine's WebSocket URL (resolved at each connection), or by a transport of its own (the engine in a worker). */
+  constructor(source: (() => Promise<string>) | EngineTransport, private readonly retryMs = 700) {
+    this.transport = typeof source === 'function' ? webSocketTransport(source) : source;
+  }
+
+  /** Whether a lost or failed connection is tried again (false: the engine in a worker). */
+  get retries(): boolean { return this.transport.retries !== false; }
+
+  async start(): Promise<void> {
+    this.closed = false;
+    while (!this.closed) {
+      try {
+        await this.open();
+        return;
+      } catch (e) {
+        if (this.transport.retries === false) { this.statusListeners.forEach((l) => l(false)); throw e; }
+        await new Promise((r) => setTimeout(r, this.retryMs));
+      }
+    }
+  }
+
+  private async open(): Promise<void> {
+    let link: EngineLink | null = null;
+    await this.transport.connect({
+      onOpen: (l) => { link = l; this.link = l; this.statusListeners.forEach((s) => s(true)); },
+      onMessage: (data) => this.receive(data instanceof ArrayBuffer ? decodeFrame<Message>(data) : JSON.parse(String(data)) as Message),
+      onClose: () => {
+        if (this.link !== link) return;
+        this.link = null;
+        this.failAll(new Error('The connection to the engine closed.'));
+        this.statusListeners.forEach((l) => l(false));
+        if (!this.closed && this.transport.retries !== false) setTimeout(() => void this.start(), this.retryMs);
+      },
+    });
+  }
+
+  private failAll(error: Error): void {
+    const all = [...this.pending.values()];
+    this.pending.clear();
+    for (const p of all) { clearTimeout(p.timer); p.done?.(); p.reject(error); }
+  }
+
+  private receive(msg: Message): void {
+    if (msg.event === 'diff') { this.diffListeners.forEach((l) => l(msg.data as Diff)); return; }
+    if (msg.event) { this.eventListeners.get(msg.event)?.forEach((l) => l(msg.data)); return; }
+    if (typeof msg.id !== 'number') return;
+    const p = this.pending.get(msg.id);
+    if (!p) return;
+    this.pending.delete(msg.id);
+    clearTimeout(p.timer);
+    p.done?.();
+    if (msg.error) p.reject(new Error(this.transport.explain?.(msg.error) ?? msg.error)); else p.resolve(msg.result);
+  }
+
+  /**
+   * Every call this client makes, heard as it goes (the Script panel's recorder, decision 489: every tool's edit passes
+   * here): the listener is told the method and its params as the call is sent, and may give back what to tell when it
+   * is answered (its result, or why it failed). Returns what removes it.
+   */
+  onCall(l: CallListener): () => void { this.callListeners.add(l); return () => this.callListeners.delete(l); }
+
+  call<T = unknown>(method: string, params: Record<string, unknown> = {}, options: CallOptions = {}): Promise<T> {
+    if (this.callListeners.size === 0) return this.send<T>(method, params, options);
+    const ends: ((o: { result?: unknown; error?: Error }) => void)[] = [];
+    for (const l of this.callListeners) { try { const end = l(method, params); if (end) ends.push(end); } catch { /* a listener's fault is its own */ } }
+    const p = this.send<T>(method, params, options);
+    if (ends.length) p.then((result) => ends.forEach((e) => { try { e({ result }); } catch { /* its own */ } }), (error: Error) => ends.forEach((e) => { try { e({ error }); } catch { /* its own */ } }));
+    return p;
+  }
+
+  private send<T>(method: string, params: Record<string, unknown>, options: CallOptions): Promise<T> {
+    const link = this.link;
+    if (!link) return Promise.reject(new Error('The engine is not connected.'));
+    const id = ++this.seq;
+    const edit = EDIT_METHODS.has(method);
+    const timeoutMs = options.timeoutMs === undefined ? DEFAULT_TIMEOUT_MS : options.timeoutMs;
+    return new Promise<T>((resolve, reject) => {
+      let done: (() => void) | undefined;
+      let timer: ReturnType<typeof setTimeout>;
+      if (edit || timeoutMs === null) {
+        // Waited for while connected; past the usual wait, said to be slow (and said again when it lands).
+        timer = setTimeout(() => {
+          if (!this.pending.has(id)) return;
+          done = () => this.slowListeners.forEach((l) => l(method, false, params));
+          this.pending.get(id)!.done = done;
+          this.slowListeners.forEach((l) => l(method, true, params));
+        }, timeoutMs ?? DEFAULT_TIMEOUT_MS);
+      } else {
+        timer = setTimeout(() => {
+          if (!this.pending.delete(id)) return;
+          // A question says which (doc.query plan.drawing), so the message tells what the engine was asked (app report #187).
+          const what = typeof params.name === 'string' ? `${method} (${params.name})` : method;
+          reject(new Error(`The engine did not answer ${what} within ${Math.round(timeoutMs / 1000)} s.`));
+        }, timeoutMs);
+      }
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject, timer, done });
+      link.send(JSON.stringify({ id, method, params }));
+    });
+  }
+
+  /** A call waited for without a limit (an edit) that passed the usual wait (slow true), then landed or failed (false); with its params, to name it. */
+  onSlow(l: (method: string, slow: boolean, params: Record<string, unknown>) => void): () => void { this.slowListeners.add(l); return () => this.slowListeners.delete(l); }
+
+  /** A call that wants no answer (presence): sent if connected, else dropped. */
+  notify(method: string, params: Record<string, unknown> = {}): void {
+    this.link?.send(JSON.stringify({ method, params }));
+  }
+
+  /** The engine's other events (presence, the sharing's state, a shared session ended). */
+  onEvent(name: string, l: (data: unknown) => void): () => void {
+    let set = this.eventListeners.get(name);
+    if (!set) this.eventListeners.set(name, set = new Set());
+    set.add(l);
+    return () => set!.delete(l);
+  }
+
+  /** How many calls are waiting for an answer. */
+  get waiting(): number { return this.pending.size; }
+
+  onDiff(l: (d: Diff) => void): () => void { this.diffListeners.add(l); return () => this.diffListeners.delete(l); }
+  onStatus(l: (c: boolean) => void): () => void { this.statusListeners.add(l); return () => this.statusListeners.delete(l); }
+  stop(): void { this.closed = true; this.link?.close(); }
+}
+
+/** Inside the desktop app the shell knows the engine's port; in a browser (pnpm dev) it is the dev port. */
+export async function engineUrl(): Promise<string> {
+  const w = window as unknown as { __TAURI_INTERNALS__?: unknown };
+  if (w.__TAURI_INTERNALS__) {
+    const { invoke } = await import('@tauri-apps/api/core');
+    return await invoke<string>('engine_url');
+  }
+  return (import.meta.env.VITE_ENGINE_URL as string | undefined) ?? 'ws://127.0.0.1:47810/ws';
+}

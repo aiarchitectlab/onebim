@@ -1,0 +1,130 @@
+---
+title: Piese
+order: 87
+summary: Editează pe loc un solid Studio sau o piesă plasată cu Tab — restul modelului se estompează, iar arborele piesei arată originea, schițele, pașii și parametrii.
+---
+
+## Ce este o piesă
+
+O **piesă** este un solid Studio cu o definiție în spate: un solid schițat cu pașii lui, sau un obiect propriu ale cărui corpuri urmează **parametri** (ceea ce era înainte o familie). Piesa se plasează de câte ori ai nevoie, iar fiecare obiect își păstrează propriile valori ale parametrilor.
+
+**Familiile sunt acum piese.** Un proiect salvat cu familii se deschide cu aceleași obiecte ca piese, cu aceleași nume, valori și identificatori; colțurile lor sunt schițe proprii ale piesei. **Studio → Piese…** le gestionează (pagina Familii o descrie), iar uneltele vechi funcționează în continuare.
+
+## Editarea unei piese
+
+Selectează în 3D un solid Studio sau o piesă plasată, apoi fă una dintre acestea:
+
+- apasă **Tab**;
+- dă **dublu clic** pe piesă în 3D;
+- apasă **Editează piesa** în **Studio → Părți**, sau în secțiunea **Piesă** din Proprietăți.
+
+Piesa intră atunci în **modul de editare**. Restul modelului se estompează și nu poate fi selectat, dar rămâne acolo ca să te prinzi de el. Piesa se desenează ca de obicei, iar bara de deasupra vederii spune ce editezi.
+
+![Masa în model, selectată](shots/studio-part-model.webp)
+
+![Masa în modul de editare: modelul estompat, planul din față al originii afișat, arborele piesei în stânga](shots/studio-part-edit.webp)
+
+Ca să ieși, apasă din nou **Tab** sau **Esc**, ori **Termină piesa** în arbore. Ieșirea nu este un pas de anulare; fiecare modificare făcută înăuntru este un pas de anulare, ca peste tot în Lapin.
+
+Tab nu face nimic special cât timp un câmp de text are focusul, cât timp e deschis un dialog sau cât timp rulează o unealtă: atunci strânge panourile ca înainte.
+
+## Arborele piesei
+
+Panoul din stânga vederii arată din ce e făcută piesa și se citește din nou după fiecare modificare.
+
+![Arborele piesei: origine, schițe, pași și parametri](shots/studio-part-tree.webp)
+
+- **Origine** are cele trei planuri ale piesei: sus (xy), față (xz) și dreapta (yz). Du cursorul pe unul ca să-l vezi în 3D, sau dă clic pe el ca să rămână afișat; încă un clic îl ascunde.
+- **Schițe** listează schițele piesei. O schiță a unui solid (extrudare, baleiere, revoluție, loft) se deschide pe vederea ei, ca la **Editează schița**; fiindcă schița trăiește pe vederea ei, modul de editare se încheie când o deschizi. O piesă făcută din corpuri se deschide în editorul ei, cu piesa aleasă.
+- **Pași** listează din ce e făcută piesa, în ordine: operația ei sau corpurile, apoi pașii făcuți asupra ei (împinge/trage, racordare, golire, împărțire…). Un pas oprit apare cenușiu; un corp făcut doar când se îndeplinește o condiție o arată (*oprit când nu HasShelf*). La pașii făcuți asupra piesei, butoanele pornesc sau opresc pasul, îl mută mai devreme sau mai târziu ori îl scot. Un clic pe numele unui pas arată piesa în Proprietăți, unde se editează numerele lui.
+- **Parametri** listează fiecare parametru cu valoarea, unitatea și valoarea implicită, și dacă ține de fiecare obiect (*instanță*) și este *publicat*. Scrie o valoare nouă și apasă Enter: obiectul piesei o urmează. Un parametru diferit de cel implicit apare îngroșat; unul derivat își arată formula. **Parametri…** deschide tabelul întreg (secțiunea următoare).
+
+## Tabelul de parametri
+
+**Parametri…** în arbore deschide lângă el un tabel mai lat, unde parametrii se fac și se pun la punct. Rândurile sunt grupate după *grup*, și fiecare are:
+
+- **Nume**: eticheta și, lângă ea, cheia folosită în formule.
+- **Valoare sau formulă**: valoarea proprie a piesei, de la care pornește fiecare obiect. Scrie o valoare (o lungime în unitatea proiectului sau cu a ei: `1600`, `1.6m`) sau `=` și o formulă din ceilalți parametri (`=W / 2`): parametrul devine **derivat**, valoarea lui se calculează la fiecare cerere și nu se păstrează. O valoare scrisă peste o formulă o ia pe aceasta.
+- **Acest obiect**: valoarea proprie a obiectului, pentru un parametru de *instanță*. Un parametru de *tip* arată doar valoarea implicită, aceeași pentru fiecare obiect, iar unul derivat arată `= valoare`, cu formula la trecerea mouse-ului.
+- **Inst.**: instanță (fiecare obiect poate avea valoarea lui) sau tip (valoarea piesei pentru toate). Dacă schimbi un parametru de instanță în tip, valorile proprii ale obiectelor se pierd, iar tabelul o spune.
+- **Publ.**: publicat, adică apare în Proprietățile obiectului din model. Un parametru nepublicat rămâne treaba internă a piesei.
+- **⋯**: meniul rândului deschide restul: cheia (redenumirea ei o redenumește și în formule), eticheta, descrierea, grupul, minimul și maximul, felul și unitatea, **Mută în sus**, **Mută în jos** și **Șterge**. Motorul refuză **Șterge** cât timp o formulă sau o cotă de schiță încă folosește parametrul, și spune unde, sub rând.
+
+**+ Parametru** adaugă unul din felul ales alături: lungime, număr, unghi, da/nu, text sau număr întreg. Fiecare schimbare este un pas de anulare.
+
+![Tabelul de parametri: grupe, un parametru derivat cu formula lui, tip și instanță, publicat](shots/studio-part-params.webp)
+
+## Flex
+
+**Flex** (comutatorul din tabel) te lasă să încerci valori fără să schimbi piesa. Cât timp e pornit, schimbarea unei valori cere motorului doar o **previzualizare**: piesa cu acele valori se desenează ca o **fantomă** punctată peste piesă în 3D, iar **volumul** ei apare sub tabel. O valoare care nu dă o piesă (o adâncime nepozitivă, o formulă care eșuează) arată motivul motorului în locul fantomei. Un parametru de instanță flexează în **Acest obiect**, unul de tip în celula valorii lui implicite.
+
+**Păstrează** aplică valorile încercate: o valoare de instanță obiectului acesta, valoarea unui parametru de tip ca noua valoare implicită a piesei, totul într-un singur pas de anulare. **Pune înapoi** le uită; oprirea Flex-ului sau închiderea tabelului face la fel.
+
+![Flex: lățimea schimbată la 2 m, fantoma punctată peste masă, volumul sub tabel](shots/studio-part-flex.webp)
+
+## În model: parametrii publicați
+
+Înapoi în model, Proprietățile unei piese puse arată **doar parametrii ei publicați**. Un parametru de instanță este un câmp de editat pentru acest obiect (un câmp gol e valoarea implicită a piesei); unul de tip este doar de citit, cu insigna *tip*, fiindcă ține de piesă; unul derivat este doar de citit, cu insigna *formulă* și formula la trecerea mouse-ului. **Editează piesa (Tab)** intră în modul de editare, unde se pun la punct restul.
+
+## Constrânge piesa: schițele proprii ale piesei
+
+O piesă ale cărei corpuri sunt scrise ca colțuri (`[W, D]`, `[W - L, L]`…) poate deveni o piesă cu **schițe proprii**. În arborele piesei apasă **Constrânge piesa** (și în secțiunea **Piesă** din Proprietăți). Conturul fiecărui corp devine o schiță pe planul lui, fiecare colț ținut de cote orizontale și verticale care poartă aceleași formule, așa că piesa își păstrează exact forma și volumul. Arborele listează apoi schițele, cu cât de libere sunt, iar butonul dispare. Este un singur pas de anulare.
+
+![Arborele după Constrânge piesa: schițele piesei, fiecare complet constrânsă](shots/studio-part-constrained.webp)
+
+## Editarea schiței unei piese
+
+Apasă o schiță a piesei în arbore (sau dublu clic pe piesă în modul ei de editare, care deschide prima schiță cu un corp). Schița se deschide pe **aceeași planșetă de schiță ca orice altă schiță din Lapin** (desenul pe un plan, Editează schița unei plăci, schița pe o față):
+
+- camera 3D se întoarce lin să privească drept spre planul schiței și revine unde era când ieși;
+- restul piesei rămâne estompat în spate, iar schița e desenată pe planul ei: formele colorate după cât de libere sunt (albastru libere, închis complet fixate, roșu în conflict), glifele constrângerilor și cotele;
+- bara de jos numește schița, spune câte **grade de libertate** mai are și ține uneltele: uneltele din Desen, uneltele de constrângere, **Termină schița** și **Renunță**;
+- schița e a **piesei**, așa că toate obiectele ei urmează când termini. E arătată cum o păstrează piesa, cu valorile **implicite**: când obiectul are valori proprii (o lățime de 1600 unde implicit e 1200), o notă spune *Editezi piesa: valorile arătate sunt cele implicite*, iar conturul propriu al obiectului e desenat estompat în spate.
+
+![Schița unei piese pe planșeta de schiță: camera drept spre plan, formele, glifele și bara](shots/studio-part-sketch.webp)
+
+- **Desenezi și modifici** cu comenzile din Desen, din bară, din fila Desen sau scrise în linia de comandă: **Linie**, **Polilinie**, **Dreptunghi**, **Cerc**, **Arc**, **Paralelă**, **Taie**, **Prelungește**, **Racordare**, **Teșire**, **Șterge**, plus Mută, Copiază, Rotește, Oglindește. Atragerile, urmărirea și lungimile scrise merg ca pe un plan. Un punct pus pe unul existent rămâne **coincident** cu el (ține Ctrl la clic ca să-l pui liber), laturile unui dreptunghi rămân orizontale și verticale. Fiecare comandă e un pas de anulare. Schița unei piese ia linii, polilinii, cercuri și arce: o elipsă, o hașură, un text sau o linie ajutătoare e refuzată la terminare.
+- **Muți un punct** selectând o formă și trăgând de mânerul ei: motorul rezolvă constrângerile când îi dai drumul.
+- **Constrângeri**: aceleași unelte ca în schița unui plan (Coincident, Orizontal, Egal, Fixează… și cotele). Dublu clic pe o cotă îi schimbă valoarea, sau scrii `=` și o formulă a parametrilor piesei (`=W - 2*L`). Vezi [Constrângeri de schiță](sketch-constraints.md).
+- **Deschide în 2D** arată aceeași schiță plat, pe vederea proprie a planului ei; **Înapoi la 3D** te întoarce.
+
+![O linie desenată cu Linie din Desen pe schița piesei](shots/studio-part-sketch-line.webp)
+
+**Termină schița** (sau **Esc** fără nicio comandă pornită, sau **Tab**) scrie schița în piesă într-un **singur pas de anulare**: toate obiectele piesei urmează, formele care erau își păstrează identitatea (corpurile desenate din ele rămân), iar tu revii în modul de editare al piesei, cu camera ca înainte. Dacă schița nu se poate păstra (nu se rezolvă, un corp își pierde conturul, valorile unui obiect nu s-ar construi), Lapin spune de ce și schița rămâne deschisă. **Renunță** aruncă ce s-a desenat: piesa rămâne cum era. Anularea după Termină readuce schița cum ai lăsat-o.
+
+## Schițe și corpuri în arbore
+
+- **+ Schiță** adaugă o schiță pe planul ales (sus, față sau dreapta). Lângă fiecare schiță a piesei sunt butoane pentru a o redenumi și a o șterge (corpurile desenate din ea pleacă odată cu ea).
+- **+ Corp din schiță** face un corp din forma închisă a unei schițe: alege schița și scrie **adâncimea** lui, o lungime sau o formulă din parametri (`=H - T`). Sub pasul corpului din arbore se pot schimba adâncimea și condiția *făcut când*, iar corpul se poate scoate.
+
+O schiță a unui corp ale cărui colțuri sunt încă formule se deschide cu **Constrânge piesa**, care le face întâi schițe proprii ale piesei.
+
+## Elemente pe care le ține o piesă
+
+O piesă poate ține **elemente native**: pereți, planșee, mobilier, echipamente de instalații și orice altceva stă pe un nivel. Fă o bancă, pune în piesă peretele din spatele ei și fiecare obiect al piesei are peretele lui.
+
+1. Plasează un obiect al piesei și desenează sau plasează elementele lângă el, pe același nivel.
+2. Selectează piesa plasată împreună cu elementele și alege **Studio → Adaugă la piesă**. Fără o piesă plasată și alte elemente selectate, o notificare spune ce să selectezi.
+3. Elementele sunt acum ale piesei: fiecare alt obiect al piesei primește propria copie, așezată cum e așezată piesa.
+
+![O bancă cu un perete în spate, al doilea obiect rotit și mai lat](shots/part-members-3d.webp)
+
+**Editarea.** Deschide modul de editare (**Tab**) și elementele pot fi alese și editate acolo, cu orice comandă: schimbi grosimea peretelui, îl muți, îi dai un tip. Schimbarea se scrie înapoi în piesă și ajunge în fiecare piesă plasată. În afara modului de editare, un clic pe un element al unei piese alege piesa; proprietățile lui spun ce piesă îl ține, cu **Editează piesa**.
+
+**Elementele în arbore.** Arborele piesei are o secțiune **Elemente** care listează fiecare element cu clasa lui. **Selectează** îl alege, iar **Eliberează** îl lasă liber: rămâne în acest obiect ca element obișnuit și dispare din celelalte obiecte.
+
+**Comenzi (drives).** Un atribut al unui element poate urma o formulă din parametrii piesei: alege atributul (de pildă `length` sau `height` la un perete), scrie formula (`W`, `H / 2`) și apasă **Set**; butonul coș de gunoi o oprește. Cu `length = W`, peretele are lungimea cât lățimea băncii, în fiecare obiect, oricare ar fi lățimea. O valoare comandată urmează formula ei.
+
+![Arborele piesei: peretele sub Elemente, lungimea lui comandată de W](shots/part-members-tree.webp)
+
+**Ce se mișcă odată cu piesa.** Mutarea, rotirea, oglindirea, copierea și ștergerea unui obiect al piesei îi iau elementele cu el. O piesă doar din elemente nu are nevoie de corp propriu.
+
+**În IFC.** Elementele se scriu ca propriile clase (un IfcWall rămâne IfcWall). Fiecare e parte a piesei plasate printr-o relație de agregare (`IfcRelAggregates`), iar o piesă doar din elemente se scrie ca `IfcElementAssembly`. Cantitățile se numără o singură dată, pe elemente, nu din nou pe piesă.
+
+**Limite.** Îmbinările cu pereți din afara piesei nu se păstrează când piesa se reconstruiește. Nu se pot adăuga un element venit dintr-un fișier, un solid Studio, o deschidere dintr-un perete (alege peretele, care o aduce) sau o piesă plasată.
+
+## Mai departe
+
+Pagina Studio spune cum modelezi solide, iar pagina Familii cum merg managerul de piese, plasarea și Fă piesă din schiță.
+
+Schițele unei piese pot fi ținute cu **constrângeri** și cote: vezi [Constrângerile schiței](sketch-constraints.md).

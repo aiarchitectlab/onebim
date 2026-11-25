@@ -1,0 +1,26 @@
+{
+  "id": "lapin",
+  "name": "Lapin",
+  "modules": [
+    "architecture",
+    "furniture",
+    "transport",
+    "structure",
+    "analysis",
+    "rebar",
+    "wood",
+    "steel",
+    "drafting",
+    "studio",
+    "phases",
+    "planning",
+    "civil",
+    "sitework",
+    "cost",
+    "mep",
+    "clash",
+    "speckle",
+    "scripting",
+    "graphs"
+  ]
+}

@@ -1,0 +1,343 @@
+---
+title: Import și export
+order: 110
+summary: Schimbi modelul ca IFC, aduci desene DXF, legi fișiere și exporți modele 3D pentru randare și AR.
+---
+
+Tot ce intră sau iese e în meniul **Fișier**.
+
+![Meniul Fișier](shots/file-menu.webp)
+
+## IFC și Fragments
+
+**Exportă IFC, Fragments sau BOS…** scrie modelul ca IFC. Fiecare perete, placă, ușă și acoperiș e un element IFC adevărat, cu straturile, tipul și proprietățile lui, așa că fișierul se deschide ca model în alte programe BIM. Ușile și ferestrele spun cum se deschid: mâna fiecărei foi și cercevele, în ce parte se deschid și panourile, cum le definește IFC, așa că alte programe desenează aceleași deschideri. Fiecare ușă și fereastră duce și materialul fiecărei părți (Frame, Sash, Glazing, Panel…), iar fiecare material stilul lui de randare sub numele lui (vezi [Materiale](materials.md#materiale-pentru-randare)); sticla dintr-un IFC importat rămâne transparentă.
+
+Parametrii tăi își păstrează tipurile IFC în orice set de proprietăți, standard sau al tău: da sau nu ca *IfcBoolean*, o lungime ca *IfcLengthMeasure* în metri, o arie ca *IfcAreaMeasure*, un unghi ca *IfcPlaneAngleMeasure* în radiani (unitatea de unghi a fișierului; Lapin arată grade), un număr ca *IfcReal*, un text ca etichetă sau text. Parametrii unui tip merg pe tip, pe care cititoarele IFC le dau elementelor lui; valorile implicite pentru instanțe ale unui tip merg în schimb pe fiecare element (vezi [Pereți](walls.md)). Un element cu faze își primește *Status*-ul în setul lui comun (*Pset_WallCommon* și celelalte): NEW, EXISTING (creat într-o fază existentă sau înaintea fazei exportate), DEMOLISH sau TEMPORARY (construit și desființat în aceeași fază); un *Status* completat de tine are întâietate.
+
+Unele programe citesc doar elementul, nu și tipul lui (CYPECAD MEP ia un perete fără *IsExternal* pe peretele însuși drept parte din anvelopa exterioară). Pentru ele, bifează **Proprietățile tipului: Scrie proprietățile tipului și pe fiecare instanță** în **Exportă IFC, Fragments sau BOS…**: fiecare proprietate a unui tip (*Pset_WallCommon.IsExternal*, seturile tale, *Lapin_Parameters*) se scrie atunci și pe fiecare element al lui, în setul cu același nume, iar valoarea pe care elementul o are a lui are întâietate față de a tipului. Tipul își păstrează seturile ca înainte. Nebifată (implicit), fișierul e ca întotdeauna.
+
+**Ce scrie un da/nu nebifat.** Un parametru da/nu adăugat în proprietăți sau într-un tip pornește nebifat, iar nebifat e o valoare: exportul îl scrie ca *IfcBoolean* `.F.` (fals), iar bifat ca `.T.` (adevărat). E la fel pentru un tip și pentru un element: parametrul unui tip se scrie `.F.` pe tip (și pe elementele lui când e bifată **Scrie proprietățile tipului și pe fiecare instanță**), al unui element pe element, iar valoarea implicită pentru instanțe a unui tip pe fiecare element. Doar un parametru fără nicio valoare nu scrie nimic, de pildă unul pus de un script fără valoare sau o formulă care nu dă nimic. Ca să nu spui nimic despre *IsExternal*, șterge parametrul (cu ×-ul lui) în loc să-l debifezi.
+
+Cu **Părți** pe **grupate sub elementul lor**, un perete ale cărui straturi sunt tăiate de un buiandrug, o zonă sau o centură iese ca perete peste părțile lui (*IfcBuildingElementPart*, *IfcBeam* LINTEL), iar peretele își păstrează și un corp al lui, făcut din fețele părților, ca programele care colorează sau măsoară peretele însuși să-l găsească întreg. Cantitățile lui se scriu o singură dată, iar Lapin citește înapoi un asemenea fișier fără nimic de două ori: pereții lui se refac sau, ca referințe, se iau din părțile lor.
+
+Exportul întreabă schema (**IFC4**, citit peste tot, sau **IFC4X3**), detaliul (piesele ca elemente de sine stătătoare sau un corp pe element), faza și cum se scriu corpurile. **Geometrie** e **B-rep fațetat** (exact, ce așteaptă cel mai des alte programe) sau **seturi de fețe**: aceleași fețe, într-un fișier mult mai mic. **Simplifică** scrie mai puține triunghiuri unde un corp e o rețea fină, cum sunt tubulaturile și țevile din fișierul altui program, niciodată mai departe de el decât **toleranța** pe care o scrii (2 mm la început). Corpurile pe care le construiește Lapin (pereți, plăci, uși) își păstrează fețele exacte, iar simplificarea schimbă doar forma corpului, niciodată proprietățile lui.
+
+**Suprafețe exacte.** Bifează **Suprafețe exacte: Solidele Studio ca B-rep avansat pe suprafețele lor exacte** și solidele Studio pe care Lapin le știe exact se scriu ca *IfcAdvancedBrep* pe suprafețele lor adevărate, nu ca fațete: un cilindru pe o suprafață cilindrică, o sferă pe una sferică, o revoluție pe plane, cilindri, conuri, sfere și tori, un loft neted pe suprafața B-spline din care e făcut, un SubD închis pe petice B-spline bicubice (fețele din jurul punctelor stea ca fațetele lui). Sunt exacte primitivele, extrudările din linii și arce (fără înclinare, nu până la o față), revoluțiile, prismele de push/pull, loft-urile netede prin trei profile sau mai multe și SubD-urile închise; un solid cu pași (racordări, cochilii, push/pull pe el), unul tăiat de alt element, o măturare, un Follow Me sau un corp făcut dintr-o rețea rămân ca fațetele lor. Lapin verifică fiecare corp exact față de cel pe care îl desenează, așa că nu se scrie nimic ce modelul nu este. Nebifat (implicit), fiecare corp se scrie ca înainte; IFC4 și IFC4X3 au amândouă B-rep avansat.
+
+**STEP**, din același dialog, scrie corpurile ca solide pentru programe CAD (FreeCAD, Inventor, SolidWorks, Fusion): un fișier AP214 în milimetri, fiecare element o piesă a lui cu numele lui, în culoarea lui, pe suprafețele lui exacte unde Lapin le știe (ca mai sus) și pe planele fațetelor lui în rest. Tipurile, nivelurile și ce ascunde vederea 3D se aleg ca la IFC.
+
+![Exportă IFC](shots/export-ifc.webp)
+
+Grinzile, stâlpii și barele metalice se scriu prin profilul lor parametric, cu nume și cu valorile mecanice ([Biblioteci de profile](profiles.md)).
+
+**Importă IFC…** citește IFC-ul altui program. Înainte să intre ceva, Lapin citește fișierul și îți arată ce conține: elementele pe discipline (arhitectură, structură, instalații, mobilier și echipamente, sit), fiecare disciplină pe tipuri, cu câte sunt din fiecare, și etajele, cu câte elemente stau pe fiecare. Debifează ce nu-ți trebuie, de exemplu instalațiile și mobilierul când lucrezi la structură, sau păstrează doar etajele la care lucrezi. **Cum** aduce elementele recunoscute ca elemente Lapin, pe toate ca referințe sau legate. Cât timp fișierul se citește și se importă, Lapin arată ce face și cât a mai rămas; un fișier mare durează.
+
+![Import IFC](shots/import-ifc.webp)
+
+Unele fișiere au și 2D pe lângă model: simboluri de plan, amprente, hașuri și texte desenate pentru un element, sau elemente desenate doar în 2D (linii, texte, simboluri fără corp). Când un fișier le are, dialogul le numără la **Desenat în 2D**. Debifează **2D-ul propriu al elementelor** și planul desenează acele elemente prin secțiunea lor, ca pe ale lui Lapin; debifează **elementele desenate doar în 2D** și ele rămân afară. Ambele intră dacă nu le debifezi.
+
+![Desenat în 2D](shots/import-ifc-2d.webp)
+
+**Curățare și optimizare** ține regulile importului, aceleași pentru orice fișier, păstrate ca ale tale pentru importul următor. **Păstrează o singură dată un corp repetat** (bifat, dacă nu-l debifezi) păstrează o dată un corp pe care fișierul îl repetă sub alte nume (un șurub, o flanșă, un suport), elementele lui împărțindu-l, fără nicio pierdere. Celelalte lasă afară, când le bifezi, ce a adus alt program cu el: **corpurile plate** (texte, linii și hașuri făcute triunghiuri), **elementele mai departe de rest** decât distanța pe care o scrii (textele unui desen, un cartuș), **duplicatele** din același loc și **porturile și golurile scrise ca obiecte**. **Simplifică rețelele** scrie mai puține triunghiuri în limita toleranței pe care o scrii; **citește numerele scrise ca text** face din `DoubleLength:0,01` 0,01 m și din `1.15395 kg` o masă (un număr întreg singur, un cod, rămâne text). La **Ce se aduce**, **Seturi de proprietăți** arată seturile fișierului, cu câte elemente are fiecare; cele **tehnice** (transformarea din Navisworks, id-uri interne, statistici de geometrie) rămân afară dacă nu le bifezi. Mesajul importului spune ce a făcut fiecare regulă.
+
+![Curățare și optimizare](shots/import-ifc-rules.webp)
+
+Ce pune fișierul intră ca un singur grup, cu numele lui, pe care îl poți deschide și curăța, sau îl aduci liber debifând **Ca un singur grup** (vezi [Grupuri și curățare](groups.md)).
+
+**Etajele.** Etajele unui import sunt ale fișierului: ele le înlocuiesc pe ale proiectului tău. Fiecare etaj al fișierului intră cu numele lui, cu GlobalId-ul lui și cu cota pe care i-o dă fișierul, citită în unitatea fișierului (milimetri sau metri). Un etaj al proiectului tău aflat la cota unui etaj al fișierului (cu o abatere de cel mult 5 cm) se contopește cu acesta: elementele lui rămân unde sunt, iar vederile, planul lui și ce e desenat pe el trec pe etajul fișierului, care își păstrează numele din fișier. Un etaj al tău care nu se află la nicio cotă a fișierului e șters când nu conține nimic (niciun element, nimic desenat pe planul lui), iar vederile lui trec pe cel mai apropiat etaj al fișierului; unul care conține ceva rămâne, iar mesajul importului spune care. Așa, Fundațiile, Parterul și Etajul 1 ale unui proiect nou lasă locul etajelor fișierului. Totul e un singur pas de anulare, împreună cu importul. Un fișier legat își păstrează etajele pentru el și nu le schimbă pe ale tale. La sfârșitul importului, vederea 3D încadrează modelul, dacă nu ai mutat camera cât timp intra.
+
+**Totul editabil**, o alegere din **Cum**, merge mai departe decât recunoașterea: ce rămâne referință devine un solid Studio din propriile triunghiuri, același element, cu clasa, proprietățile, etajul și grupul lui, pe care merg imediat împinge/trage, racordările și operațiile booleene (vezi [Studio](studio.md)). Un corp de peste 5.000 de triunghiuri, cum ar fi o pompă sau un fiting cu rețea fină, rămâne referință, iar mesajul importului spune câte și de ce. **Importă Fragments…** are același **Cum**: un fișier Fragments are doar triunghiuri, totuși pereții lui (cu ușile și ferestrele), plăcile și stâlpii se recunosc din ele ca elemente Lapin, restul rămâne referință sau, cu **Totul editabil**, devine solid Studio. Elementele unui IFC pe care recunoașterea nu le-a putut citi din fișier (un perete cu golurile tăiate în corp) se încearcă și din triunghiuri. **Importă rețea** întreabă **Ca: editabile**. Referințele aduse înainte se convertesc cu Modifică → **Convertește la nativ** (NV): recunoscute unde se poate, restul solide Studio; un grup selectat înseamnă membrii lui. O referință adusă înainte se face editabilă una câte una, cu Studio → **Fă solid Studio**, care o păstrează în grupul și pe etajul ei.
+
+Lapin recunoaște pereții, plăcile, stâlpii, grinzile, fundațiile, ușile și ferestrele și le face elemente Lapin pe care le poți edita. Ce nu poate recunoaște intră ca referință, desenată așa cum o dă fișierul: forma ei nu se poate edita, dar se mută, se rotește, se oglindește, se copiază și se repetă ca orice element. Un element devine element Lapin doar când e chiar al fișierului: Lapin îl măsoară pe fiecare recunoscut față de corpul pe care i-l dă fișierul, iar unul care diferă cu mai mult de 1 mm sau 0,5 % din volum (un stâlp cu vârful înclinat în fișier, un capăt de perete în trepte, pe care un element Lapin le-ar face drepte) intră ca referința care era; mesajul importului spune câte și de ce. Ușile și ferestrele intră deschizându-se cum spune fișierul: mâna, partea în care se deschid și, la ferestre, cum se deschide fiecare panou. Un acoperiș plat din alt program devine acoperiș Lapin când IfcRoof-ul lui e făcut din două sau mai multe plăci puse una peste alta, sau dintr-un singur corp cu un set de straturi: placa (sau stratul) de sus e învelitoarea, cu materialul și grosimea ei, cele de dedesubt placa acoperișului, din materialul celei mai groase; conturul e al plăcii, fără streașină, la fața ei de jos. Un acoperiș în pante, sau unul dintr-o singură placă fără straturi, rămâne cum a venit. Elementele recunoscute primesc doar ce are fișierul: fără buiandrugi, glafuri, pervaze sau praguri ale lui Lapin, iar fiecare gol are mărimea din fișier; le poți porni din tipurile elementelor, dacă le vrei.
+
+Finisajele pe care alt program le-a exportat ca pereți separați (o tencuială de 2,5 cm pe fațadă, o tencuială interioară) devin strat al peretelui pe care stau, când sunt lipite de fața lui, la fel de înalte și de-a lungul lui. Peretele primește un tip cu acel strat (*Masonry 350 + Lime render*), straturile lui rămân unde erau, iar mesajul importului spune câte au fost. Un finisaj care stă la distanță de perete, sau care acoperă doar o parte din el, rămâne perete subțire. Un stâlp pe care fișierul îl dă ca un corp tăiat la vârf de o pantă (sub o grindă sau un acoperiș înclinat) intră ca stâlp cu secțiunea lui, până la punctul cel mai înalt. Un perete pe care alt program l-a modelat ca solide separate, câte unul pe strat (cum se face de obicei în SketchUp), rămâne acele solide, referințe sau solide Studio; selectează-le și alege **Arhitectură → Perete din solide** (<kbd>WFS</kbd>) ca să faci din ele un singur perete stratificat, cu golurile, ușile și ferestrele lui (vezi [Un perete stratificat din solide](walls.md#un-perete-stratificat-din-solide)). Importul nu face asta singur.
+
+**Mapează tipurile importate** (Gestionează) arată tipurile făcute de import (de pereți, plăci, uși, ferestre, stâlpi, grinzi și fundații), fiecare cu fișierul lui și numărul de elemente. Alege la **Devine** un tip al proiectului de același fel și apasă **Mapează**: elementele lui iau tipul proiectului, un perete își păstrează miezul unde era, iar tipul importat dispare. Cu **Ține minte** bifat, un import ulterior al unui tip de acest fel și nume ia direct tipul proiectului, iar mesajul lui o spune. Alegerile ținute minte apar în dialog, fiecare cu **Uită**.
+
+![Mapează tipurile importate](shots/map-types.webp)
+
+Spațiile fișierului (din Revit, ArchiCAD și altele) intră ca încăperi Lapin, fiecare pe nivelul ei, cu conturul, numărul, numele, înălțimea, funcțiunea, departamentul și finisajul pardoselii. Tot ce avea în fișier un element importat (seturile de proprietăți și cantitățile) se păstrează și apare la **Proprietăți IFC** în proprietățile lui. Încăperile se văd în planurile nivelurilor lor (eticheta; o schemă de culori din **Vedere → Culorile încăperilor** le umple); în 3D sunt ascunse până le arată **Vizibilitate / Grafică**. O referință iese din **Exportă IFC…** cum a intrat: cu același GlobalId, aceeași clasă și aceleași atribute (descriere, tag, tip predefinit), cu seturile de proprietăți și cantitățile, fiecare valoare cu tipul din fișier, și cu tipul, materialul, porturile, conexiunile și sistemul ei, fiecare cu GlobalId-ul lui. Dacă aduci doar instalațiile dintr-un fișier și le exporți, fișierul nou le are întregi.
+
+**Importă Fragments…** deschide același panou pentru un fișier `.frag` That Open: elementele lui pe discipline și tipuri, etajele lui și **Ca un singur grup**. Un fișier exportat chiar din acest proiect nu aduce nimic nou când îl imporți înapoi în el: elementele lui sunt deja aici.
+
+![Importă Fragments](shots/import-frag.webp)
+
+**Importă Fragments…** aduce un fișier `.frag`: fiecare element cu geometrie devine o referință desenată din corpul lui, în clasa pe care o spune fișierul, pe nivelul pe care îl pune fișierul (etajele fișierului le înlocuiesc pe ale tale: vezi **Etajele** mai sus), cu atributele fișierului la **Proprietăți IFC**. Elementele cu același corp (aceeași formă, așezată în mai multe locuri) îl împart. Importat din nou, același fișier actualizează ce a adus înainte. Ce se recunoaște din triunghiurile lui alegi la **Cum**, ca mai sus. Seturile de proprietăți și de cantități, tipul și materialele vin împreună cu atributele; sticla rămâne transparentă; un fișier făcut de convertorul That Open ajunge unde l-ar pune IFC-ul lui, iar fețele cu goluri (un perete în jurul ferestrei) le păstrează.
+
+**Exportă IFC, Fragments sau BOS…** scrie modelul ca IFC, ca Fragments sau ca BIM Open Schema, ales la fel ca un import: elementele pe discipline și tipuri, etajele, faza și doar ce arată vederea 3D. IFC iese în IFC4 sau IFC4X3, cu părțile unui element stratificat sub el sau câte un corp fiecare; Fragments de la punctul de bază al proiectului, de la originea internă sau de la punctul de topografie. Un fișier Fragments poartă ce arată un vizualizator IFC: tipul fiecărui element, cantitățile, parametrii tăi, materialele și coordonatele pe hartă, cum le scrie convertorul That Open. Un proiect legat de hartă (un punct topografic, sau latitudinea și longitudinea punctului de bază din **Gestionare → Amplasament**) iese georeferențiat: IFC scrie IfcMapConversion și IfcProjectedCRS (EPSG:3844…) și latitudinea și longitudinea sitului, așa că un program GIS așază modelul unde e (vezi [Coordonate reale](site.md#coordonate-reale)).
+
+O referință își păstrează golurile pe care i le-a tăiat fișierul ei, cu ușile și ferestrele care le umplu: **Exportă IFC, Fragments sau BOS…** le scrie înapoi cu GlobalId-urile fișierului, iar o referință mutată, rotită, oglindită sau copiată își ia ușile și ferestrele cu ea (o copie primește goluri proprii, umplute de copii ale lor). Ștergerea unei referințe șterge ușile și ferestrele din ea, ca la un perete Lapin; o ușă ștearsă singură, sau mutată în altă parte, lasă golul gol.
+
+**Încăperi.** Unele programe nu citesc profilul extrudat cu care e scris un IfcSpace (CYPECAD MEP e unul). Bifează **Încăperi: exportă ca B-rep fațetat (în loc de SweptSolid)** în **Exportă IFC, Fragments sau BOS…** și fiecare încăpere se scrie în schimb ca B-rep fațetat din geometria ei. Nebifat (implicit), fișierul e ca întotdeauna.
+
+Pe desktop, **Stiluri de desen Bonsai** scrie lângă IFC o foaie de stil (`nume.css`) și hașurile ei (`nume-patterns.svg`) pentru Bonsai (BlenderBIM), ale cărui desene se stilizează cu CSS: hașura secțiunii, umplerea și hașura de fațadă ale fiecărui material, liniile de secțiune și de proiecție din stilurile de obiect și textul din standardele de desen. IFC-ul numește ambele fișiere, deci un desen pe care îl faceți în Bonsai din el le ia.
+
+![Exportă IFC, Fragments sau BOS](shots/export-exchange.webp)
+
+### BIM Open Schema
+
+[BIM Open Schema](https://github.com/ara3d/bim-open-schema) (`.bos`) e un format deschis al Ara 3D: o arhivă zip cu tabele Apache Parquet (entitățile, parametrii și relațiile lor, plus triunghiurile așezate prin instanțe), ușor de interogat cu instrumente de date precum DuckDB, pandas sau Power BI și citit de vizualizatoarele web ale Ara 3D.
+
+**Importă BIM Open Schema…** deschide același panou ca importul IFC sau Fragments: elementele pe discipline și tipuri, etajele, **Cum** și **Ca un singur grup**. Fiecare element cu geometrie vizibilă devine o referință desenată din corpul lui, în clasa IFC pe care o numește categoria lui (o categorie Revit precum *Walls* sau *Doors* se citește drept clasa ei IFC), pe etajul lui (cel în care e conținut sau, pentru un fișier din Revit, nivelul lui), etajele fișierului înlocuindu-le pe ale tale (vezi **Etajele** mai sus). Parametrii lui vin ca seturi de proprietăți (atributele IFC la **Attributes**, tipul și materialele împreună cu ele); elementele cu aceeași formă împart un corp; sticla rămâne transparentă. Încăperile și tot ce fișierul marchează ascuns rămân pe dinafară. Importat din nou, același fișier actualizează ce a adus înainte.
+
+![Importă BIM Open Schema](shots/import-bos.webp)
+
+![Casa importată, în 3D](shots/import-bos-3d.webp)
+
+**Exportă IFC, Fragments sau BOS…** cu **BIM Open Schema** bifat scrie modelul cum scrie un fișier convertorul IFC al Ara 3D: proiectul, situl, clădirea și etajele, fiecare element sub clasa lui IFC, cu GlobalId-ul, tipul, materialele, atributele IFC, seturile de proprietăți și de cantități și parametrii tăi, conținut în etajul lui; triunghiurile în zecimi de milimetru, o formă folosită de mai multe ori (un tip de stâlp, o fereastră) păstrată o singură dată. Golurile ies cum le scrie convertorul: câte un element gol pentru fiecare ușă, fereastră și gol simplu, care taie peretele și e umplut de ușa sau fereastra lui, cu dimensiunile lui. Corpul lui e ascuns în vizualizatoare, dar rămâne pentru verificarea coliziunilor. Norii de puncte nu fac parte din format și rămân pe dinafară.
+
+### SDNF (detalierea structurilor din oțel)
+
+SDNF, Steel Detailing Neutral File, e formatul text în care programele de detaliere a oțelului își transmit o structură (Tekla Structures, Advance Steel, SDS2, ProStructures, E3D): fiecare bară o linie cu profilul, marca oțelului, punctul secțiunii prin care trece linia și rotirea ei; plăci; axe. Lapin scrie versiunea 3.0 și citește 3.0 și 2.0, în edițiile cu modulul de oțel.
+
+**Exportă IFC, Fragments sau BOS…** cu **SDNF** bifat scrie stâlpii și grinzile (din orice material) și barele de oțel de pe etajele și tipurile alese, plăcile îmbinărilor lor și axele, în milimetri. Fiecare bară își păstrează numele profilului (IPE 300, HEA 240, un profil din biblioteca ta), marca și un număr legat de id-ul ei, ca fișierul să se poată întoarce. Grinzile curbe pleacă drept bare curbe, iar găurile plăcilor și barelor drept găuri, printre ele cele ale șuruburilor și ancorelor îmbinărilor.
+
+![Exportă SDNF](shots/export-sdnf.webp)
+
+**Importă SDNF…** aduce un fișier ca elemente Lapin, într-un singur pas pe care îl poți anula: un stâlp vertical ca stâlp, o grindă orizontală ca grindă, orice altceva (o contravântuire, un căprior, o bară înclinată) ca bară de oțel, fiecare pe etajul lui, cu profilul luat din profilele proiectului și din biblioteca Lapin; vin și plăcile și axele. Un profil pe care nu-l are nicio bibliotecă (W12X50, când nu ai un tabel AISC) își păstrează numele pe o secțiune provizorie și e listat, până îi dai tipului un profil. Un fișier scris de Lapin, sau același fișier importat din nou după ce l-a schimbat detaliatorul, actualizează elementele din care a venit în loc să adauge altele noi. O bară curbă orizontală vine ca grindă curbă (una arcuită în alt plan e lăsată deoparte și spusă); găurile se taie în plăcile și barele prin care trec și, la un nou import al fișierului, le înlocuiesc pe cele de dinainte în loc să se dubleze. SDNF nu poartă șuruburi, așa că vin doar găurile lor; eliberările de la capete și încărcările nu se aduc.
+
+![Hala citită înapoi din SDNF](shots/import-sdnf-3d.webp)
+
+Cât timp vine un fișier, o fereastră arată ce face Lapin (citește fișierul, aduce barele, plăcile, găurile, construiește modelul), cât a făcut și cât timp a trecut; **Renunță** îl oprește cât citește fișierul și face elementele, și nu rămâne nimic din fișier. O structură de zece mii de bare vine în mult sub un minut. La sfârșit, fereastra **Import SDNF** e protocolul lui: ce a venit, fiecare pachet al fișierului cu câte elemente are și câte s-au importat, ce a fost lăsat deoparte și de ce (o bară mai scurtă de un milimetru, una de două ori în fișier, o bară curbă pe care Lapin n-o poate face, o adâncitură, o gaură care nu numește nicio placă), fiecare cu numărul și linia ei din fișier, ce s-a schimbat, profilele pe care nu le are nicio bibliotecă, notele și durata. ![Protocolul importului SDNF](shots/import-sdnf-report.webp)
+
+**Copiază** pune protocolul în clipboard ca text, iar **Salvează…** îl scrie într-un fișier, de trimis celui care a făcut SDNF-ul. Un fișier pe care Lapin nu-l poate citi nu se importă deloc: fereastra spune de ce și unde, de exemplu *Line 1234, packet 10, member 57 of 3000: its start's x is „12,5”, not a number* (linia 1234, pachetul 10, bara 57 din 3000: x-ul începutului nu e un număr).
+
+## JG Structures (calcul structural)
+
+**Exportă JG Structures (JSON)…** scrie modelul analitic al proiectului în fișierul de schimb al lui JG Structures, un program de calcul structural: un fișier JSON după contractul lui (versiunea 1.0.0). Lapin face modelul din ce ai desenat. Stâlpii, grinzile și barele de oțel devin bare pe axele lor; pereții portanți (Pset_WallCommon.LoadBearing pe perete sau pe tipul lui; un perete care nu spune nimic, dacă e din zidărie sau beton, cu miezul de 10 cm sau mai mult) și planșeele devin plăci pe mijlocul stratului lor de rezistență, fără finisaje. Ele au noduri comune: o grindă care poartă un planșeu stă în planul median al planșeului, capetele stâlpilor și ale pereților ajung la grinda sau planșeul de la cap și de la bază, colțurile unui planșeu trec pe stâlpii și pereții de sub el, iar planșeul se împarte de-a lungul grinzilor care îl traversează. Bazele stâlpilor și ale pereților de pe o fundație sunt încastrate; baza unui stâlp de oțel e articulată sau încastrată, cum spune îmbinarea ei.
+
+Alegi etajele, tipurile de elemente și unitățile: centimetrii și kilogramforța contractului, sau SI (metri și kilonewtoni). Materialele își iau valorile din datele lor (Gestionare → Materiale → Date: Young's modulus E în MPa, sau Pset_MaterialMechanical în pascali) sau din clasa de rezistență din nume, C25/30 sau S355, după Eurocoduri; aria, momentele de inerție, modulele de rezistență și constanta de torsiune ale unei secțiuni se calculează din geometria ei. Ce nu știe Lapin rămâne gol (null) în fișier, niciodată zero. Înainte de export, raportul numără ce intră, verifică fișierul după regulile contractului și arată ce îi mai lipsește calculului: un material fără clasă, un stâlp care nu stă pe nimic.
+
+Unde elementele nu se întâlnesc pe axe (o pană pe o grindă de cadru, o riglă pe un stâlp, o contravântuire pe guseul ei, căpriorii pe cosoroabă), Lapin pune nodul pe elementul care le susține și păstrează distanța ca decalaj la capătul barei, așa că și elementele secundare ale unei hale sunt legate. Pereții își păstrează ușile, ferestrele și golurile, iar planșeele golurile lor: plăcile contractului nu au goluri, așa că se împart în bucăți în jurul lor, iar un planșeu în L se împarte în bucăți convexe de-a lungul grinzilor de sub el. Un perete de sub acoperiș urcă până la el, iar acoperișul se exportă și el: placa lui ca plăci, sau căpriorii, panele și cosoroabele unei șarpante de lemn ca bare din clasa lemnului (C24 după EN 338). Cornierele și celelalte secțiuni nesimetrice se dau după axele lor principale. **Picioare pe fundații** alege cum sunt rezemate picioarele stâlpilor și pereților de pe o fundație: încastrate (implicit) sau articulate. Baza unui stâlp de oțel își păstrează îmbinarea ei.
+
+![Exportă JG Structures](shots/export-jg.webp)
+
+## Optimizarea unui fișier IFC
+
+**Optimizează IFC…** (în Fișier, sau pe ecranul de start: nu trebuie să fie deschis niciun proiect) face o copie mai ușoară a unuia sau mai multor fișiere IFC, fără să schimbe ce spun ele. Copia păstrează fiecare GlobalId, nume, set de proprietăți, cantitate, tip, material și relație exact cum le-a scris fișierul, și antetul lui; nu se adaugă nimic de-al lui Lapin. Se schimbă doar geometria: mesh-urile (seturi de fețe, B-rep-uri fațetate cu fețe plane) sunt curățate (vârfurile duplicate sudate, triunghiurile degenerate și repetate și coordonatele nefolosite eliminate) și simplificate, niciodată mai departe de original decât **Precizia** (Rapid 5 mm, Echilibrat 1 mm, Precis 0,1 mm sau a ta), măsurată în ambele sensuri; corpurile identice se scriu o singură dată și sunt partajate de produsele lor; iar ce nu e referit de nimic (puncte, stiluri nefolosite, reprezentări goale) dispare. Extrudările, operațiile booleene și celelalte corpuri exacte rămân cum sunt. Rotunjirea coordonatelor, B-rep-urile scrise ca seturi de fețe (doar IFC4 și IFC4X3) și un `.ifczip` arhivat sunt acolo când le vrei.
+
+![Optimizează IFC](shots/optimize-ifc.webp)
+
+Copia se scrie lângă original, sau într-un folder ales de tine, cu numele originalului și o **Terminație** (la început `.optimized`): din `casa.ifc` iese `casa.optimized.ifc`. Originalul nu este scris niciodată, iar dacă copia există deja Lapin întreabă înainte s-o înlocuiască. Pentru fiecare fișier raportul dă mărimea, entitățile și triunghiurile înainte și după, corpurile partajate, orfanii eliminați, abaterea cea mai mare măsurată și durata; **Deschide folderul** arată copia, iar **Deschide în Lapin** o deschide în altă fereastră. În browser copia se descarcă. Un fișier deja adus în proiect își păstrează drumul înapoi: **Optimizează fișierul sursă…** pe grupul unui IFC importat (în proprietățile lui) sau pe o legătură (Gestionare → Legături) face același lucru cu fișierul din care a venit, cât timp acesta e încă pe disc.
+
+![Raportul](shots/optimize-ifc-report.webp)
+
+## DXF și DWG
+
+**Importă DXF…** aduce un desen CAD în vederea din față, cu layerele, hașurile, textele și cotele lui. Intră ca desen de care te poți prinde și pe care îl poți edita. Ca să folosești un DWG, salvează-l întâi ca DXF din programul tău CAD (AutoCAD, BricsCAD sau DraftSight: **Save As → DXF**), ca text, nu binar. Cât citește un fișier mare, dialogul numără secundele; un fișier pe care nu îl poate citi (un DXF binar, un DWG redenumit .dxf, un desen ale cărui blocuri se desfac în peste 2.000.000 de entități) e arătat în dialog cu motivul. Un PDF sau o imagine intră pentru calchiat cu **Fișier → Importă PDF sau imagine…** sau **Desen → PDF sau imagine**: liniile unui PDF vectorial ca desen, la scara la care a fost desenat, iar pozele lui și orice PNG sau JPEG ca imagini translucide (vezi [Desen](drafting.md)). Într-un plan, **Așezat: după coordonatele hărții** pune un desen în coordonate reale (un plan cadastral în Stereo 70) unde îl pune harta (vezi [Amplasamentul și datele lui](site.md)).
+
+Blocurile unui DXF pot intra ca simboluri (**Blocuri → păstrează ca simboluri**) în loc de linii descompuse, iar **convertește layerele în elemente…** transformă layerele lui în pereți, stâlpi sau bare imediat după import: vezi [Desen](drafting.md#blocurile-dxf-ca-simboluri) și [Conversia desenului în elemente](drafting.md#conversia-desenului-in-elemente).
+
+Desenul stă și în **vederea 3D**, pe planul vederii în care a intrat: pe un plan la cota nivelului, pe o secțiune sau fațadă pe planul acelei vederi, în culorile layerelor lui, cu hașurile estompate, ca linii subțiri care nu ascund niciodată modelul. Un layer stins în **Desen → Layere** rămâne stins și în 3D. **Vedere → DXF în 3D** (și în **Vedere → Setările vederii** ale unei vederi 3D) arată sau ascunde toate importurile; un import anume se comută din **În 3D** în proprietățile oricărei forme a lui sau ale blocurilor lui păstrate ca simboluri, un DXF legat din coloana **3D** din **Gestionare → Legături**. Desenul în 3D pe acel nivel, cu uneltele din Desen sau cu Schița din Studio, face snap pe liniile lui, așa că îl poți calchia în 3D ca pe plan. Liniile cărora fișierul le-a dat cote stau în spațiu la acele cote, ca înainte.
+
+![Un DXF de amplasament în vederea 3D, la cota parterului](shots/dxf-3d.webp)
+
+Un DXF importat face parte din proiect: **File → Save** îl păstrează în fișierul `.lapin` cu straturile, hașurile, textele și orice grup făcut din el, iar la redeschiderea proiectului e acolo, pe planul nivelului. Vederea de plan în care a intrat e de atunci planul nivelului, cea listată în browserul proiectului, iar ce era desenat înainte pe nivel trece pe ea. Lapin întreabă dacă salvezi înainte să se închidă cu modificări nesalvate. Ca desenul să rămână un fișier separat, bifează **As a link** în dialogul de import: rămâne legat, needitabil, iar **Manage → Links** îl reîncarcă atunci când fișierul se schimbă.
+
+## Tabele
+
+Încărcările, cazurile de încărcare, parametrii elementelor și codurile de clasificare intră dintr-un fișier CSV sau Excel, ori din celule lipite dintr-un tabel, cu **Gestionare → Importă tabel…**: coloanele sunt ghicite, unitățile citite, fiecare rând arătat înainte de import, iar importul este un singur pas de anulat. Vezi [Importul tabelelor](tables.md).
+
+## Legături
+
+**Leagă IFC…** ține alt fișier legat în loc să-l importe. E doar pentru citire și se reîncarcă atunci când se schimbă. Merge și pentru un DXF. **Gestionare → Legături** arată, reîncarcă, convertește sau scoate legăturile. Un DXF legat stă în 3D ca unul importat; bifa **3D** din **Gestionare → Legături** îl scoate de acolo. **Vizibilitate / Grafică** (<kbd>VV</kbd>) ascunde o legătură, o estompează sau îi dă categoriile ei doar într-o vedere (*Secțiuni, fațade și 3D*, Vizibilitate / Grafică).
+
+Un IFC legat păstrează ce spune fișierul despre materialele elementelor lui. Pereții, planșeele și acoperișurile cu seturi de straturi se desenează în straturile lor chiar ca referințe, așa că un inginer ascunde finisajele legăturii de arhitectură (**Pereți ▸ Finisaje**, **Plăci ▸ Finisaje**), iar un stil de vedere de structură le desenează doar miezurile; barele unui model de structură legat sunt în categoria **Armături**, pe care orice vedere 3D o lasă deoparte până o arăți. O legătură făcută cu o versiune mai veche își primește straturile pereților când e reîncărcată (ale planșeelor imediat).
+
+### Legarea altui proiect Lapin
+
+**Fișier → Leagă proiect Lapin…** pune alt fișier `.lapin` în acest proiect ca modul doar pentru citire, cum face un hotlink în ArchiCAD. Spui unde stă (**Plasat la x**, **Plasat la y**, **Rotit**) și dacă e **Oglindit**, cu stânga și dreapta schimbate, ca apartamentul de pe cealaltă parte a casei scării. Pereții, ușile și plăcile lui vin ca elemente Lapin, cu simbolurile lor în plan, iar același proiect se poate lega de câte ori vrei, fiecare așezare separat: un apartament tip sau un bloc repetat, desenat într-un singur fișier.
+
+Ca să-l schimbi, editezi fișierul lui: **Deschide separat** din **Gestionare → Legături** îl deschide în altă fereastră. Când fișierul se schimbă, Lapin îți spune la întoarcere, iar **Gestionare → Legături** arată **Sursa s-a schimbat: citește din nou**; un clic aduce versiunea nouă, în aceleași locuri. Butonul de mutare de acolo așază legătura în altă parte sau o oglindește, fără s-o refaci. Restul uneltelor merg ca la orice legătură: afișare, halftone, conversie la nativ, dezlegare. În browser pagina nu are calea fișierului, așa că recitirea sau reașezarea îți cer fișierul. Ce leagă sursa la rândul ei vine și se mută împreună cu ea, în afară de ce e ascuns acolo, la fel și referințele aduse din alte fișiere.
+
+![Același proiect legat de două ori, al doilea rotit](shots/hotlink-plan.webp)
+
+![Gestionare → Legături cu ambele așezări](shots/hotlink-links.webp)
+
+## Nori de puncte
+
+**File → Link point cloud…** leagă o scanare laser sau un nor din fotogrammetrie, numai în formate deschise: **LAS** (1.0–1.4, toate formatele de punct), **LAZ** (LAS comprimat), **E57**, **PLY** (ASCII și binar) și puncte ca text, **XYZ**, **PTS** și **CSV**. Formatele proprietare (RCP și RCS din Autodesk ReCap, FLS de la FARO, LGS de la Leica) nu se citesc: exportă întâi scanarea din programul ei ca E57 sau LAS.
+
+Lapin întreabă unde stă norul și în ce unitate:
+
+- **după coordonatele de hartă ale proiectului**: x și y din fișier sunt est și nord, așezate prin punctul de survey și unghiul față de nord din **Manage → Location**, cotele peste cota punctului de survey. Lapin îl propune când fișierul își numește sistemul de coordonate sau coordonatele lui sunt departe de zero și proiectul are o localizare;
+- **origine pe origine**: originea fișierului pe a proiectului;
+- **centrat pe originea proiectului**: mijlocul lui pe origine, punctul cel mai de jos la ±0.00;
+- **unitatea lui**: cum spune fișierul (LAS și E57 o spun), altfel metri; se oferă și centimetri, milimetri, picioare, picioare US survey și inci. Când norul iese nepotrivit pentru o clădire sau un teren (sub 20 cm sau peste 50 km), ori fișierul spune altă unitate, Lapin avertizează.
+
+Norul rămâne în fișierul lui. Nu se copiază în proiect: proiectul păstrează doar legătura (calea fișierului, unde stă norul, cum se desenează). Lapin îl indexează o dată, în fundal, într-un octree de bucăți în folderul lui de pe acest calculator (nu lângă proiect), iar **Manage → Links** arată cât a avansat. Apoi vederea 3D aduce bucățile de care camera are nevoie, întâi pe cele apropiate și tot mai fine pe măsură ce te apropii, într-un buget de puncte dat de **View → Display quality** (1,5, 3 sau 6 milioane de puncte desenate deodată), așa că o scanare de o sută de milioane de puncte se rotește la fel de lin ca una mică.
+
+![O scanare a casei legată ca nor de puncte, în vederea 3D](shots/point-cloud-3d.webp)
+
+În **Manage → Links** un nor are rândul lui: punctele, cât a avansat indexul, **Shown**, **Halftone**, **3D**, ce colorează punctele (**RGB**, **Intensity**, **Elevation** sau **Classification**, după clasele ASPRS: teren, vegetație, clădire, apă…) și **Size**, mărimea unui punct în pixeli. Butonul cu pin îl reașază (după hartă, origine pe origine sau centrat, unitatea, mutat pe x, y și z, rotit); butonul de reîncărcare recitește fișierul și îl reindexează doar dacă s-a schimbat. **Unlink** scoate legătura; indexul rămâne în folderul lui Lapin și servește norul din nou dacă e legat din nou.
+
+![Manage → Links cu un nor de puncte](shots/point-cloud-links.webp)
+
+Un nor nu se exportă cu modelul: IFC și Fragments duc modelul, nu scanarea, iar **Export 3D…** ia un eșantion din el ca puncte în GLB și glTF doar la cerere. Planurile, secțiunile și fațadele îl desenează și ele (*Secțiuni, fațade și 3D*, Norii de puncte în vederi). În browser se poate lega un nor de cel mult 160 MB; e indexat în pagină și trebuie legat din nou după reîncărcarea paginii. Norii mai mari cer aplicația desktop.
+
+### Gaussian splats
+
+O captură de Gaussian splats (o scenă antrenată din fotografii sau dintr-un film cu Postshot, Polycam, Luma, Lichtfeld Studio, Brush sau codul original de 3D Gaussian splatting) se leagă la fel: **File → Link point cloud…** ia un **PLY 3DGS** (forma în care îl scriu programele de antrenare: centrul, culoarea, opacitatea, mărimea și rotația fiecărui splat), **PLY-ul comprimat** al SuperSplat (`.compressed.ply`), **SPZ**-ul Niantic (versiunile 1–4) și **SOG**-ul PlayCanvas (un fișier `.sog`, cum îl scriu SuperSplat și SplatTransform; pe desktop și un folder SOG, prin `meta.json` al lui). Manage → Links scrie formatul fiecărui fișier sub tipul lui (**SOG v3 · SH 3**: formatul, apoi gradul culorii după direcție). Un fișier de splats e un nor de puncte cu ceva în plus, iar Manage → Links îi spune **Gaussian splats**:
+
+- centrele splat-urilor sunt indexate ca punctele norului, colorate cu culoarea lor de bază, cele aproape transparente lăsate deoparte. Așa că tot ce face un nor de puncte merge și aici: planurile și secțiunile îi desenează felia ca puncte, snap-urile în 2D și 3D îi găsesc punctele, iar **Visibility / Graphics** îl arată, îl ascunde și îl face halftone;
+- o vedere 3D îi desenează splat-urile: fiecare o elipsă întoarsă spre cameră, amestecate din spate în față, cum arată captura în vizualizatorul ei. În bugetul din **View → Display quality** (1, 2 sau 4 milioane de splat-uri deodată, jumătate în browser), splat-urile cele mai mari și mai opace se desenează primele;
+- splat-urile vin din reconstrucții, ale căror axe nu sunt ale unei clădiri: un SPZ are y în sus, un PLY 3DGS, un PLY comprimat și un SOG y în jos. Lapin ridică captura după asta când e legată. Dacă un fișier e scris altfel, butonul cu pin din Manage → Links o reașază și îi cere **Up axis** (z, y sau −y), lângă unitate, mutare și rotire.
+
+![O captură de Gaussian splats a unui foișor în grădină, în vederea 3D](shots/gaussian-splat-3d.webp)
+
+În Manage → Links rândul unui nor de splats are o listă **Display**: **Splats** (gaussienele lui) sau **Points** (centrele lor, ca orice nor, colorate și cu mărimea la fel). **Visibility / Graphics → Point clouds** are coloana **Drawn as**, care o stabilește pentru o vedere (**as its link**, **Splats** sau **Points**). Vederea cu puncte e mai ușoară și arată forma mai bine când desenezi peste ea; cea cu splat-uri arată locul cum a fost fotografiat.
+
+![Manage → Links cu o captură de Gaussian splats](shots/gaussian-splat-links.webp)
+
+![Aceeași captură desenată ca puncte](shots/gaussian-splat-points.webp)
+
+Splat-urile nu se exportă cu modelul. Planurile și secțiunile desenează felia capturii ca puncte; o **vedere 3D sau o vedere de cameră pusă pe o planșă** îi tipărește splat-urile ca imagine: vezi mai jos.
+
+#### Splat-uri pe planșe
+
+O vedere 3D sau o vedere de cameră salvată care desenează o captură ca splat-uri (**Drawn as** din Visibility / Graphics → Point clouds, sau **Display** al legăturii) le tipărește pe planșa ei și în PDF. Lapin le desenează singur, cum face vederea 3D (elipsa fiecărui splat din aceeași proiecție, din spate în față, amestecate la fel), ca o imagine de 300 dpi pe hârtie la scara vederii, în culoarea vederii (Full sau Base colour) și în semiton, în cutia ei de secțiune și în cutia de decupare a legăturii. Imaginea stă sub liniile vederii și sub notele și cotele de pe planșă, iar elementele modelului ascund partea capturii din spatele lor, ca în 3D: un perete construit în fața unei fațade scanate o acoperă. Planșa de pe ecran arată aceeași imagine ca PDF-ul. O captură mare durează puțin prima dată (cam două secunde pentru un milion de splat-uri pe toată o planșă A3); după aceea planșa păstrează imaginea până se schimbă vederea, camera ei, captura sau modelul din vedere. O captură desenată ca puncte în acea vedere nu se tipărește în 3D.
+
+![O vedere de cameră a capturii foișorului pe o planșă A3: splat-urile sub liniile zidului de grădină, o notă și o cotă pe hârtie](shots/gaussian-splat-sheet.webp)
+
+#### Culoare completă și culoare de bază
+
+Culoarea unei capturi antrenate se schimbă după partea din care o privești: luciul unei mașini, o fereastră care dintr-o parte reflectă cerul și din cealaltă arată camera. Fișierul păstrează schimbarea asta ca *armonicele sferice* ale fiecărui splat (gradele 1–3, peste culoarea lui de bază). O vedere 3D o desenează: în **Full colour** culoarea unui splat e calculată pentru direcția din care îl privești, cum face vizualizatorul capturii, oricum ar fi rotită legătura și oricare i-ar fi axa de sus. **Base colour** desenează fiecare splat doar în culoarea lui de bază, la fel din orice parte, cu mai puțină memorie și o încărcare mai rapidă. Lista de lângă **Display** pe rândul norului din Manage → Links o stabilește pentru legătură; **Visibility / Graphics → Point clouds** are coloana **Splat colour**, care o stabilește pentru o vedere (**as its link**, **Full colour** sau **Base colour**).
+
+Culoarea completă urmează **View → Display quality**: **Fast** desenează primul grad (schimbarea mare), **Balanced** și **Precise** toate trei. Când se desenează multe splat-uri, Lapin coboară gradul până când culorile lor încap în memorie (96 MB pe desktop, 48 MB în browser): la cele 2 milioane de splat-uri ale Balanced încap toate gradele; la cele 4 milioane ale Precise, două.
+
+![Foișorul ca SOG: peretele din spate cald văzut din grădină, în culoare completă](shots/gaussian-splat-sh-front.webp)
+
+![Același perete din spate: rece](shots/gaussian-splat-sh-back.webp)
+
+![Manage → Links: formatul capturii, SOG v3 cu primul grad, și culoarea ei pusă pe Base colour](shots/gaussian-splat-sh-links.webp)
+
+![Peretele din grădină în culoarea lui de bază](shots/gaussian-splat-sh-base.webp)
+
+### Scara, decuparea și măsurarea unei capturi
+
+O captură antrenată din fotografii nu are o mărime reală: unitatea ei e cea aleasă de reconstrucție. **Calibrează scara** o face reală, pentru orice nor de puncte, cu splats sau fără. Pornește-o din butonul cu riglă de pe rândul norului în **Manage → Links** sau dă clic dreapta lângă nor în vederea 3D și alege **Calibrează scara…**. Dă clic pe două puncte ale norului aflate la o distanță cunoscută (se prind de punctele lui, de centrul unui splat) și scrie distanța lor reală la cursor, sau dă clic pe al doilea punct și Lapin ți-o cere. Norul crește sau se micșorează în jurul primului punct; punctele, splat-urile, feliile, snap-urile și exporturile îl urmează toate, iar o anulare îl aduce înapoi. Factorul apare ca **Factor de scară** în dialogul de așezare (butonul cu pin), lângă unitate, unde se poate și scrie; verificarea mărimii îl ia în calcul.
+
+![Calibrează scara: centrele a două splat-uri alese în 3D, distanța lor arătată înainte de a o scrie pe cea reală](shots/gaussian-splat-calibrate.webp)
+
+![Dialogul de așezare cu factorul de scară al capturii](shots/gaussian-splat-place.webp)
+
+O captură are în jurul subiectului fragmente plutitoare și grădinile vecinilor; o scanare, strada. Butonul de decupare de pe rândul norului (sau **Decupează norul de puncte…** din meniul de clic dreapta al vederii 3D, lângă nor) îi deschide **cutia de decupare**: **Potrivește pe nor** face o cutie în jurul părții dense a norului, după rotirea legăturii și rotunjită la un pas curat, așa că fragmentele plutitoare ale unei capturi (cerul, fundalul îndepărtat) rămân din prima pe dinafară; **Tot norul** o face în jurul întregului nor, cu punctele răzlețe cu tot. Apoi mijlocul, mărimile și rotirea ei o strâng la ce păstrezi, fiecare schimbare un pas de anulare, iar **Resetează** o scoate. Ce e în afară se ascunde peste tot: în 3D (puncte și splat-uri), în planuri și secțiuni, din snap-uri și din exporturi. Fișierul norului și indexul lui rămân cum sunt.
+
+**Fit** din vederea 3D încadrează un nor la fel: acolo unde punctele lui sunt dese, în cutia de decupare când are una, așa că o captură ale cărei fragmente plutitoare ajung la sute de metri e încadrată pe subiectul ei. Grila de la sol stă sub o captură ca sub un model: captura o ascunde acolo unde stă în fața ei.
+
+![Cutia de decupare pe rândul unei capturi în Manage → Links](shots/gaussian-splat-crop-links.webp)
+
+![Captura decupată: copacul de la marginea ei tăiat](shots/gaussian-splat-crop.webp)
+
+**Măsoară** (<kbd>ME</kbd>) merge pe o captură în vederea 3D ca pe model: punctele lui se prind de punctele norului și de centrele splat-urilor și rămân la înălțimea la care au fost alese. Bara lui are două moduri: **Distanță**, un lanț de segmente cu totalul pe parcurs arătat în eticheta uneltei, și **Arie**, un contur închis de puncte prinse, a cărui arie și perimetru, în planul care li se potrivește cel mai bine, se arată pe măsură ce le alegi (o bucată de fațadă, o pantă de acoperiș) și se spun din nou la sfârșit, cu înclinarea planului.
+
+![Măsoară, Arie: peretele din spate al capturii măsurat pe splat-urile lui](shots/gaussian-splat-area.webp)
+
+Un PLY cu fețe (o rețea, cum e rezultatul MeshSplatting) nu e un nor de puncte: **Leagă nor de puncte…** spune asta și propune să-l imporți ca rețea 3D sau să-i legi vârfurile ca puncte.
+
+## Modele 3D
+
+**Export 3D (glTF, USD, DAE)…** scrie modelul ca suprafețe pentru randare, vizualizare și realitate augmentată (AR):
+
+| Format | Pentru |
+|---|---|
+| GLB, glTF | Blender, three.js, vizualizatoare web. Imaginile proprii ale materialelor sunt incluse. |
+| USDZ | AR Quick Look de la Apple, Reality Composer, Omniverse. Imagini incluse. |
+| USDA | OpenUSD ca text, un singur fișier. |
+| DAE | COLLADA, pentru SketchUp și programe mai vechi. |
+| OBJ + MTL | Un .zip pentru Twinmotion, Lumion, 3ds Max și orice program de randare. Cu imaginile. |
+
+**Importă rețea (OBJ, STL, glTF, PLY)…** aduce o rețea dintr-un alt program 3D (OBJ, STL, glTF, GLB sau PLY) ca referințe pe nivelul activ. glTF își spune unitatea și care axă e în sus; pentru OBJ, STL și PLY, Lapin întreabă. O rețea PLY colorată pe vârfuri (cum o scriu MeshSplatting și programele de fotogrammetrie) intră ca un singur element, cu culorile strânse în câteva sute de părți; pentru o captură antrenată cu 3D Gaussian splatting alege **−y** ca axă de sus. O piesă de mobilier sau de decor adusă așa se așază ca orice element: **Mută**, **Copiază**, **Rotește**, **Oglindește** și **Repetare** în Modifică, **Mută 3D** în Studio pentru înălțime. Copiile ei împart triunghiurile, deci un șir de scaune cântărește cât unul. **Fă solid Studio** din Studio face forma unei referințe editabilă (vezi [Studio](studio.md)).
+
+![Șase scaune dintr-un fișier OBJ în jurul unei mese, făcute cu Modifică → Repetare](shots/reference-array.webp)
+
+![Export 3D](shots/export-3d.webp)
+
+Alegi ce exporți, ce fază și originea. **Ce** este **tot**, sau modelul **cum îl arată vederea**: vederea 3D din față, fără elementele și categoriile ei ascunse și fără etajele pe care nu le arată, cu straturile pe care le arată (fără finisaje sau doar miezurile). Când vederea e tăiată (tăietura de deasupra etajelor afișate, o secțiune arătată în 3D, cutia de secțiune), **Tăietură** taie și exportul acolo și închide fiecare tăietură în materialele ei, ca fișierul să arate ca ecranul. O vedere 3D care lasă ceva deoparte se exportă cum o arată, dacă nu alegi altfel. Fiecare element își păstrează clasa IFC, tipul și GlobalId-ul. Ca să schimbi modelul în sine, nu suprafețele lui, folosește **Exportă IFC**.
+
+## Speckle
+
+**Fișier → Speckle → Trimite…** trimite modelul la un server [Speckle](https://speckle.systems), de unde îl iau Revit, Rhino și Grasshopper, Power BI, Blender și vizualizatorul web al Speckle, fără IFC între ele. E în aplicația desktop, nu în Lapin pentru browser.
+
+![Trimite în Speckle: contul](shots/speckle-sign-in.webp)
+
+Prima dată, Lapin îți cere contul:
+
+- **Server**: cel al Speckle, `https://app.speckle.systems`, sau cel găzduit de firma ta.
+- **Token**: un token personal de acces pe care îl faci în Speckle, în profilul tău: **Developer settings → Access tokens → New token**, cu drepturile `streams:read`, `streams:write` și `profile:read`.
+- **Ține minte**: tokenul e păstrat în spațiul securizat al calculatorului (Keychain pe macOS, Credential Manager pe Windows, Secret Service, adică GNOME Keyring sau KWallet, pe Linux), ca Lapin să te conecteze singur data viitoare. Nu e scris niciodată în proiect, în setările Lapin sau într-un raport. **Deconectează-te** îl uită.
+
+Conectat, alegi **Proiect** (unul dintre ale tale de pe acel server), **Model** (cel în care trimiți) sau **un model nou…** cu numele lui, un **Mesaj** pentru versiune și **Ce** pleacă:
+
+- **tot modelul**;
+- **cum o arată vederea 3D**: vederea 3D din față, fără elementele, categoriile și etajele ei ascunse, tăiată cum e tăiată, cum o ia **Export 3D**;
+- **selecția**.
+
+**Trimite** arată cât a ajuns (convertește modelul, îl încarcă, face versiunea); **Renunță** îl oprește. La final, **Deschide versiunea în Speckle** o deschide în browser.
+
+Ce ajunge e un arbore Proiect → Clădire → Etaj → clasă IFC, cu elementele sitului lângă clădire. Fiecare element e un obiect Speckle cu:
+
+- **GlobalId**-ul lui ca id în Speckle, așa că următoarea trimitere face o versiune nouă a *acelorași* obiecte (Speckle arată ce s-a schimbat între ele);
+- suprafețele lui, aceleași pe care le scrie **Export 3D**, în metri, în culorile și transparența materialelor lui;
+- proprietățile lui: clasa IFC, numele, tipul, etajul, faza, materialele și straturile (fiecare cu grosimea lui), seturile de proprietăți și cantitățile, fiecare cu unitatea ei.
+
+Etajele pleacă drept niveluri Speckle, așa că Revit primește elementele pe nivelurile lor. Imaginile materialelor (texturile) și muchiile elementelor nu se trimit; o copie (un șir de scaune la fel) pleacă cu suprafețele ei proprii.
+
+### Primirea din Speckle
+
+**Fișier → Speckle → Primește…** aduce o versiune a unui model Speckle în proiectul deschis, oricare program a trimis-o (Revit, Rhino, Archicad, alt Lapin). Se conectează cu același cont ca **Trimite…**. Alegi **Proiectul**, **Modelul** și **Versiunea** (implicit **cea mai nouă**, sau una din listă, după mesajul ei, dată și programul care a trimis-o), apoi:
+
+- **Etaje**:
+  - **după nivelurile versiunii, cu etajele care lipsesc făcute** (implicit): fiecare nivel al versiunii își găsește etajul proiectului de la cota lui (în 5 cm), altfel pe cel cu numele lui; un nivel pe care nu-l potrivește niciun etaj devine un etaj nou, cu numele și cota nivelului. Fiecare obiect merge pe etajul nivelului lui, fie că intră ca referință, fie ca perete sau placă recunoscută.
+  - **după nivelurile versiunii, doar etajele proiectului**: nu se face niciun etaj; un obiect al cărui nivel nu se potrivește cu niciun etaj merge pe etajul de sub el.
+  - **toate pe etajul curent**.
+- **Origine**: **punctul de bază al proiectului** (Trimite scrie modelul de acolo, deci un model trimis din Lapin se întoarce unde era) sau **originea internă**.
+- **Recunoaștere**: **Recunoaște elementele** (bifat implicit) face din pereți, planșee, stâlpi, grinzi, fundații, uși și ferestre elemente native Lapin acolo unde chiar sunt; vezi mai jos.
+
+**Primește** descarcă versiunea (**Renunță** o oprește) și o aduce într-un singur pas: un singur **Undo** o scoate toată. Obiectele intră ca **referințe**, ca la importul unui mesh sau al unui fișier IFC: se văd, se măsoară și se prind, nu se editează. Fiecare își păstrează:
+
+- suprafețele, în metri, oricare ar fi unitatea versiunii, în culorile materialelor de randare (unul transparent ca material propriu);
+- clasa IFC, când versiunea o numește (categoriile Revit: pereți, plăci, acoperișuri, uși, ferestre, stâlpi, grinzi… drept clasele lor IFC), altfel element de construcție generic (proxy);
+- proprietățile, la **Proprietăți IFC**: setul **Speckle** (applicationId-ul, id-ul și tipul Speckle, colecțiile în care stă) și câte un set pentru fiecare grup de proprietăți (**Speckle · Parameters**…);
+- de unde vine: serverul, proiectul, modelul și versiunea.
+
+Obiectele unui model intră ca un grup cu numele lui. Copiile unui bloc sau ale unei familii (instanțele Speckle) au un singur corp comun, ca la un fișier Fragments importat. Liniile, poliliniile, arcele și cercurile care sunt singure un obiect se desenează în plan; punctele, textele și obiectele fără geometrie se lasă afară, iar fereastra spune câte din fiecare.
+
+**O versiune mai nouă** a aceluiași model primită actualizează pe loc ce a venit înainte: fiecare obiect e găsit din nou după applicationId (altfel după id-ul Speckle) și își păstrează GlobalId-ul, grupul și tot ce îl numește; un obiect neschimbat rămâne cum e; cele noi intră în grupul modelului; cele pe care versiunea nu le mai are se șterg, cum reîncărcarea unei legături scoate ce nu mai e în fișierul ei. Fereastra arată câte s-au adăugat, actualizat, au rămas neschimbate și s-au șters.
+
+**Recunoașterea elementelor.** Cu **Recunoaște elementele** bifat, fiecare perete și planșeu primit e citit cum citește un import IFC o referință: triunghiurile lui ca o prismă verticală, un perete cu golurile lui, un planșeu după contur și grosime. Devine perete sau placă nativă doar când corpul elementului nativ e cel primit cu cel mult 1 mm sau 0,5 % diferență (aceeași verificare ca la importul IFC): ce diferă mai mult rămâne referință. Și parametrii peretelui sunt verificați față de corpul lui (lățimea și linia de amplasare din Revit, grosimea unui planșeu; straturile Lapin): dacă nu se potrivesc, corpul are dreptate și obiectul rămâne referință. Pereții cortină rămân referințe. Grinzile cu zăbrele din Revit (**bar joists**, K-Series și LH-Series) sunt recunoscute și ele, ca grinzi cu zăbrele native, cu zăbrelele ca liniile trimise de Revit ([Oțel](steel.md#grinzi-cu-zăbrele)). Un element recunoscut își păstrează GlobalId-ul, grupul, etajul și proprietățile **Speckle**, iar Lapin nu-i adaugă nimic al lui: nici buiandrugi, nici glafuri, nici îmbinări; o placă recunoscută nu taie niciun perete, cum au venit pereții. Fereastra spune câte obiecte au fost recunoscute, câte au rămas referințe și de ce.
+
+Stâlpii, grinzile și fundațiile se citesc la fel, după pereți și planșee, cu aceeași verificare. Un stâlp e o prismă verticală: un dreptunghi, un poligon regulat sau un cerc devine un stâlp cu acea secțiune; orice altă secțiune (un profil metalic, o secțiune de beton cu formă) devine un stâlp cu secțiunea corpului lui, sau cu profilul din catalog al tipului (IPE 300, HEA 200…) când acela e al corpului cu 2 mm. O grindă e o prismă culcată de-a lungul axei ei, cu secțiunea citită la fel. Un stâlp sau o fundație recunoscută nu taie nimic din ce întâlnește, cum au venit elementele.
+
+O ușă sau o fereastră dintr-un perete recunoscut devine un gol în peretele nativ. Ușa sau fereastra însăși devine nativă doar dacă un configurator Lapin îi face corpul cum a venit, cu aceeași verificare; altfel rămâne referință, în golul nativ al peretelui, iar fereastra spune asta. Peretele trebuie să treacă și cu golul lui: corpul lui din Revit are deja gaura.
+
+Primit din nou, un element recunoscut al cărui obiect nu s-a schimbat rămâne cum e; unul al cărui obiect s-a schimbat e recunoscut din nou pe loc, cu același GlobalId, sau redevine referință (cu același GlobalId) dacă nu mai trece verificarea; unul pe care versiunea nu-l mai are se șterge.
+
+**Etajele făcute din niveluri.** Un etaj făcut așa e înalt cât până la etajul de deasupra. Cotele nivelurilor se citesc ca geometria versiunii, după **Originea** aleasă: de la punctul de bază al proiectului, i se adaugă cota lui. Când cele mai multe obiecte stau la aceeași înălțime față de nivelurile lor (Revit își poate da nivelurile de la punctul de topografie și geometria de la originea internă), etajele se așază după obiecte, iar fereastra spune cu cât. O versiune mai nouă redenumește și mută doar etajele pe care le-a făcut, și doar cât timp nimic altceva nu stă pe ele: un etaj cu elementele tale pe el, sau cu un perete recunoscut, își păstrează numele și cota, iar fereastra spune asta. Un etaj al cărui nivel a dispărut din versiune se șterge dacă e gol și rămâne dacă stă ceva pe el. Un etaj pe care îl avea proiectul nu e niciodată redenumit, mutat sau șters.
+
+**O versiune trimisă din acest proiect** (obiectele ei sunt elementele proiectului, după GlobalId-uri) nu se primește peste ele: Lapin spune asta și oferă **Primește ca o copie**, care aduce obiectele ca referințe cu id-uri proprii, lângă elemente, care rămân cum sunt. Primit în alt proiect, un model trimis din Lapin păstrează GlobalId-urile elementelor.
+
+Nu se primesc încă: texturile, muchiile obiectelor, grinzile înclinate sau curbe și pereții curbi ca elemente native.
+
+## Lapin pentru browser
+
+**Fișier → Lapin pentru browser (.html)…** scrie proiectul ca o pagină web, un singur fișier .html pe care îl poți trimite oricui. Se deschide cu dublu clic în orice browser (Chrome, Edge, Safari, Firefox), pe orice calculator, fără internet și fără nimic de instalat:
+
+- **3D**: modelul așa cum îl arată vederea 3D. Trage ca să-l rotești, trage cu butonul din dreapta ca să-l deplasezi, rotița ca să mărești; **Încadrează** îl arată întreg. Alege un etaj singur sau împreună cu cele de dedesubt; fă clic pe un element ca să-l selectezi (Shift adaugă la selecție), apoi **Izolează**-l sau **Ascunde**-l; **Arată tot** aduce totul înapoi.
+- **Desene**: planurile, secțiunile, fațadele și planșele pe care le-ai bifat, desenate cum le tipărește Lapin, clare la orice mărire. Trage ca să deplasezi, rotița ca să mărești, **Tipărește** ca să tipărești desenul afișat. Fă clic pe un element dintr-un desen ca să-l selectezi: e același element și în 3D.
+- **Deviz**, când proiectul are unul: capitolele și liniile lui, totalurile, marcate *orientativ* când folosește valorile aproximative ale Lapin. Fă clic pe titlul unei coloane ca să sortezi, scrie în **Filtru** ca să găsești o linie, fă clic pe o linie ca să-i selectezi elementele.
+- **Proprietăți**: ce e selectat, cu clasa, tipul, nivelul, materialul, proprietățile și cantitățile lui.
+
+![Fișier → Lapin pentru browser](shots/html-export-dialog.webp)
+
+În dialog alegi ce desene intră (implicit fiecare desen care arată un element al modelului; un plan doar cu axe sau marcaje e în listă nebifat, cu *(niciun element)*, și intră dacă îl bifezi), modelul 3D, devizul și **proiectul însuși**. Pagina arată mărimea ei înainte de a fi scrisă. Pagina vorbește limba pe care o vorbește Lapin când o exporți.
+
+![Pagina într-un browser: modelul 3D](shots/html-export-3d.webp)
+
+![Un plan în pagină, cu un perete selectat care își arată proprietățile](shots/html-export-drawing.webp)
+
+![Devizul în pagină](shots/html-export-costs.webp)
+
+Cu proiectul înăuntru, pagina este și proiectul: **Fișier → Deschide** în Lapin ia fișierul .html și deschide proiectul pe care îl conține, nesalvat; **Salvează** întreabă unde să-l păstrezi ca .lapin și nu scrie niciodată peste pagină. Fără proiect, pagina arată doar modelul, iar Lapin nu o deschide. O pagină web scrisă de altcineva decât Lapin este refuzată.
+
+Pagina este o instantanee: ce arată este proiectul de la momentul exportului, iar nimic din ce face un cititor în ea nu schimbă proiectul. Este cât părțile ei: proiectul, modelul 3D (cam cât un export GLB) și desenele, plus cam 0,6 MB pentru vizualizatorul în sine.

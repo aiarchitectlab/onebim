@@ -1,0 +1,418 @@
+using System.Diagnostics;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Graphs;
+
+/// <summary>What one node gave: its outputs by port, or why it failed; how many items it ran and how many failed.</summary>
+public sealed class NodeResult
+{
+    public Dictionary<string, object?> Outputs { get; } = new(StringComparer.Ordinal);
+    public string? Error { get; set; }
+    public string? Warning { get; set; }
+    public int Items { get; set; } = 1;
+    public int Failed { get; set; }
+    public bool IsCommand { get; init; }
+
+    public JsonObject ToJson()
+    {
+        var o = new JsonObject();
+        var outs = new JsonObject();
+        foreach (var (k, v) in Outputs) outs[k] = Values.ToDisplay(v);
+        o["outputs"] = outs;
+        if (Error != null) o["error"] = Error;
+        if (Warning != null) o["warning"] = Warning;
+        if (Items != 1) o["items"] = Items;
+        // How many values each output holds, so the interface draws a list's wire thicker (§3).
+        var counts = new JsonObject();
+        foreach (var (k, v) in Outputs) if (v is List<object?> l) counts[k] = l.Count;
+        if (counts.Count > 0) o["counts"] = counts;
+        return o;
+    }
+}
+
+/// <summary>A graph stopped as a whole (its time or its calls ran out): not one item's failure, so never caught per item.</summary>
+public sealed class GraphStopped(string message) : ModelException(message);
+
+/// <summary>
+/// A graph evaluated (docs/plan-visual-graphs.md §3): its nodes in the order their wires give, each fed by its wires, else
+/// its constants, else its ports' defaults. A list on an input that takes one value maps the node over it, in parallel
+/// with the other inputs' lists by the longest (a shorter list repeats its last item), one level at a time; a node that
+/// fails says why and the nodes after it say which input has nothing, while the rest goes on. Command nodes run through
+/// <paramref name="commands"/> (a copy of the model for a preview, the command's own context for Bake); without one they
+/// are not run.
+/// </summary>
+public sealed class Evaluator
+{
+    /// <summary>What an evaluation and the groups' evaluations inside it share: results by path, what was made, calls, the clock.</summary>
+    sealed class Run
+    {
+        public readonly Dictionary<string, NodeResult> Results = new(StringComparer.Ordinal);
+        public readonly Dictionary<string, string> Kinds = new(StringComparer.Ordinal);
+        public readonly List<string> Made = [];
+        public readonly Stopwatch Clock = Stopwatch.StartNew();
+        public int Calls;
+    }
+
+    readonly GraphDoc doc;
+    readonly IModelView model;
+    readonly ModuleCatalog catalog;
+    readonly TrackingContext? commands;
+    readonly IQueryContext query;
+    readonly TimeSpan budget;
+    readonly Run _run;
+    /// <summary>The path of the group evaluated (<c>g1/</c>), empty for the graph itself.</summary>
+    readonly string _prefix;
+    /// <summary>A group's inputs as its nodes take them: (node, port) → the value wired into the group.</summary>
+    readonly Dictionary<(string Node, string Port), object?> _injected;
+
+    public Evaluator(GraphDoc doc, IModelView model, ModuleCatalog catalog, TrackingContext? commands, IQueryContext query, TimeSpan budget)
+        : this(doc, model, catalog, commands, query, budget, new Run(), "", []) { }
+
+    Evaluator(GraphDoc doc, IModelView model, ModuleCatalog catalog, TrackingContext? commands, IQueryContext query, TimeSpan budget, Run run, string prefix, Dictionary<(string, string), object?> injected)
+    {
+        this.doc = doc;
+        this.model = model;
+        this.catalog = catalog;
+        this.commands = commands;
+        this.query = query;
+        this.budget = budget;
+        _run = run;
+        _prefix = prefix;
+        _injected = injected;
+    }
+
+    /// <summary>
+    /// The storey a command node without one of its own works on (the view's, as a tool draws on the storey shown): set as its
+    /// <c>storeyId</c> when its inputs have none. Null: each command's own default (the first storey).
+    /// </summary>
+    public string? Storey { get; init; }
+
+    /// <summary>What each node gave, by its path (a group's nodes as <c>group/node</c>).</summary>
+    public Dictionary<string, NodeResult> Results => _run.Results;
+    /// <summary>What the commands made, in order (elements first: what has a geometry).</summary>
+    public List<string> Made => _run.Made;
+    public int Calls => _run.Calls;
+    Stopwatch _clock => _run.Clock;
+
+    public const string CommandPrefix = "command:";
+    public const string QueryPrefix = "query:";
+
+    NodeResult RunNode(GraphNode node)
+    {
+        var isCommand = node.Kind.StartsWith(CommandPrefix, StringComparison.Ordinal);
+        var result = new NodeResult { IsCommand = isCommand };
+        try
+        {
+            if (node.IsGroup) { RunGroup(node, result); return result; }
+            var (inputs, whole, outputs, run) = Prepare(node);
+            // A command's or a query's list argument takes a list whole, and maps only over a list of lists (one list each run).
+            var nested = node.Kind.StartsWith(CommandPrefix, StringComparison.Ordinal) || node.Kind.StartsWith(QueryPrefix, StringComparison.Ordinal) ? whole : null;
+            var (values, items, failed, first) = Map(run, inputs, whole, outputs.Length, nested);
+            for (var i = 0; i < outputs.Length; i++) result.Outputs[outputs[i]] = values[i];
+            result.Items = items;
+            result.Failed = failed;
+            if (failed > 0 && failed == items) throw new CommandException(first!);
+            if (failed > 0) result.Warning = $"{failed} of {items} failed: {first}";
+            foreach (var (port, v) in result.Outputs)
+                if (Values.Size(v) > GraphLimits.MaxItems * 2) throw new CommandException($"„{port}” holds more than {GraphLimits.MaxItems} items.");
+        }
+        catch (GraphStopped e) { result.Outputs.Clear(); result.Error = e.Message; throw new Stop(result); }
+        catch (Exception e) when (e is not Stop)
+        {
+            result.Outputs.Clear();
+            result.Error = Message(e);
+        }
+        return result;
+    }
+
+    /// <summary>Thrown to end the run at a node whose time or calls ran out: that node keeps its error, the ones after it are skipped.</summary>
+    sealed class Stop(NodeResult at) : Exception { public NodeResult At => at; }
+
+    /// <summary>The run, all nodes; a run stopped part way marks what was not reached.</summary>
+    public Evaluator RunAll()
+    {
+        var order = doc.Order();
+        for (var i = 0; i < order.Count; i++)
+        {
+            _run.Kinds[_prefix + order[i].Id] = order[i].Kind;
+            try { Results[_prefix + order[i].Id] = RunNode(order[i]); }
+            catch (Stop s)
+            {
+                Results[_prefix + order[i].Id] = s.At;
+                foreach (var rest in order.Skip(i + 1)) Results[_prefix + rest.Id] = new NodeResult { Error = "Not reached: the graph was stopped before it.", IsCommand = rest.Kind.StartsWith(CommandPrefix, StringComparison.Ordinal) };
+                if (_prefix.Length > 0) throw;
+                break;
+            }
+        }
+        return this;
+    }
+
+    /// <summary>
+    /// A group (decision 536): its nodes evaluated as a graph of their own, each open input fed by the wire into the group
+    /// (taken as it is: the nodes inside map over it as they would outside), each open output read from the node inside.
+    /// Its nodes' results are kept by their paths (<c>group/node</c>), so an error inside shows on the node that failed.
+    /// </summary>
+    void RunGroup(GraphNode node, NodeResult result)
+    {
+        var injected = new Dictionary<(string, string), object?>();
+        foreach (var w in doc.Wires.Where(w => w.To == node.Id))
+        {
+            var from = Results.GetValueOrDefault(_prefix + w.From);
+            if (from == null || from.Error != null)
+                throw new CommandException($"The input „{w.In}” has nothing: „{Name(doc.Node(w.From)!)}” failed.");
+            var port = node.Ins.First(p => p.Name == w.In);
+            injected[(port.Node, port.Port)] = from.Outputs.GetValueOrDefault(w.Out);
+        }
+        var path = $"{_prefix}{node.Id}/";
+        new Evaluator(node.Inner!, model, catalog, commands, query, budget, _run, path, injected) { Storey = Storey }.RunAll();
+        string? failed = null;
+        foreach (var p in node.Outs)
+        {
+            var r = Results.GetValueOrDefault(path + p.Node);
+            if (r == null || r.Error != null) { failed ??= $"„{Name(node.Inner!.Node(p.Node)!)}” inside failed: {r?.Error}"; continue; }
+            result.Outputs[p.Name] = r.Outputs.GetValueOrDefault(p.Port);
+        }
+        if (failed != null && result.Outputs.Count == 0 && node.Outs.Count > 0) throw new CommandException(failed);
+        var inside = Results.Where(x => x.Key.StartsWith(path, StringComparison.Ordinal)).Select(x => x.Value).ToList();
+        var bad = inside.Count(x => x.Error != null);
+        if (failed != null || bad > 0) result.Warning = failed ?? $"{bad} of the {inside.Count} nodes inside failed.";
+    }
+
+    static string Message(Exception e) => e switch
+    {
+        CommandException or ModelException or ExprException => e.Message,
+        _ => $"{e.GetType().Name}: {e.Message}",
+    };
+
+    (Dictionary<string, object?> Inputs, HashSet<string> Whole, string[] Outputs, Func<Dictionary<string, object?>, object?[]> Run) Prepare(GraphNode node)
+    {
+        var inputs = new Dictionary<string, object?>(StringComparer.Ordinal);
+        var whole = new HashSet<string>(node.Whole, StringComparer.Ordinal);
+        // What its wires bring: an upstream node that failed leaves this one with nothing to work on.
+        foreach (var w in doc.Wires.Where(w => w.To == node.Id))
+        {
+            var from = Results.GetValueOrDefault(_prefix + w.From);
+            if (from == null || from.Error != null)
+                throw new CommandException($"The input „{w.In}” has nothing: „{Name(doc.Node(w.From)!)}” failed.");
+            inputs[w.In] = from.Outputs.GetValueOrDefault(w.Out);
+        }
+        // A group's node fed from outside the group, as by a wire.
+        foreach (var ((n, port), v) in _injected) if (n == node.Id) inputs[port] = v;
+        if (Builtins.Of(node.Kind) is { } def)
+        {
+            foreach (var p in def.Inputs)
+            {
+                if (p.Whole || p.Setting) whole.Add(p.Name);
+                if (inputs.ContainsKey(p.Name)) continue;
+                inputs[p.Name] = node.Values[p.Name] is { } v ? Values.FromConstant(v) : p.Default is { } d ? Values.FromConstant(d) : null;
+            }
+            var call = def.Run;
+            return (inputs, whole, def.Outputs.Select(o => o.Name).ToArray(), i => Timed(() => call(new NodeCall(node, i, model, Storey, query))));
+        }
+        foreach (var (k, v) in node.Values) if (!inputs.ContainsKey(k)) inputs[k] = Values.FromConstant(v);
+        // The arguments the commands read as lists, whatever the graph noted (one made by a script, or before the interface knew).
+        foreach (var k in inputs.Keys) if (ListArgument(k)) whole.Add(k);
+        if (node.Kind.StartsWith(CommandPrefix, StringComparison.Ordinal))
+        {
+            var name = node.Kind[CommandPrefix.Length..];
+            if (GraphLimits.Refused(name) is { } refused) throw new CommandException(refused);
+            var entry = catalog.Command(name) ?? throw new CommandException($"This edition has no command „{name}”.");
+            if (commands == null) throw new CommandException("Commands run in a preview or when the graph is baked.");
+            return (inputs, whole, ["ids", "result"], i => Timed(() => RunCommand(entry, i)));
+        }
+        if (node.Kind.StartsWith(QueryPrefix, StringComparison.Ordinal))
+        {
+            var name = node.Kind[QueryPrefix.Length..];
+            var handler = catalog.Query(name) ?? throw new CommandException($"This edition has no query „{name}”.");
+            return (inputs, whole, ["result"], i => Timed(() => [Values.FromJson(handler(query, Args(i)))]));
+        }
+        throw new CommandException($"„{node.Kind}” is not a node this edition knows.");
+    }
+
+    /// <summary>
+    /// An argument the commands read as a list by its name (the catalogue's list arguments: ids, points, pts, shapes, storeyIds
+    /// and every …Ids): taken whole by a command or query node even when the graph does not say so.
+    /// </summary>
+    public static bool ListArgument(string name) =>
+        name is "ids" or "points" or "pts" or "shapes" || (name.Length > 3 && name.EndsWith("Ids", StringComparison.Ordinal));
+
+    static string Name(GraphNode n) => n.Label ?? (Builtins.Of(n.Kind)?.Label ?? n.Kind.Split(':')[^1]);
+
+    object?[] Timed(Func<object?[]> f)
+    {
+        if (_clock.Elapsed > budget) throw new GraphStopped($"The graph took longer than {budget.TotalSeconds:0} s: stopped here.");
+        return f();
+    }
+
+    /// <summary>Inputs as a command's arguments: a point on pt:N gives xN and yN (a wall's ends), a path never goes.</summary>
+    static JsonObject Args(Dictionary<string, object?> inputs)
+    {
+        var a = new JsonObject();
+        foreach (var (k, v) in inputs)
+        {
+            if (v == null) continue;
+            if (GraphLimits.PathKeys.Contains(k)) throw new CommandException($"A graph does not pass a file's path („{k}”).");
+            if (k.StartsWith("pt:", StringComparison.Ordinal))
+            {
+                var p = Values.Point(v, k);
+                var n = k[3..];
+                a[$"x{n}"] = p.X;
+                a[$"y{n}"] = p.Y;
+                continue;
+            }
+            a[k] = Values.ToArg(v);
+        }
+        return a;
+    }
+
+    object?[] RunCommand(CommandEntry entry, Dictionary<string, object?> inputs)
+    {
+        if (++_run.Calls > GraphLimits.MaxCalls) throw new GraphStopped($"A graph runs at most {GraphLimits.MaxCalls} commands at once: stopped here.");
+        var ctx = commands!;
+        var args = Args(inputs);
+        if (Storey != null && !args.ContainsKey("storeyId") && ctx.Model.Get(Storey) is { Class: IfcClass.BuildingStorey }) args["storeyId"] = Storey;
+        ctx.Begin();
+        var r = entry.Handler(ctx, args);
+        Driven.After(ctx, ctx, entry.Name);
+        var added = ctx.Take().Where(id => ctx.Model.Get(id) != null).Distinct().ToList();
+        var producers = catalog.Get<IGeometryProducers>();
+        var elements = added.Where(id => producers?.Geometry(ctx.Model.Get(id)!.Class) != null).ToList();
+        var ids = elements.Count > 0 ? elements : added;
+        Made.AddRange(ids);
+        return [ids.Cast<object?>().ToList(), Values.FromJson(r)];
+    }
+
+    /// <summary>
+    /// <paramref name="run"/> over its inputs: once, or mapped over the lists given to inputs that take one value (§3); a
+    /// command's list argument only over a list of lists, or a list of polylines on its points (decision 535). The
+    /// values by output (lists when mapped), how many items ran, how many failed and the first failure's message.
+    /// </summary>
+    static (object?[] Values, int Items, int Failed, string? First) Map(Func<Dictionary<string, object?>, object?[]> run, Dictionary<string, object?> inputs, HashSet<string> whole, int outputs, HashSet<string>? nested = null)
+    {
+        var listed = inputs.Where(kv => kv.Value is List<object?> l && (!whole.Contains(kv.Key) || nested?.Contains(kv.Key) == true && l.Count > 0 && l.All(x => x is List<object?> inner && !PointLike(inner) || x is Polyline && PointsArgument(kv.Key))))
+            .Select(kv => kv.Key).ToList();
+        if (listed.Count == 0) return (Fit(run(inputs), outputs), 1, 0, null);
+        var n = listed.Max(k => ((List<object?>)inputs[k]!).Count);
+        if (listed.Any(k => ((List<object?>)inputs[k]!).Count == 0)) n = 0;
+        var columns = Enumerable.Range(0, outputs).Select(_ => new List<object?>(n)).ToArray();
+        int items = 0, failed = 0;
+        string? first = null;
+        for (var i = 0; i < n; i++)
+        {
+            var one = new Dictionary<string, object?>(inputs, StringComparer.Ordinal);
+            foreach (var k in listed) { var l = (List<object?>)inputs[k]!; one[k] = l[Math.Min(i, l.Count - 1)]; }
+            try
+            {
+                var (v, it, f, msg) = Map(run, one, whole, outputs, nested);
+                for (var o = 0; o < outputs; o++) columns[o].Add(v[o]);
+                items += it;
+                failed += f;
+                first ??= msg;
+            }
+            catch (GraphStopped) { throw; }
+            catch (Exception e)
+            {
+                for (var o = 0; o < outputs; o++) columns[o].Add(null);
+                items++;
+                failed++;
+                first ??= Message(e);
+            }
+        }
+        return (columns.Cast<object?>().ToArray(), items, failed, first);
+    }
+
+    /// <summary>An argument that is one outline's points: a list of polylines on it is a list of outlines, one run each (a floor on each storey).</summary>
+    static bool PointsArgument(string name) => name is "points" or "pts";
+
+    /// <summary>A list of two or three numbers: a point written as [x, y] or [x, y, z], an item of a list of points, never a list to map over.</summary>
+    static bool PointLike(List<object?> l) => l.Count is 2 or 3 && l.All(x => x is double);
+
+    static object?[] Fit(object?[] v, int n) => v.Length == n ? v : [.. v.Concat(Enumerable.Repeat<object?>(null, Math.Max(0, n - v.Length))).Take(n)];
+
+    /// <summary>The points and polylines the nodes gave (the ghost draws them), as many as <paramref name="most"/> coordinates allow.</summary>
+    public (List<Vec3> Points, List<Polyline> Lines) Shapes(int most)
+    {
+        var points = new List<Vec3>();
+        var lines = new List<Polyline>();
+        var used = 0;
+        void Walk(object? v)
+        {
+            if (used > most) return;
+            switch (v)
+            {
+                case Vec3 p: points.Add(p); used += 3; break;
+                case Polyline l: lines.Add(l); used += l.Points.Count * 3; break;
+                case List<object?> list: foreach (var x in list) Walk(x); break;
+            }
+        }
+        foreach (var (path, r) in Results)
+            if (r.Error == null && Builtins.Of(_run.Kinds.GetValueOrDefault(path) ?? "") is { Group: "Geometry" })
+                foreach (var v in r.Outputs.Values) Walk(v);
+        return (points, lines);
+    }
+}
+
+/// <summary>
+/// A command's context for the commands a graph runs: everything goes to <paramref name="edit"/> (a copy of the model's
+/// transaction, or the bake command's own context), and what each command adds is noted (its <c>ids</c> output).
+/// </summary>
+public sealed class TrackingContext(IEdit edit, ModuleCatalog catalog, IQueryContext query) : ICommandContext
+{
+    List<string> _added = [];
+
+    public void Begin() => _added = [];
+    public List<string> Take() { var t = _added; _added = []; return t; }
+
+    public IModelView Model => edit.Model;
+    public IReadOnlyList<Change<Entity>> EntityChanges => edit.EntityChanges;
+    public IReadOnlyList<Change<Relation>> RelationChanges => edit.RelationChanges;
+    public string NewId() => edit.NewId();
+    public void Add(Entity entity) { edit.Add(entity); _added.Add(entity.Id); }
+    public void Replace(Entity entity) => edit.Replace(entity);
+    public void Remove(string id) => edit.Remove(id);
+    public Relation Relate(string relationClass, string relating, string related) => edit.Relate(relationClass, relating, related);
+    public void Unrelate(string relationClass, string related) => edit.Unrelate(relationClass, related);
+    public void AddRelation(Relation relation) => edit.AddRelation(relation);
+    public void ReplaceRelation(Relation relation) => edit.ReplaceRelation(relation);
+    public void RemoveRelation(string id) => edit.RemoveRelation(id);
+    public IServices Services => catalog;
+    public ClassDescriptor? Describe(string ifcClass) => catalog.Class(ifcClass);
+    public IQueryContext Query => query;
+}
+
+/// <summary>A query's context over a model that is not the session's (the preview's copy, or the bake's edit): geometry built as asked, by the modules' producers.</summary>
+public sealed class ModelQuery(IModelView model, ModuleCatalog catalog) : IQueryContext
+{
+    // Kept while the model stands still: an element's geometry follows others (its type's layers, an opening cut in it,
+    // the walls it joins), which a command may change without touching the element itself.
+    readonly Dictionary<string, (long Revision, long Version, ElementGeometry? Geometry)> _built = [];
+
+    public IModelView Model => model;
+    public IServices Services => catalog;
+    public ClassDescriptor? Describe(string ifcClass) => catalog.Class(ifcClass);
+
+    public ElementGeometry? Geometry(string entityId)
+    {
+        if (model.Get(entityId) is not { } e) return null;
+        if (_built.TryGetValue(entityId, out var b) && b.Revision == model.Revision && b.Version == e.Version) return b.Geometry;
+        var g = Build(e, model, catalog);
+        _built[entityId] = (model.Revision, e.Version, g);
+        return g;
+    }
+
+    /// <summary>An entity's geometry, by its class's producer and the geometry filters; null when its class builds none or the build fails.</summary>
+    public static ElementGeometry? Build(Entity e, IModelView model, ModuleCatalog catalog)
+    {
+        if (catalog.Get<IGeometryProducers>()?.Geometry(e.Class) is not { } producer) return null;
+        try
+        {
+            var g = producer(e, model, catalog);
+            if (g != null) foreach (var f in catalog.All<IGeometryFilter>()) g = f.Apply(e, g, model, catalog) ?? g;
+            return g;
+        }
+        catch (Exception) { return null; }
+    }
+}

@@ -1,0 +1,112 @@
+# Acknowledgements
+
+What Lapin has taken from other projects, and where it is in the code.
+
+## BimGo
+
+[BimGo](https://github.com/aussieBIMguru/BimGo) by Aussie BIM Guru is a first-person walkthrough for Revit models. It is released under the MIT No Attribution licence (MIT-0), so nothing below is owed. We credit it anyway, because a good part of Lapin's coordination and presentation tools follows its design, its numbers and its tests.
+
+Lapin uses none of BimGo's renderer: BimGo draws with its own OpenGL engine, and Lapin draws with three.js. What Lapin took is the methods, the constants and the test cases. The code was rewritten in Lapin's engine and interface.
+
+### Clash detection (`clash` module, decisions 313 and 317)
+
+- **Engine.** `engine/src/Modules/Coordination/Lapin.Clash/ClashEngine.cs` follows BimGo's `ClashEngine`:
+  - a broad phase of sweep and prune over boxes, along the axis the centres spread most;
+  - a narrow phase over triangles, in parallel, with a triangle tree for bodies of 384 triangles or more;
+  - the hard depth as the narrowest width of the crossing over the axes and the crossing faces' normals;
+  - buried corners for shallow crossings (a pipe sunk into a slab);
+  - clearance tests by triangle distances;
+  - the 5 mm hard tolerance, the 50 mm clearance and the 10,000-clash limit.
+- **Geometry.** `engine/src/Geometry/Lapin.Geometry/Collisions.cs` follows BimGo's `ClashGeometry` and `ClashTree`:
+  - Möller's triangle–triangle test;
+  - Ericson's closest points;
+  - Möller–Trumbore rays;
+  - the even–odd inside test along three skewed rays;
+  - the median-split triangle tree.
+- **Search sets.** `SearchSets.cs` follows BimGo's search sets:
+  - the rule operators and how "not" rules take elements out;
+  - nested groups;
+  - numbers read as people write them ("600 mm", "1,200", "2,5").
+
+  The fields are Lapin's own: IFC class, type, storey, material, linked file and parameter.
+- **Following clashes.** `ClashTests.cs` follows BimGo's `ClashMerge`:
+  - clashes followed from run to run by their pair;
+  - the statuses new, active, reviewed, approved and resolved;
+  - a run cut short at the limit resolving nothing.
+- **Groups and reports.** BimGo's `ClashGroups` and `ClashReports` gave:
+  - grouping by element, with the element in most clashes first and two clashes at least per group;
+  - the XML report in the layout Navisworks writes;
+  - the HTML report with a picture of each clash.
+- **Framing.** BimGo's `ClashFraming` gave the way a clash is shown in 3D: a section box with 1 m round the clash and 2 m at least, the camera 2.5 m back and 20° down.
+- **Tests.** BimGo's clash tests are ported with their cases and numbers in `engine/tests/Lapin.Engine.Tests/ClashEngineTests.cs`:
+  - the duct through a beam, 200 mm deep;
+  - the 3 mm overlap, ignored at 5 mm;
+  - the pipe sunk 40 mm into a slab;
+  - the clearance gaps;
+  - the limit.
+
+Where Lapin goes further:
+- an element wholly inside another is reported (BimGo leaves it out; `Contained: false` behaves as BimGo does);
+- pairs meant to meet are skipped by Lapin's own relations (joins, fills, assemblies, attached elements);
+- the openings check is a test kind of its own.
+
+### The realistic 3D view (decision 310)
+
+`ui/src/viewport/render3d.ts` takes BimGo's numbers:
+- the ambient occlusion radius of about 0.6 m;
+- shadow quality tiers;
+- the sun's colour from warm at sunrise to white at noon.
+
+BimGo's sun position and sun hours, which use NOAA's formulas, matched the sun Lapin already had in its urban module; that sun is now in the platform (`Sun.cs`).
+
+### Daylight studies (planned: issues #11 and #12)
+
+The plan in `docs/plan-visualisation.md` follows BimGo's sun hours, daylight factor and illuminance studies:
+- the grid on the room's surfaces;
+- the 192 sky patches;
+- the BRE split-flux formula;
+- the Ladybug colour scale;
+- the CSV columns.
+
+### People and cars (decision 324)
+
+BimGo draws its trees, people and cars in code (`EntourageArt.cs`), with no third-party pictures. `engine/src/Modules/Civil/Lapin.Civil/Entourage.cs` takes from it:
+- the four people (a man standing, a woman walking, a child waving, a person on the phone), with their proportions (the head about 1/7.5 of the height, a child's 1/5.5), their joints, the radii of their limbs, their stances and their colours;
+- the car's and the SUV's side profiles, their belt lines and their wheels;
+- the kinds' heights (1.78, 1.66, 1.15, 1.72, 1.45 and 1.85 m).
+
+BimGo draws these as pictures that turn to the camera. Lapin builds them as bodies, so plans, elevations, sections, sun shadows and exports see them:
+- a person's limbs are rings tapered from joint to joint, its torso is rings down its side, and its head is an ellipsoid under its hair;
+- a car's profile is carried across its width, with its cabin glass under the roof.
+
+The trees stay Lapin's own plantings (decision 234).
+
+## ambientCG
+
+The texture sets a material can take in its Appearance tab (docs/plan-render.md, S1; decision 777) are from [ambientCG](https://ambientcg.com) by Lennart Demes and its contributors, released under Creative Commons CC0 1.0, so nothing is owed. We credit them anyway. The sets are Bricks085, Concrete034, PaintedPlaster017, WoodFloor043, Tiles107, PavingStones150, Metal009 and Fabric061, each brought down to 512 px for the app. Their register, with each file's hash, is `ui/src/viewport/texture-library.json`; `pnpm check:licenses` checks it.
+
+## The path tracer
+
+The 3D view's **Render** (docs/plan-render.md, S4) traces light with [three-gpu-pathtracer](https://github.com/gkjohnson/three-gpu-pathtracer) by Garrett Johnson (MIT) over his [three-mesh-bvh](https://github.com/gkjohnson/three-mesh-bvh) (MIT), both npm dependencies of the interface. Still images on the desktop are denoised by [Intel Open Image Denoise](https://github.com/RenderKit/oidn) (Apache-2.0, with oneTBB, Apache-2.0): its own `oidnDenoise` program from the official release, run beside the engine, never linked into Lapin; `scripts/fetch-oidn.mjs` fetches it, checked against the SHA-256 in `engine/native/oidn.json`, and keeps only its CPU (and, on macOS, Metal) device. The denoiser in the view and in the browser is Lapin's own (`ui/src/viewport/denoise.ts`), after the edge-avoiding à-trous filter of H. Dammertz, D. Sewtz, J. Hanika and H. Lensch, "Edge-Avoiding À-Trous Wavelet Transform for fast Global Illumination Filtering" (HPG 2010).
+
+## blender-nurbs
+
+[blender-nurbs](https://github.com/cekuhnen/blender-nurbs) ("NURBS Proto") by cekuhnen is a NURBS surface-modelling add-on for Blender, built on NVIDIA's USD BRep kernel. Reading it, its development notes and the way it treats surfaces, gave Studio's free-form tools many of their ideas (docs/plan-studio-freeform.md §0–6): a smooth body edited through a coarse cage, creases, mirror symmetry, thickness, and exact surfaces carried out to IFC and STEP. We credit it as the inspiration.
+
+No code, data or files from it are used. Lapin's SubD solids (decision 780: `engine/src/Geometry/Lapin.Geometry/SubD.cs`, `StudioModule.SubD.cs`, the cage edit mode in `ui/src/modules/studio/`) and the exact surfaces that follow them are written from the published methods (Catmull–Clark with DeRose's semi-sharp creases; Piegl and Tiller's *The NURBS Book* for B-splines).
+
+## Published methods
+
+The methods below are credited the way BimGo credits them:
+- T. Möller, "A Fast Triangle-Triangle Intersection Test" (1997);
+- T. Möller and B. Trumbore, "Fast, Minimum Storage Ray-Triangle Intersection" (1997);
+- C. Ericson, "Real-Time Collision Detection" (2005), ch. 5;
+- NOAA Global Monitoring Laboratory, "General Solar Position Calculations";
+- the CIE overcast and clear skies;
+- BRE's split-flux formula;
+- E. Catmull and J. Clark, "Recursively generated B-spline surfaces on arbitrary topological meshes" (1978), and T. DeRose, M. Kass and T. Truong, "Subdivision Surfaces in Character Animation" (1998), for SubD solids;
+- L. Piegl and W. Tiller, "The NURBS Book" (1997), for B-splines.
+
+## Graphisoft Archicad
+
+The vector sun shadows in elevations and sections (decision 322) follow how Archicad lets each elevation take the 3D view's sun or one of its own. The default sun follows the old drawing convention: over the left shoulder, along a cube's diagonal. No Archicad code or content is used.

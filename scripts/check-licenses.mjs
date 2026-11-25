@@ -1,0 +1,169 @@
+#!/usr/bin/env node
+// Lapin stays MIT: every production dependency, of the UI (npm) and of the
+// engine (NuGet, everything the host ships with), must carry a permissive
+// licence. Fails (exit 1) on anything else — copyleft (GPL, LGPL, AGPL, MPL,
+// EPL, CC-BY-SA…) or unknown — so it is caught before it ships. Dev-only
+// tools (TypeScript, Vite, test runners, xUnit) are not shipped and not checked.
+// The furniture models shipped (CC0 meshes and their previews) are checked against their register.
+import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const ALLOWED = new Set(['MIT', 'MIT-0', 'ISC', 'BSD-2-Clause', 'BSD-3-Clause', '0BSD', 'Apache-2.0', 'Zlib', 'CC0-1.0', 'Unlicense', 'BlueOak-1.0.0', 'Python-2.0']);
+// An SPDX expression passes when one side of an OR is allowed and every side of an AND is.
+const ok = (expr) => expr.split(/\s+OR\s+/i).some((alt) => alt.replace(/[()]/g, '').split(/\s+AND\s+/i).every((p) => ALLOWED.has(p.trim())));
+
+// A file path, not a URL's pathname: that one is percent-encoded (a space is %20).
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+// pnpm is pnpm.cmd on Windows, which runs only through the shell.
+const out = execFileSync('pnpm', ['licenses', 'list', '--prod', '--json'], { encoding: 'utf8', cwd: root, shell: process.platform === 'win32' });
+const byLicence = JSON.parse(out);
+const bad = [];
+let count = 0;
+for (const [licence, pkgs] of Object.entries(byLicence)) {
+  for (const p of pkgs) {
+    count++;
+    if (!ok(licence)) bad.push(`${p.name}@${(p.versions ?? [p.version]).join(',')}: ${licence}`);
+  }
+}
+const licences = new Set(Object.keys(byLicence));
+
+// The engine: what the host and the modules reference, transitively (the
+// modules ride on the host's dependencies or bring their own).
+// Found in Node rather than with `find`, which Windows does not have.
+const modulesDir = join(root, 'engine/src/Modules');
+const moduleProjects = existsSync(modulesDir)
+  ? readdirSync(modulesDir, { recursive: true }).map(String).filter((f) => f.endsWith('.csproj')).sort().map((f) => join('engine/src/Modules', f))
+  : [];
+const projects = ['engine/src/Host/Lapin.Host', ...moduleProjects];
+const nuget = process.env.NUGET_PACKAGES ?? join(homedir(), '.nuget/packages');
+// A licence shipped as a file: read its title.
+const FILE_LICENCES = [[/Apache License\s+Version 2\.0/i, 'Apache-2.0'], [/^\s*MIT License/im, 'MIT'], [/Permission is hereby granted, free of charge/i, 'MIT']];
+// NuGet packages that declare no licence, each verified by hand from its source repository: the licence file read there
+// (its address and its words below), for this exact version only (its nuspec's commit must be the one checked), so a new
+// version is checked again. Speckle.DoubleNumerics (the Speckle SDK's, docs/plan-speckle.md): a fork of
+// Weingartner/System.Numerics.DoubleVectors, MIT ("MIT License ... Copyright (c) 2016 Weingartner ... Permission is
+// hereby granted, free of charge ..."), read on 23.11.2026; its text is in the Speckle module's NOTICE.md.
+const NUGET_VERIFIED = {
+  'Speckle.DoubleNumerics@4.1.0': {
+    licence: 'MIT',
+    source: 'https://github.com/specklesystems/Speckle.DoubleNumerics/blob/master/LICENSE',
+    commit: 'eff10f3469d3389b67eaf69286aa054806bb0f52',
+  },
+};
+const seen = new Set();
+for (const project of projects) {
+  let listed;
+  try {
+    listed = JSON.parse(execFileSync('dotnet', ['list', project, 'package', '--include-transitive', '--format', 'json'], { encoding: 'utf8', cwd: root }));
+  } catch {
+    bad.push(`${project}: cannot list its packages (run pnpm build:engine first)`);
+    continue;
+  }
+  for (const fw of listed.projects?.flatMap((p) => p.frameworks ?? []) ?? [])
+    for (const p of [...(fw.topLevelPackages ?? []), ...(fw.transitivePackages ?? [])]) {
+      const key = `${p.id}@${p.resolvedVersion}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      count++;
+      const dir = join(nuget, p.id.toLowerCase(), p.resolvedVersion);
+      const nuspec = join(dir, `${p.id.toLowerCase()}.nuspec`);
+      const text = existsSync(nuspec) ? readFileSync(nuspec, 'utf8') : '';
+      const expr = text.match(/<license type="expression">([^<]+)<\/license>/)?.[1];
+      const file = text.match(/<license type="file">([^<]+)<\/license>/)?.[1];
+      const verified = NUGET_VERIFIED[key];
+      const fromFile = file && existsSync(join(dir, file)) ? FILE_LICENCES.find(([re]) => re.test(readFileSync(join(dir, file), 'utf8')))?.[1] : undefined;
+      // A package verified by hand counts only as the very build checked (its nuspec names the same commit).
+      const byHand = !expr && !fromFile && verified && text.includes(`commit="${verified.commit}"`) ? verified.licence : undefined;
+      const licence = expr ?? fromFile ?? byHand;
+      if (!licence || !ok(licence)) bad.push(`${key} (NuGet): ${licence ?? 'unknown licence'}`);
+      else licences.add(licence);
+    }
+}
+
+// Shipped assets (decision 477): the furniture models and their previews, each in the register with its source, a
+// licence of ASSET_ALLOWED (no attribution, no share-alike) and its hash as shipped; no file shipped that it does not list.
+const ASSET_ALLOWED = new Set(['CC0-1.0', 'MIT-0']);
+let assets = 0;
+const registerDir = join(root, 'engine/src/Modules/Interior/Lapin.Furniture.Models');
+const registerPath = join(registerDir, 'furniture-assets.json');
+if (existsSync(registerPath)) {
+  const reg = JSON.parse(readFileSync(registerPath, 'utf8'));
+  const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  const listed = new Set();
+  const checkFile = (where, rel, hash, what) => {
+    const p = join(where === 'engine' ? registerDir : root, rel);
+    listed.add(p);
+    if (!existsSync(p)) bad.push(`${what}: ${rel} is listed but missing`);
+    else if (sha(p) !== hash) bad.push(`${what}: ${rel} is not the file registered (its hash differs)`);
+  };
+  for (const [id, src] of Object.entries(reg.sources ?? {}))
+    if (!ASSET_ALLOWED.has(src.licence) || !src.verified) bad.push(`asset source ${id}: ${src.licence ?? 'no licence'}${src.verified ? '' : ', not verified'}`);
+  for (const m of reg.models ?? []) {
+    assets++;
+    const src = reg.sources?.[m.source];
+    if (!src) bad.push(`model ${m.id}: its source ${m.source} is not in the register`);
+    if (!ASSET_ALLOWED.has(m.licence) || (src && src.licence !== m.licence)) bad.push(`model ${m.id}: ${m.licence ?? 'no licence'}`);
+    checkFile('engine', m.file, m.sha256, `model ${m.id}`);
+    if (m.thumbnail) checkFile('root', m.thumbnail.file, m.thumbnail.sha256, `model ${m.id}'s preview`);
+  }
+  for (const [dir, base] of [[join(registerDir, 'models'), registerDir], [join(root, 'ui/public/furniture-models'), root]])
+    if (existsSync(dir)) for (const f of readdirSync(dir)) if (!listed.has(join(dir, f))) bad.push(`${join(dir, f).slice(base.length + 1)}: shipped but not in the furniture models' register`);
+  licences.add('CC0-1.0 (assets)');
+}
+
+// The texture sets shipped (docs/plan-render.md, S1): every map in ui/src/viewport/texture-library.json with its hash as
+// shipped, its source's licence in ASSET_ALLOWED and verified; no file under ui/public/textures that the register does not list.
+const textureRegister = join(root, 'ui/src/viewport/texture-library.json');
+if (existsSync(textureRegister)) {
+  const reg = JSON.parse(readFileSync(textureRegister, 'utf8'));
+  const sha = (p) => createHash('sha256').update(readFileSync(p)).digest('hex');
+  const listed = new Set();
+  for (const [id, src] of Object.entries(reg.sources ?? {}))
+    if (!ASSET_ALLOWED.has(src.licence) || !src.verified) bad.push(`texture source ${id}: ${src.licence ?? 'no licence'}${src.verified ? '' : ', not verified'}`);
+  for (const set of reg.sets ?? []) {
+    if (!reg.sources?.[set.source]) bad.push(`texture set ${set.id}: its source ${set.source} is not in the register`);
+    for (const f of Object.values(set.files ?? {})) {
+      assets++;
+      const p = join(root, f.file);
+      listed.add(p);
+      if (!existsSync(p)) bad.push(`texture set ${set.id}: ${f.file} is listed but missing`);
+      else if (sha(p) !== f.sha256) bad.push(`texture set ${set.id}: ${f.file} is not the file registered (its hash differs)`);
+    }
+  }
+  const dir = join(root, 'ui/public/textures');
+  if (existsSync(dir))
+    for (const f of readdirSync(dir, { recursive: true }).map(String)) {
+      const p = join(dir, f);
+      if (f.endsWith('.jpg') || f.endsWith('.png')) if (!listed.has(p)) bad.push(`ui/public/textures/${f}: shipped but not in the texture register`);
+    }
+  licences.add('CC0-1.0 (textures)');
+}
+
+// Intel Open Image Denoise (docs/plan-render.md, S4), shipped beside the engine: its register's licence and its bundled
+// parts' allowed, each platform's release pinned by its SHA-256; a fetched copy holds the licence and nothing of the GPU
+// runtimes left out (SYCL, CUDA, HIP), whose terms are not the core's.
+const oidnRegister = join(root, 'engine/native/oidn.json');
+if (existsSync(oidnRegister)) {
+  const reg = JSON.parse(readFileSync(oidnRegister, 'utf8'));
+  if (!ok(reg.licence ?? '')) bad.push(`OIDN: ${reg.licence ?? 'no licence'}`);
+  for (const [part, l] of Object.entries(reg.bundled ?? {})) if (!ok(l)) bad.push(`OIDN's ${part}: ${l}`);
+  for (const [rid, a] of Object.entries(reg.assets ?? {})) {
+    if (!/^[0-9a-f]{64}$/.test(a.sha256 ?? '')) bad.push(`OIDN for ${rid}: no SHA-256 pinned`);
+    const dir = join(root, 'engine/native', rid, 'oidn');
+    if (!existsSync(dir)) continue;
+    if (!existsSync(join(dir, 'doc', 'LICENSE.txt'))) bad.push(`OIDN for ${rid}: its LICENSE.txt is missing`);
+    for (const d of ['bin', 'lib']) if (existsSync(join(dir, d))) for (const f of readdirSync(join(dir, d))) if (/sycl|cuda|hip/i.test(f)) bad.push(`OIDN for ${rid}: ${d}/${f} is a GPU runtime left out of what Lapin ships`);
+    count++;
+  }
+  licences.add(`${reg.licence} (OIDN)`);
+}
+
+if (bad.length) {
+  console.error(`✗ ${bad.length} production dependencies are not under a permissive licence:\n  ${bad.join('\n  ')}`);
+  process.exit(1);
+}
+console.log(`✓ ${count} production dependencies and ${assets} assets, all permissive (${[...licences].join(', ')}).`);

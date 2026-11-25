@@ -1,0 +1,200 @@
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Architecture.Roofs;
+
+/// <summary>
+/// Where a wall's top meets the roof of its storey (BubbleBIM Pro's RoofTop,
+/// itself Standalone's roof trim), as a profile along the wall:
+/// <list type="bullet">
+/// <item>a wall under a GABLE edge of the roof rises to the roof's underside: the gable is the wall's own top;</item>
+/// <item>a wall under an EAVE edge of a framed roof carries its wall plate: it stops under it;</item>
+/// <item>any other wall under the roof stops where the roof is lower than its top;</item>
+/// <item>a wall the roof does not cover keeps its height.</item>
+/// </list>
+/// The roof's underside is read along the wall's axis (the line the roof's
+/// outline usually follows). A wall's <c>roofTop</c> says how it takes roofs:
+/// <list type="bullet">
+/// <item><c>auto</c> (the default): every wall on the roof's storey follows the rules above;</item>
+/// <item><c>attach</c>: the wall rises to the underside of the slopes over it, from any storey, and is cut along it; under an eave of a framed roof it still stops under the wall plate; <c>roofIds</c> may name the roofs, else every roof over it counts;</item>
+/// <item><c>none</c>: roofs leave the wall alone.</item>
+/// </list>
+/// </summary>
+public static class RoofTop
+{
+    /// <summary>A wall as the roof sees it: its axis from A along Dir, its base (absolute) and height, its thickness.</summary>
+    public sealed record WallAxis(Vec2 A, Vec2 Dir, double Length, double Base, double Height, double Thickness)
+    {
+        public Vec2 B => A + Dir * Length;
+    }
+
+    /// <summary>A roof's solved shape, cached per roof and model revision with what the solve read: every wall of the storey asks for it.</summary>
+    static readonly RevisionCache<RoofShape?> Cache = new();
+
+    public static RoofShape? ShapeOf(Entity roof, IModelView m) => Cache.Get(roof, m, v =>
+    {
+        var r = Roof.Resolve(roof, v);
+        return r == null || r.Flat ? null : Roof.Solve(r).Shape;
+    });
+
+    /// <summary>How a wall takes roofs: auto, attach or none.</summary>
+    public static readonly string[] Modes = ["auto", "attach", "none"];
+
+    /// <summary>The roofs a wall attached to roofs follows: those it names that are still there, else (naming none) all.</summary>
+    public static IEnumerable<Entity> AttachedRoofs(Entity wall, IModelView m) =>
+        WallTops.Named(wall) is { } named ? named.Select(m.Get).OfType<Entity>().Where(r => r.Class == IfcClass.Roof) : m.OfClass(IfcClass.Roof);
+
+    /// <summary>The roofs over an element's storey.</summary>
+    public static IEnumerable<Entity> RoofsOver(string elementId, IModelView m)
+    {
+        var storey = Spatial.StoreyOf(m, elementId)?.Id;
+        return storey == null ? [] : m.OfClass(IfcClass.Roof).Where(r => Spatial.StoreyOf(m, r.Id)?.Id == storey);
+    }
+
+    /// <summary>
+    /// The wall's top as (u along the wall, v above its base), linear between
+    /// points, or null when no roof changes it. Two points at one u are a step.
+    /// </summary>
+    public static List<(double U, double V)>? Profile(Entity wall, WallAxis w, IModelView m)
+    {
+        var mode = wall.Str("roofTop") ?? "auto";
+        if (mode == "none") return null;
+        var attached = mode == "attach";
+        var pieces = new List<Piece>();
+        bool attach = attached;
+        var H = w.Height;
+        // Attached: as high as the slopes, but never through a framed roof's wall plate.
+        var cap = double.PositiveInfinity;
+        foreach (var roof in attached ? AttachedRoofs(wall, m) : RoofsOver(wall.Id, m))
+        {
+            var shape = ShapeOf(roof, m);
+            if (shape == null) continue;
+            if (UnderEdge(w, shape, EdgeKind.Gable)) attach = true;
+            else if (UnderEdge(w, shape, EdgeKind.Eave) && Roof.Resolve(roof, m) is { Framed: true } r)
+            {
+                if (attached) cap = Math.Min(cap, r.PlateZ - w.Base);
+                else H = Math.Min(H, r.PlateZ - w.Base);
+            }
+            foreach (var p in shape.Planes) pieces.AddRange(Pieces(w.A, w.Dir, w.Length, p, w.Base));
+        }
+        if (pieces.Count == 0) return null;
+
+        var L = w.Length;
+        var us = new SortedSet<double> { 0, L };
+        foreach (var p in pieces)
+        {
+            us.Add(p.U0); us.Add(p.U1);
+            // Where a slope passes the wall's own top: the cut starts or stops there.
+            if (Math.Abs(p.K) > 1e-12 && (H - p.Z0) / p.K is var uh && uh > p.U0 && uh < p.U1) us.Add(uh);
+            if (Math.Abs(p.K) > 1e-12 && !double.IsPositiveInfinity(cap) && (cap - p.Z0) / p.K is var uc && uc > p.U0 && uc < p.U1) us.Add(uc);
+        }
+        for (int i = 0; i < pieces.Count; i++)
+            for (int j = i + 1; j < pieces.Count; j++)
+                if (pieces[i].Cross(pieces[j]) is { } u) us.Add(u);
+
+        double Env(double u)
+        {
+            var best = double.PositiveInfinity;
+            foreach (var p in pieces) if (u >= p.U0 - 1e-6 && u <= p.U1 + 1e-6) best = Math.Min(best, p.At(u));
+            return best;
+        }
+        double Top(double env) => double.IsPositiveInfinity(env) ? H : attach ? Math.Min(env, cap) : Math.Min(H, env);
+
+        var profile = new List<(double U, double V)>();
+        var breaks = new List<double>();
+        foreach (var u in us.Where(u => u >= 0 && u <= L))
+            if (breaks.Count == 0 || u - breaks[^1] > 1e-6) breaks.Add(u); else breaks[^1] = u >= L ? L : breaks[^1];
+        foreach (var u in breaks)
+        {
+            // Left and right of a breakpoint, within the wall: a step where the roof's cover starts or stops.
+            var (l, r) = (Top(Env(Math.Max(u - 1e-5, 1e-9))), Top(Env(Math.Min(u + 1e-5, L - 1e-9))));
+            var c = Top(Env(u));
+            if (Math.Abs(l - r) > 1e-3) { profile.Add((u, l)); profile.Add((u, r)); }
+            else profile.Add((u, c));
+        }
+        if (profile.All(p => Math.Abs(p.V - w.Height) < 1e-9)) return null;
+        return Simplify(profile);
+    }
+
+    /// <summary>Whether the wall stands on an edge of the roof of that kind: along it, within its thickness.</summary>
+    static bool UnderEdge(WallAxis w, RoofShape s, EdgeKind kind)
+    {
+        for (int edge = 0; edge < s.Outline.Count; edge++)
+        {
+            if (s.Rules[edge].Kind != kind) continue;
+            var a = s.Outline[edge]; var b = s.Outline[(edge + 1) % s.Outline.Count];
+            var d = (b - a).Normalized();
+            if (Math.Abs(Vec2.Cross(d, w.Dir)) > 0.02) continue;
+            var tol = w.Thickness / 2 + 0.05;
+            double Off(Vec2 p) => Math.Abs(Vec2.Cross(d, p - a));
+            if (Off(w.A) > tol || Off(w.B) > tol) continue;
+            double t0 = Vec2.Dot(w.A - a, d), t1 = Vec2.Dot(w.B - a, d), len = (b - a).Length;
+            if (Math.Min(Math.Max(t0, t1), len) - Math.Max(Math.Min(t0, t1), 0) > 0.1) return true;
+        }
+        return false;
+    }
+
+    /// <summary>A plane's height over part of a line: z(u) = Z0 + K·u for u in [U0, U1] (above the wall's base).</summary>
+    sealed record Piece(double U0, double U1, double Z0, double K)
+    {
+        public double At(double u) => Z0 + K * u;
+        public double? Cross(Piece o)
+        {
+            if (Math.Abs(K - o.K) < 1e-12) return null;
+            var u = (o.Z0 - Z0) / (K - o.K);
+            return u > Math.Max(U0, o.U0) && u < Math.Min(U1, o.U1) ? u : null;
+        }
+    }
+
+    /// <summary>The parts of the line o + dir·u (u in 0 … L) over a plane's plan polygon, with the plane's height there.</summary>
+    static IEnumerable<Piece> Pieces(Vec2 o, Vec2 dir, double length, RoofPlane plane, double baseZ)
+    {
+        var poly = plane.Points.Select(p => p.Xy).ToList();
+        var ts = new List<double> { 0, length };
+        for (int i = 0; i < poly.Count; i++)
+        {
+            var (a, b) = (poly[i], poly[(i + 1) % poly.Count]);
+            var e = b - a;
+            var den = Vec2.Cross(dir, e);
+            if (Math.Abs(den) < 1e-12) continue;
+            var t = Vec2.Cross(a - o, e) / den;
+            var s = Vec2.Cross(a - o, dir) / den;
+            if (s >= -1e-9 && s <= 1 + 1e-9 && t > 0 && t < length) ts.Add(t);
+        }
+        ts.Sort();
+        var z = RoofSolver.PlaneZ(plane.Points);
+        for (int i = 0; i + 1 < ts.Count; i++)
+        {
+            var (t0, t1) = (ts[i], ts[i + 1]);
+            if (t1 - t0 < 1e-9) continue;
+            var mid = o + dir * ((t0 + t1) / 2);
+            // A wall on the plane's edge (a gable wall under a mansard's upper tier, whose edge is the wall's axis) is under it:
+            // the point is tried a millimetre to either side, so which side the edge test falls on does not matter.
+            var side = dir.Perp * 1e-3;
+            if (!Polygon2.Contains(poly, mid) && !Polygon2.Contains(poly, mid + side) && !Polygon2.Contains(poly, mid - side)) continue;
+            double z0 = z(o) - baseZ, k = z(o + dir) - z(o);
+            yield return new Piece(t0, t1, z0, k);
+        }
+    }
+
+    /// <summary>Drop points in line with their neighbours.</summary>
+    static List<(double U, double V)> Simplify(List<(double U, double V)> p)
+    {
+        var o = new List<(double U, double V)>();
+        foreach (var q in p)
+        {
+            if (o.Count > 0 && Math.Abs(o[^1].U - q.U) < 1e-7 && Math.Abs(o[^1].V - q.V) < 1e-7) continue;
+            while (o.Count >= 2)
+            {
+                var (a, b) = (o[^2], o[^1]);
+                if (Math.Abs(b.U - a.U) < 1e-12 || Math.Abs(q.U - b.U) < 1e-12) break;
+                var cross = (b.U - a.U) * (q.V - a.V) - (b.V - a.V) * (q.U - a.U);
+                if (Math.Abs(cross) > 1e-9) break;
+                o.RemoveAt(o.Count - 1);
+            }
+            o.Add(q);
+        }
+        return o;
+    }
+}

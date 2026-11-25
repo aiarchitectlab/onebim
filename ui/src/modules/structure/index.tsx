@@ -1,0 +1,158 @@
+/** Structure: columns, beams, strip and pad foundations (the engine's structure module). */
+
+import { ArrowLeftRight, CornerDownRight, Grid3x3, Layers3, Slash } from 'lucide-react';
+import { BeamIcon, ColumnIcon, CurvedBeamIcon, PadFootingIcon, PadsUnderColumnsIcon, StripFootingIcon } from '../../icons';
+import { columnSnapPoints, underColumnsArgs } from './padLevel';
+import type { Grip, LapinModule, RefLine, ToolDef } from '../../platform/module';
+import { flipAcross, pathGrips, pathRef, pt } from '../../viewport/gripKit';
+import { arcOf } from '../../viewport/arc';
+import { typeOf, usageOf } from '../../engine/model';
+import { activate } from '../../platform/modules';
+import { TypeOption, typeArg, useTypePick } from './typePick';
+import { AnchorPicker } from '../../shell/AnchorPicker';
+import { COLUMN_TOOL, columnGhost, columnInsertion } from './columnAnchor';
+import type { NodeDto } from '../../engine/protocol';
+import { notify, useUi } from '../../app/store';
+import { ensureStorey, execute, useSession } from '../../engine/session';
+import { StructureSection } from './StructureSection';
+import { sameKind } from '../../shell/params';
+import { lazyPart } from '../../platform/lazyPart';
+import { StripOption, stripArgs, useStripPrefs, wallTypes } from './stripOptions';
+import { withAutoJoinMenus } from '../core/autoJoin';
+import { arcAlias, chainTool, setChainMode } from '../core/chainTool';
+import { openTypeDialog } from '../../shell/typeToEdit';
+import { DimRefChoice } from '../../viewport/LineTempDims';
+import { MemberDims } from './MemberTempDims';
+
+// Fetched the first time each is opened (platform/lazyPart.tsx).
+const StructureTypesDialog = lazyPart(() => import('./StructureTypesDialog').then((m) => m.StructureTypesDialog), { title: 'Structure types' });
+
+const column: ToolDef = {
+  id: 'structure.column', label: 'Column', icon: ColumnIcon, shortcut: 'CL',
+  // The point of the column's box at the cursor (forum topic 226): its centre, a corner or an edge's middle; F4 steps through them.
+  anchor: 'box',
+  gesture: { kind: 'point', ghost: columnGhost },
+  options: () => <><TypeOption kind="column" /><AnchorPicker tool={COLUMN_TOOL} kind="box" /><DimRefChoice /></>,
+  complete: async ({ points: [c] }, ctx) => { const p = columnInsertion(c); await ctx.execute('structure.addColumn', { storeyId: ctx.storeyId, x: p.x, y: p.y, ...typeArg('column') }); },
+};
+const beam: ToolDef = chainTool({
+  id: 'structure.beam', label: 'Beam', icon: BeamIcon, shortcut: 'BM', more: () => <><TypeOption kind="beam" /><DimRefChoice /></>,
+  line: async (a, b, ctx) => { await ctx.execute('structure.addBeam', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, ...typeArg('beam') }); },
+  arc: async (a, b, p, ctx) => { await ctx.execute('structure.addBeam', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, x3: p.x, y3: p.y, ...typeArg('beam') }); },
+});
+/** The old Curved beam: the Beam tool, in Arc. */
+const curvedBeam: ToolDef = arcAlias({ id: 'structure.curvedBeam', label: 'Curved beam', icon: CurvedBeamIcon, shortcut: 'BC' }, beam);
+const strip: ToolDef = chainTool({
+  id: 'structure.strip', label: 'Strip footing', icon: StripFootingIcon, shortcut: 'SF', more: StripOption,
+  line: async (a, b, ctx) => { await ctx.execute('structure.addStripFooting', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, ...stripArgs(useSession.getState().nodes) }); },
+  arc: async (a, b, p, ctx) => { await ctx.execute('structure.addStripFooting', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, x3: p.x, y3: p.y, ...stripArgs(useSession.getState().nodes) }); },
+});
+/** The old Curved strip footing: the Strip footing tool, in Arc. */
+const curvedStrip: ToolDef = arcAlias({ id: 'structure.curvedStrip', label: 'Curved strip footing', icon: StripFootingIcon, shortcut: 'CF' }, strip);
+/** A pad footing: under a column it rises to the column's base (decision 507); it snaps to the columns of the storey above too, so a foundation plan puts it right under one. */
+const pad: ToolDef = {
+  id: 'structure.pad', label: 'Pad footing', icon: PadFootingIcon, shortcut: 'PF',
+  gesture: { kind: 'point' },
+  snapPoints: (storeyId) => columnSnapPoints(useSession.getState(), storeyId),
+  options: () => <TypeOption kind="pad" />,
+  complete: async ({ points: [p] }, ctx) => { await ctx.execute('structure.addPadFooting', { storeyId: ctx.storeyId, x: p.x, y: p.y, ...typeArg('pad') }); },
+};
+/** A pad footing under each selected column (else each of the plan's storey, or of the storey above it) that has none, in the infrastructure storey. */
+const padsUnderColumns: ToolDef = {
+  id: 'structure.padsUnderColumns', label: 'Pad footings under columns', icon: PadsUnderColumnsIcon,
+  run: () => void ensureStorey().then((storeyId) => {
+    const args = underColumnsArgs(useSession.getState(), useUi.getState().selected, storeyId);
+    if (args) void execute('structure.padsUnderColumns', args);
+  }),
+};
+/** A column on every grid crossing of the storey (none twice). */
+const atGrid: ToolDef = {
+  id: 'structure.columnsAtGrid', label: 'Columns at grid', icon: Grid3x3,
+  run: () => void ensureStorey().then((storeyId) => storeyId && execute('structure.addColumnsAtGrid', { storeyId })),
+};
+/** The corners of the strip footings or beams selected: mitred, butt, or the other one through. Round an L corner a footing's outer layers are always mitred. */
+const restyle = (label: string, id: string, icon: ToolDef['icon'], args: Record<string, unknown>): ToolDef => ({
+  id, label, icon,
+  run: () => {
+    const nodes = useSession.getState().nodes;
+    const ids = useUi.getState().selected.filter((x) => ['IfcFooting', 'IfcBeam'].includes(nodes.get(x)?.type ?? ''));
+    if (!ids.length) { notify('Select the strip footings or beams whose corners to change.'); return; }
+    void execute('structure.restyleJoins', { ids, ...args });
+  },
+});
+const mitre = restyle('Mitre', 'structure.mitre', Slash, { style: 'mitre' });
+const butt = restyle('Butt', 'structure.butt', CornerDownRight, { style: 'butt' });
+const swap = restyle('Swap', 'structure.swap', ArrowLeftRight, { swap: true });
+
+const types: ToolDef = { id: 'structure.types', label: 'Structure types', icon: Layers3, run: () => useUi.setState({ dialog: 'structureTypes' }) };
+
+/**
+ * The ends of a beam or a strip foundation, to drag (a joined corner moves
+ * with it), a curved beam's arc, and a flip arrow across it: a beam's section
+ * mirrored, a strip foundation's layers to the other face.
+ */
+function memberGrips(node: NodeDto): Grip[] {
+  const c = arcOf(node.props);
+  if (!c) return [];
+  const beam = node.type === 'IfcBeam';
+  return [
+    ...withAutoJoinMenus(node.id, node.props, pathGrips(c, (s, e, rise) => ({ command: 'structure.updatePath', args: { id: node.id, x1: s.x, y1: s.y, x2: e.x, y2: e.y, arc: rise, detachJoinedEnds: true } }))),
+    flipAcross(c, (beam ? node.props.flipped : usageOf(useSession.getState(), node.id)?.negative) ? 1 : -1, beam ? 'Flip: mirror the section across the axis' : 'Flip: swap the foundation\'s faces', () => ({ command: 'structure.flip', args: { ids: sameKind(node) } })),
+  ];
+}
+const pathRefs = (node: NodeDto): RefLine[] => { const c = arcOf(node.props); return c ? [pathRef(c)] : []; };
+/** A column: its point, and a handle 0.8 m out along its rotation that turns it. */
+function pointGrip(node: NodeDto): Grip[] {
+  const at = pt(node.props.at);
+  if (!at) return [];
+  const rot = (Number(node.props.rotation ?? 0) * Math.PI) / 180;
+  const handle = { x: at.x + Math.cos(rot) * 0.8, y: at.y + Math.sin(rot) * 0.8 };
+  return [
+    { key: 'at', kind: 'centre', at, step: (p) => ({ command: 'structure.updateColumn', args: { id: node.id, x: p.x, y: p.y } }) },
+    { key: 'rotate', kind: 'rotate', at: handle, step: (p) => ({ command: 'structure.updateColumn', args: { id: node.id, rotation: Math.round(((Math.atan2(p.y - at.y, p.x - at.x) * 180) / Math.PI) * 100) / 100 } }) },
+  ];
+}
+
+const structure: LapinModule = {
+  id: 'structure',
+  name: 'Structure',
+  summary: 'Columns, beams, strip and pad foundations, ring beams, lintels.',
+  tabs: [{
+    id: 'structure', label: 'Structure', order: 30, include: ['modify', 'joins'],
+    groups: [
+      { label: 'Frame', tools: [column, beam], small: [atGrid] },
+      { label: 'Foundation', tools: [strip, pad, padsUnderColumns] },
+      { label: 'Types', tools: [types] },
+    ],
+  }],
+  legacyTools: [curvedBeam, curvedStrip, mitre, butt, swap],
+  hotbar: [column, beam],
+  propertySections: [{ id: 'structure', label: 'Structure', classes: ['IfcColumn', 'IfcBeam', 'IfcFooting'], component: StructureSection }],
+  dialogs: { structureTypes: StructureTypesDialog },
+  // Edit type… (decision 735): the dialog opened on the element's type.
+  editType: Object.fromEntries(['IfcColumnType', 'IfcBeamType', 'IfcFootingType'].map((c) => [c, (id: string) => openTypeDialog('structureTypes', id)])),
+  // A selected column's or beam's temporary dimensions, read-only while one is placed or drawn (decision 733).
+  planOverlays: [MemberDims],
+  grips: { IfcBeam: memberGrips, IfcFooting: (n) => (n.props.start ? memberGrips(n) : []), IfcColumn: pointGrip },
+  references: { IfcBeam: pathRefs, IfcFooting: (n) => (n.props.start ? pathRefs(n) : []) },
+  // Create similar: the element's tool with its type (a beam's or a strip's arc too; a strip with its wall when its type has one).
+  similar: {
+    IfcColumn: (n) => { useTypePick.setState({ column: typeOf(useSession.getState(), n.id)?.id ?? null }); activate(column); },
+    IfcBeam: (n) => { useTypePick.setState({ beam: typeOf(useSession.getState(), n.id)?.id ?? null }); setChainMode(beam.id, Math.abs(arcOf(n.props)?.rise ?? 0) > 1e-6 ? 'arc' : 'line'); activate(beam); },
+    IfcFooting: (n) => {
+      const type = typeOf(useSession.getState(), n.id);
+      if (!n.props.start) { useTypePick.setState({ pad: type?.id ?? null }); activate(pad); return; }
+      const withWall = !!type && wallTypes(useSession.getState().nodes).some((t) => t.id === type.id);
+      useStripPrefs.setState(withWall ? { wall: true, typeId: type!.id } : { wall: false, typeId: useStripPrefs.getState().typeId });
+      setChainMode(strip.id, Math.abs(arcOf(n.props)?.rise ?? 0) > 1e-6 ? 'arc' : 'line');
+      activate(strip);
+    },
+  },
+  setType: {
+    IfcColumn: (ids, typeId) => execute('structure.setType', { ids, typeId }),
+    IfcBeam: (ids, typeId) => execute('structure.setType', { ids, typeId }),
+    IfcFooting: (ids, typeId) => execute('structure.setType', { ids, typeId }),
+  },
+};
+
+export default structure;

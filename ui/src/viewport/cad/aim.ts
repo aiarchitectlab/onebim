@@ -1,0 +1,318 @@
+/**
+ * What a 2D view (plan, section, elevation) shares for drafting: the aim of
+ * the cursor (object snaps, ortho, guide lines, the grid) and the command
+ * line's host (its view, what lies under a point). The overlay that shows
+ * them is in canvas.tsx.
+ */
+
+import { useCallback, useEffect, useMemo, useRef } from 'react';
+import type { Vec2 } from '../../platform/module';
+import type { DrawingDto } from '../drawing';
+import { SnapIndex, findSnap, isLineSnap, modesFor, snapsOn, type SnapMode } from './snaps';
+import { DEFAULT_PREFS, usePrefs } from '../../app/prefs';
+import { fromFrame, isIdentity, toFrame, ucsOf, useLocation, type Frame } from '../../app/location';
+import { fromJson, intersectPrims, keyPoints, nearestOnShape, prims, type Shape } from './shapes';
+import { applyOrtho } from './input';
+import { track, trackOnOrtho, type Guide } from './tracking';
+import { parallelHold, relatables, tangentHold, type CurveRef, type SideRef } from './relations';
+import type { Ref } from './constraints';
+import { useCad, type CadHost } from './session';
+import { useSession } from '../../engine/session';
+import type { RegionTest } from '../selectBox';
+import { viewFrameAt } from '../viewFrame';
+import { insetUnder } from '../insetMap';
+import { usePaneIndex } from '../../app/pane';
+import { registerCadHost } from './hosts';
+
+/** What holds an aimed point that no object snap took: the ortho line from the base (on, or Shift held), a polar angle from the base, or a tracking guide through an acquired point. */
+export type AimLock = 'ortho' | 'polar' | 'tracking' | 'parallel' | 'tangent';
+
+export interface Aimed { point: Vec2; kind: 'point' | 'grid' | 'free'; mode?: SnapMode; guides: Guide[]; lock?: AimLock; /** The drafted shape the object snap took the point from (its id), when it is one. */ shapeId?: string; /** With a parallel or tangent lock: the drafted side or curve that holds it. */ to?: Ref; /** An object snap at a point of its own (an end, a middle, a crossing), not slid along a line: what is placed along a wall goes there exactly (forum topic 226). */ exact?: boolean }
+
+/**
+ * The aim's rule, with the snap already found: an object snap (other than
+ * nearest) wins; then, with ortho on (or Shift held) and a base, the ortho
+ * line, held where a guide crosses it; else a tracking guide or a polar
+ * angle; then the nearest snap; then the grid or the raw point (squared to
+ * the base with ortho). `lock` says which constraint actually holds the point.
+ */
+export interface AimInput { base: Vec2 | null; ortho: boolean; polar: boolean; snap: { point: Vec2; mode: SnapMode; shape?: Shape; /** A wall axis taken along its line, not at its ends or middle. */ along?: boolean } | null; acquired: readonly Vec2[]; tol: number; grid?: number; polarStep?: number; frame?: Frame | null; /** The drafted sides and curves a line may be held parallel or tangent to, and how near the cursor they must pass (metres). */ relate?: { sides: readonly SideRef[]; curves: readonly CurveRef[]; reach: number } }
+
+export function resolveAim(raw: Vec2, c: AimInput): Aimed {
+  // The Tangent snap (forum topic 151) holds the line tangent: a drafted circle or arc it touches is named, as the tangent inference names it.
+  if (c.snap?.mode === 'tangent' && c.base) {
+    const h = c.relate ? tangentHold(c.base, c.snap.point, c.relate.curves, c.tol) : null;
+    const to = h && Math.hypot(h.point.x - c.snap.point.x, h.point.y - c.snap.point.y) < 1e-9 ? h.to : undefined;
+    return { point: c.snap.point, kind: 'point', mode: 'tangent', guides: [{ from: c.base, to: c.snap.point, kind: 'tangent' }], lock: 'tangent', ...(to ? { to } : {}) };
+  }
+  // A line held parallel to a drafted one, or tangent to a curve (in the world: the sides and curves are): after the object snaps, before the ortho and guide lines (and never with ortho on).
+  if (c.relate && c.base && !c.ortho && !(c.snap && !isLineSnap(c.snap))) {
+    const h = tangentHold(c.base, raw, c.relate.curves, c.tol) ?? parallelHold(c.base, raw, c.relate.sides, c.relate.reach, c.tol);
+    if (h) return { point: h.point, kind: 'point', guides: [{ from: h.guide.from, to: h.guide.to, kind: h.lock }], lock: h.lock, to: h.to };
+  }
+  // In a UCS (decision 445) ortho, the guides, polar angles and the grid follow its axes: the same rule in its coordinates.
+  if (c.frame && !isIdentity(c.frame)) {
+    const f = c.frame;
+    const L = (p: Vec2) => toFrame(f, p), W = (q: Vec2) => fromFrame(f, q);
+    const a = resolveAim(L(raw), { ...c, frame: null, base: c.base ? L(c.base) : null, snap: c.snap ? { ...c.snap, point: L(c.snap.point), shape: c.snap.shape ? shapeIn(c.snap.shape, L, f.angle) : undefined } : null, acquired: c.acquired.map(L) });
+    return { ...a, point: W(a.point), guides: a.guides.map((g) => ({ ...g, from: W(g.from), to: W(g.to) })) };
+  }
+  const { base, snap: s, tol } = c;
+  const ortho = c.ortho && !!base;
+  if (s && !isLineSnap(s)) return { point: s.point, kind: 'point', mode: s.mode, guides: [], exact: true };
+  // Guide lines: the orthogonal lines through acquired points (and the base), the polar angles.
+  const pool = base ? [...c.acquired, base] : c.acquired;
+  if (ortho && base) {
+    const t = trackOnOrtho(applyOrtho(base, raw), base, pool, tol);
+    if (t) return { point: t.point, kind: 'point', guides: t.guides, lock: 'ortho' };
+  } else {
+    const t = track(raw, pool, tol, { base, polarStep: c.polar ? c.polarStep ?? DEFAULT_PREFS.polarStep : null });
+    if (t) return { point: t.point, kind: 'point', guides: t.guides, lock: t.guides.some((g) => g.kind === 'polar') ? 'polar' : 'tracking' };
+  }
+  if (s) {
+    // Nearest (or along a wall axis), with the grid on: the point slides along the shape to the nearest grid line, so one axis is the object's and the other the grid's.
+    const slid = c.grid && c.grid > 0 && s.shape ? onGrid(s.shape, raw, s.point, c.grid) : null;
+    return { point: slid ?? s.point, kind: 'point', mode: s.mode, guides: [] };
+  }
+  let q = ortho && base ? applyOrtho(base, raw) : raw;
+  const lock: AimLock | undefined = ortho ? 'ortho' : undefined;
+  if (c.grid && c.grid > 0) {
+    const g = c.grid;
+    const r = (v: number) => Math.round(v / g) * g;
+    q = ortho && base ? (q.y === base.y ? { x: r(q.x), y: base.y } : { x: base.x, y: r(q.y) }) : { x: r(q.x), y: r(q.y) };
+    return { point: q, kind: 'grid', guides: [], lock };
+  }
+  return { point: q, kind: 'free', guides: [], lock };
+}
+
+/** A shape in a frame's own coordinates (`L` takes a point there, `angle` is the frame's turn in degrees). */
+function shapeIn(s: Shape, L: (p: Vec2) => Vec2, angle: number): Shape {
+  const a = (angle * Math.PI) / 180;
+  switch (s.type) {
+    case 'line': return { type: 'line', a: L(s.a), b: L(s.b) };
+    case 'polyline': return { type: 'polyline', pts: s.pts.map(L), closed: s.closed };
+    case 'circle': return { type: 'circle', c: L(s.c), r: s.r };
+    case 'arc': return { type: 'arc', c: L(s.c), r: s.r, start: s.start - a, end: s.end - a };
+    case 'ellipse': { const o = L({ x: 0, y: 0 }), mm = L(s.m); return { ...s, c: L(s.c), m: { x: mm.x - o.x, y: mm.y - o.y } }; }
+  }
+}
+
+/** Where a shape crosses the grid line (x or y a whole step) nearest `raw`, among the two lines through `near`; null when it crosses neither. */
+function onGrid(shape: Shape, raw: Vec2, near: Vec2, g: number): Vec2 | null {
+  const R = 1e5;
+  const x = Math.round(near.x / g) * g, y = Math.round(near.y / g) * g;
+  const lines: [Vec2, Vec2][] = [[{ x, y: raw.y - R }, { x, y: raw.y + R }], [{ x: raw.x - R, y }, { x: raw.x + R, y }]];
+  let best: Vec2 | null = null, bd = Infinity;
+  for (const [a, b] of lines) for (const p of prims(shape)) for (const q of intersectPrims({ kind: 'seg', a, b }, p)) {
+    const d = Math.hypot(q.x - raw.x, q.y - raw.y);
+    if (d < bd) { bd = d; best = q; }
+  }
+  return best;
+}
+
+/** The drawing's lines a cursor can snap to (no hatches, fills or texts); on a sheet's paper, its frame, title block, views' boxes and edge too (decision 620). */
+const SNAP_LAYERS = new Set(['CUT', 'SEEN', 'HIDDEN', 'OVERHEAD', 'BEYOND', 'MEMBRANE', 'FRAME', 'TITLE', 'VIEWPORT', 'PAPER']);
+
+export function snapShapes(drawing: DrawingDto | null, extra: Shape[] = []): { shapes: Shape[]; drafts: Map<string, Shape[]>; owners: (string | null)[] } {
+  const shapes: Shape[] = [...extra];
+  /** The drafted shape each of `shapes` is (its id), null for the others: what an object snap says it took a point from. */
+  const owners: (string | null)[] = extra.map(() => null);
+  const drafts = new Map<string, Shape[]>();
+  for (const p of drawing?.pens ?? []) {
+    if (!SNAP_LAYERS.has(p.layer) || !p.segments) continue;
+    const s = p.segments;
+    for (let k = 0; k + 3 < s.length; k += 4) { shapes.push({ type: 'line', a: { x: s[k], y: s[k + 1] }, b: { x: s[k + 2], y: s[k + 3] } }); owners.push(null); }
+  }
+  for (const m of drawing?.marks ?? []) {
+    const exact = (m as { shapes?: Record<string, unknown>[] }).shapes;
+    if (exact?.length) {
+      const list = exact.filter((j) => !j.hatch).map(fromJson).filter((x): x is Shape => !!x);
+      if (list.length) drafts.set(m.id, list);
+      shapes.push(...list);
+      owners.push(...list.map(() => m.id));
+      continue;
+    }
+    const s = m.segments;
+    for (let k = 0; k + 3 < s.length; k += 4) { shapes.push({ type: 'line', a: { x: s[k], y: s[k + 1] }, b: { x: s[k + 2], y: s[k + 3] } }); owners.push(null); }
+  }
+  return { shapes, drafts, owners };
+}
+
+/** The first drafted shape a snap of this kind at `p` could have come from: its end, middle, centre or quadrant there, or its line through the point. */
+export function draftThrough(drafts: ReadonlyMap<string, Shape[]>, p: Vec2, mode: SnapMode): string | null {
+  // A wall axis is no drafted shape's.
+  if (mode === 'wallAxis') return null;
+  const at = (list: Vec2[]) => list.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 1e-6);
+  for (const [id, list] of drafts) for (const sh of list) {
+    const k = keyPoints(sh);
+    const hit = mode === 'endpoint' ? at(k.endpoints) : mode === 'midpoint' ? at(k.midpoints) : mode === 'center' ? at(k.centers) : mode === 'quadrant' ? at(k.quadrants) : nearestOnShape(sh, p).dist < 1e-6;
+    if (hit) return id;
+  }
+  return null;
+}
+
+/**
+ * A level's line under a point (a section's or an elevation's storey line, its mark owned by the storey): the storey and the
+ * line's height; null when none is within `tol` (the nearest one when several are).
+ */
+export function levelLineAt(p: Vec2, tol: number, marks: DrawingDto['marks'] | undefined, nodes = useSession.getState().nodes): { id: string; y: number } | null {
+  let best: { id: string; y: number; d: number } | null = null;
+  for (const m of marks ?? []) {
+    if (nodes.get(m.id)?.type !== 'IfcBuildingStorey') continue;
+    const s = m.segments;
+    for (let k = 0; k + 3 < s.length; k += 4) {
+      const [x0, y0, x1, y1] = [s[k], s[k + 1], s[k + 2], s[k + 3]];
+      if (Math.abs(y1 - y0) > 1e-9 || Math.abs(x1 - x0) < 1e-9) continue;
+      if (p.x < Math.min(x0, x1) - tol || p.x > Math.max(x0, x1) + tol) continue;
+      const d = Math.abs(p.y - y0);
+      if (d <= tol && (!best || d < best.d)) best = { id: m.id, y: y0, d };
+    }
+  }
+  return best ? { id: best.id, y: best.y } : null;
+}
+
+export function useCadCanvas(o: {
+  viewId: string | null;
+  drawing: DrawingDto | null;
+  extra?: Shape[];
+  /** Pixels per metre. */
+  scale: number;
+  /** Anything selectable under a point (the view's own picking). */
+  pickAny: (p: Vec2) => string | null;
+  /** A model element under a point, drafting and annotations left out. */
+  pickModel?: (p: Vec2) => string | null;
+  /** An element's outline in this view (a plan's modelling lines), for previews and the move's ghost. */
+  outlines?: (id: string) => Shape[];
+  /** Everything selectable a region takes (the command line's WP and CP). */
+  inRegion?: (takes: RegionTest) => string[];
+  /** The axes ortho, polar tracking and the grid follow where no UCS is set: a turned plan's screen axes (decision 526). */
+  axes?: Frame | null;
+  /** How far the view is turned on screen (radians; PlanView's `rot`): the arrow keys nudge along the screen's axes. */
+  turn?: number;
+  /** The shown walls' axes, for the Wall axis snap (forum topic 151). */
+  wallAxes?: Shape[];
+  /** The shown grid's axes, for the Grid axis snap and "Grid only". */
+  gridAxes?: Shape[];
+  /** The shown elements' own curves (a curved wall's faces, an outline's curved edges), for the Tangent snap. */
+  curves?: Shape[];
+}) {
+  const axesRef = useRef(o.axes ?? null);
+  axesRef.current = o.axes ?? null;
+  const turnRef = useRef(o.turn ?? 0);
+  turnRef.current = o.turn ?? 0;
+  // A section's or an elevation's frame: its moves are also given in the model (a wall sweep moved up its wall).
+  const frameRef = useRef(o.drawing ?? null);
+  frameRef.current = o.drawing ?? null;
+  // A plan drafts in the UCS; a section or an elevation in its own frame.
+  const planRef = useRef(o.drawing?.kind === 'plan');
+  planRef.current = o.drawing?.kind === 'plan';
+  const { shapes, drafts, owners } = useMemo(() => snapShapes(o.drawing, o.extra), [o.drawing, o.extra]);
+  const related = useMemo(() => relatables(drafts), [drafts]);
+  const index = useMemo(() => new SnapIndex(shapes), [shapes]);
+  const wallAxesRef = useRef(o.wallAxes);
+  wallAxesRef.current = o.wallAxes;
+  const gridAxesRef = useRef(o.gridAxes);
+  gridAxesRef.current = o.gridAxes;
+  const curvesRef = useRef(o.curves);
+  curvesRef.current = o.curves;
+  const acquired = useRef<Vec2[]>([]);
+  const hold = useRef<{ p: Vec2; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const scaleRef = useRef(o.scale);
+  scaleRef.current = o.scale;
+  const pickRef = useRef(o.pickAny);
+  pickRef.current = o.pickAny;
+  const pickModelRef = useRef(o.pickModel);
+  pickModelRef.current = o.pickModel;
+  const outlinesRef = useRef(o.outlines);
+  outlinesRef.current = o.outlines;
+  const regionRef = useRef(o.inRegion);
+  regionRef.current = o.inRegion;
+  const marks = o.drawing?.marks;
+  const pane = usePaneIndex();
+
+  // The command line works on this view while it is shown (with two panes, on the active pane's: hosts.ts).
+  useEffect(() => {
+    if (!o.viewId) return;
+    const host: CadHost = {
+      viewId: o.viewId,
+      isPlan: () => planRef.current,
+      pxPerMetre: () => scaleRef.current,
+      screenTurn: () => turnRef.current,
+      pickDraft: (p) => {
+        const tol = 8 / scaleRef.current;
+        let best: { id: string; shape: Shape; d: number } | null = null;
+        for (const [id, list] of drafts) for (const s of list) {
+          const d = nearestOnShape(s, p).dist;
+          if (d <= tol && (!best || d < best.d)) best = { id, shape: s, d };
+        }
+        return best ? { id: best.id, shape: best.shape } : null;
+      },
+      pickDrafts: (p) => {
+        const tol = 8 / scaleRef.current;
+        const out: { id: string; shape: Shape; d: number }[] = [];
+        for (const [id, list] of drafts) for (const s of list) { const d = nearestOnShape(s, p).dist; if (d <= tol) out.push({ id, shape: s, d }); }
+        return out.sort((a, b) => a.d - b.d);
+      },
+      pickAny: (p) => pickRef.current(p),
+      pickModel: (p) => pickModelRef.current?.(p) ?? null,
+      pickLevel: (p) => levelLineAt(p, 8 / scaleRef.current, marks),
+      shapeOf: (id) => drafts.get(id)?.[0] ?? null,
+      outlinesOf: (id) => {
+        const exact = drafts.get(id);
+        if (exact) return exact;
+        const own = outlinesRef.current?.(id);
+        if (own?.length) return own;
+        // An annotation, or an element in a section or an elevation: its drawn segments (an element's parts' marks, id:part, too).
+        const out: Shape[] = [];
+        for (const m of marks ?? []) {
+          if (m.id !== id && !m.id.startsWith(`${id}:`)) continue;
+          const s = m.segments;
+          for (let k = 0; k + 3 < s.length; k += 4) out.push({ type: 'line', a: { x: s[k], y: s[k + 1] }, b: { x: s[k + 2], y: s[k + 3] } });
+        }
+        return out;
+      },
+      inRegion: (takes) => regionRef.current?.(takes) ?? [],
+      frameAt: (at) => viewFrameAt(frameRef.current, at),
+      insetUnder: (pts) => insetUnder(marks, pts),
+    };
+    return registerCadHost(host, pane);
+  }, [o.viewId, drafts, marks, pane]);
+
+  // A new command starts with nothing acquired.
+  const command = useCad((s) => s.command);
+  useEffect(() => { acquired.current = []; }, [command]);
+
+  /** Where a raw cursor point lands: a snap, a guide, the ortho line, the grid. */
+  const aim = useCallback((raw: Vec2, from?: Vec2 | null, o2: { grid?: number; orthoHeld?: boolean } = {}): Aimed => {
+    const cad = useCad.getState();
+    const tol = 10 / scaleRef.current;
+    const base = from ?? cad.step?.base ?? null;
+    const prefs = usePrefs.getState();
+    // Object Snap Override (forum topic 154): an armed snap is the only one this point takes.
+    const s = snapsOn(cad.snapOverride, cad.osnap, cad.gridOnly) ? findSnap(raw, shapes, index, { tolerance: tol, modes: modesFor(cad.snapOverride, prefs.snapModes, cad.gridOnly), from: base, wallAxes: wallAxesRef.current, gridAxes: gridAxesRef.current, curves: curvesRef.current, divisions: prefs.snapDivisions, distance: prefs.snapDistance }) : null;
+    if (s && !isLineSnap(s)) {
+      // Resting on a snap acquires it for the guide lines.
+      if (!hold.current || Math.hypot(hold.current.p.x - s.point.x, hold.current.p.y - s.point.y) > 1e-9) {
+        if (hold.current) clearTimeout(hold.current.timer);
+        const p = s.point;
+        hold.current = { p, timer: setTimeout(() => {
+          if (!acquired.current.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 1e-9)) acquired.current = [...acquired.current, p].slice(-7);
+        }, 350) };
+      }
+    } else if (hold.current) { clearTimeout(hold.current.timer); hold.current = null; }
+    const frame = planRef.current ? ucsOf(useLocation.getState().loc) ?? axesRef.current : null;
+    // "Grid only": no guides, no relations, no grid snapping: the point is on a grid axis or where the cursor is (ortho and polar stay the user's).
+    const gridOnlyNow = cad.gridOnly && !cad.snapOverride;
+    const aimed = resolveAim(raw, { base, ortho: cad.ortho || !!o2.orthoHeld, polar: cad.polar, polarStep: prefs.polarStep, snap: s ? { point: s.point, mode: s.mode, shape: s.on ?? shapes[s.shape], along: s.along } : null, acquired: gridOnlyNow ? [] : acquired.current, tol, grid: gridOnlyNow ? undefined : o2.grid, frame, relate: gridOnlyNow ? undefined : { ...related, reach: 40 / scaleRef.current } });
+    // The drafted shape the point lies on: the snap's own, else the first drafted shape through the point (the model's lines may be found first where they coincide).
+    const owner = aimed.mode ? (s && aimed.mode === s.mode && s.shape >= 0 ? owners[s.shape] : null) ?? draftThrough(drafts, aimed.point, aimed.mode) : null;
+    return owner ? { ...aimed, shapeId: owner } : aimed;
+  }, [shapes, index, owners, drafts, related]);
+
+  /** A point the gesture placed: acquired for the guides. */
+  const acquire = useCallback((p: Vec2) => {
+    if (!acquired.current.some((q) => Math.hypot(q.x - p.x, q.y - p.y) < 1e-9)) acquired.current = [...acquired.current, p].slice(-7);
+  }, []);
+
+  return { aim, acquire };
+}

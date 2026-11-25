@@ -1,0 +1,564 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Drawing.Import;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// Line types of the project's own and the drafting standards as a library (docs/plan-user-extensibility.md §3.6–3.7). Line types:
+/// made in Lapin or read from AutoCAD's <c>.lin</c>, kept in the project's standards (<c>drafting.lineTypes</c>), named by drafting
+/// layers, the standards' layers, axis styles and object styles. The standards' file, <c>.lapinstandards</c>: text, dimension and
+/// axis styles, tag types and the tag rules, the drafting tables' styles, layers and their groups, line types, hatch patterns, symbols and the marks' symbols, and with
+/// <c>options</c> the project's units, scales, marker sizes, object styles, pen table and dimension rules; brought into a project entry by entry,
+/// one that differs taking the choice given (update, keep both, skip). Each command one undo step.
+/// </summary>
+public static class StandardsLibrary
+{
+    public const string FileFormat = "lapin-standards";
+    public const int FileVersion = 1;
+
+    static Entity Project(IModelView m) => Spatial.Project(m) ?? throw new CommandException("The model has no project.");
+
+    /// <summary>The standards written as the project keeps them: their layers the project's drafting layers (decision 714).</summary>
+    static void WriteBook(ICommandContext ctx, JsonObject raw) => DraftingResources.Write(ctx, raw);
+
+    static JsonObject LineTypeJson(LineTypeDef l)
+    {
+        var o = new JsonObject { ["id"] = l.Name, ["name"] = l.Name, ["dashes"] = new JsonArray(l.Dashes.Select(d => (JsonNode)d).ToArray()) };
+        if (l.Description != null) o["description"] = l.Description;
+        return o;
+    }
+
+    static double[] CheckDashes(JsonNode? n)
+    {
+        if (n is not JsonArray a || !(a.Count >= 2 && a.Count <= 24)) throw new CommandException("A line type is dashes and gaps (mm), two to 24 of them.");
+        var d = a.Select(x => Json.Number(x) ?? double.NaN).ToArray();
+        if (d.Any(x => !(x > 0 && x < 100))) throw new CommandException("Each dash and gap is above 0 and under 100 mm.");
+        return d;
+    }
+
+    /// <summary>A line type's name changed or gone everywhere it is named: drafting layers, the standards' layers and axis styles, object styles (gone: continuous).</summary>
+    static void Repoint(ICommandContext ctx, JsonObject raw, string from, string? to)
+    {
+        foreach (var x in (raw["layers"] as JsonArray ?? []).OfType<JsonObject>()) if (string.Equals((string?)x["lineType"], from, StringComparison.OrdinalIgnoreCase)) x["lineType"] = to;
+        foreach (var x in (raw["axisStyles"] as JsonArray ?? []).OfType<JsonObject>()) if (string.Equals((string?)x["lineType"], from, StringComparison.OrdinalIgnoreCase)) x["lineType"] = to ?? "dashdot";
+        var project = Project(ctx.Model);
+        var attrs = project.CloneAttrs();
+        if (attrs["draftLayers"] is JsonArray dl)
+            foreach (var x in dl.OfType<JsonObject>()) if (string.Equals((string?)x["lineType"], from, StringComparison.OrdinalIgnoreCase)) x["lineType"] = to ?? "continuous";
+        if (attrs["objectStyles"] is JsonObject os)
+            foreach (var (_, cat) in os) foreach (var (_, spec) in cat as JsonObject ?? []) if (spec is JsonObject so && string.Equals((string?)so["pattern"], from, StringComparison.OrdinalIgnoreCase)) { if (to == null) so.Remove("pattern"); else so["pattern"] = to; }
+        // The project's own material standards' rules and pens (decision 681) name line types as materials do.
+        if (attrs[MaterialStandards.ListKey] is JsonArray standards) RepointGraphics(standards, from, to);
+        // The material graphics sets' entries (decision 682) too.
+        if (attrs[MaterialGraphicsSets.Key] is JsonArray sets) RepointGraphics(sets, from, to);
+        ctx.Replace(project.With(attrs: attrs));
+        // A drafted shape's own line type (decision 715): renamed with it, gone to its layer's.
+        foreach (var e in ctx.Model.OfClass(IfcClass.Annotation).Where(e => e.PredefinedType == DraftLayers.Predefined && string.Equals(e.Str("lineType"), from, StringComparison.OrdinalIgnoreCase)).ToList())
+        {
+            var ea = e.CloneAttrs();
+            if (to == null) ea.Remove("lineType"); else ea["lineType"] = to;
+            ctx.Replace(e.With(attrs: ea));
+        }
+        // Materials (decision 681): their hatch's line type and their cut and separator lines', in every kind of view, its steps by scale and its background.
+        foreach (var mat in ctx.Model.OfClass(IfcClass.Material).ToList())
+        {
+            var ma = mat.CloneAttrs();
+            if (RepointGraphics(ma, from, to)) ctx.Replace(mat.With(attrs: ma));
+        }
+        // The types' layers' own graphics (decision 758).
+        foreach (var set in ctx.Model.OfClass(IfcClass.MaterialLayerSet).Where(s => s.Attrs.ToJsonString().Contains("\"graphics\"", StringComparison.Ordinal)).ToList())
+        {
+            var sa = set.CloneAttrs();
+            if (RepointGraphics(sa, from, to)) ctx.Replace(set.With(attrs: sa));
+        }
+    }
+
+    /// <summary>
+    /// A line type renamed or gone in a material's graphics (or anything holding them: a standard's rules): <c>hatchLineType</c>
+    /// and the <c>lineType</c> of <c>cutLine</c>, <c>separatorLine</c> and a standard's pens, anywhere in the tree (steps by scale,
+    /// background hatches); gone, the field is taken off (continuous). Whether anything changed.
+    /// </summary>
+    static bool RepointGraphics(JsonNode node, string from, string? to)
+    {
+        var changed = false;
+        switch (node)
+        {
+            case JsonObject o:
+                foreach (var k in o.Select(kv => kv.Key).ToList())
+                {
+                    var v = o[k];
+                    if (k == "hatchLineType" && v is JsonValue && string.Equals((string?)v, from, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (to == null) o.Remove(k); else o[k] = to;
+                        changed = true;
+                    }
+                    else if (k is "cutLine" or "separatorLine" or "cut" or "hatch" && v is JsonObject line && string.Equals((string?)line["lineType"], from, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (to == null) line.Remove("lineType"); else line["lineType"] = to;
+                        if (line.Count == 0) o.Remove(k);
+                        changed = true;
+                    }
+                    else if (v != null) changed |= RepointGraphics(v, from, to);
+                }
+                break;
+            case JsonArray a:
+                foreach (var x in a) if (x != null) changed |= RepointGraphics(x, from, to);
+                break;
+        }
+        return changed;
+    }
+
+    // ------------------------------------------------------------ the standards' file
+
+    /// <summary>The project's standards as a file: the drafting standards, its hatch patterns, its symbols and the marks' symbols by name, and its options.</summary>
+    /// <param name="materialSets">The material graphics sets to write (decision 682): their ids; null: every set of the project, but
+    /// none in a pack of material standards alone (<paramref name="onlyMaterials"/>), which writes those named only.</param>
+    public static JsonObject Export(IModelView m, string? name, IReadOnlyList<string>? materialStandards = null, bool onlyMaterials = false, IReadOnlyList<string>? materialSets = null)
+    {
+        var project = Project(m);
+        var o = new JsonObject();
+        if (name is { Length: > 0 }) o["name"] = name;
+        // The material standards (decision 681): those named (a built-in one as data), else the project's own.
+        var materials = MaterialStandards.FileSection(m, materialStandards);
+        // The material graphics sets (decision 682), so a firm's sets travel with its standard.
+        var sets = onlyMaterials && materialSets == null ? null : MaterialGraphicsSets.FileSection(m, materialSets);
+        if (onlyMaterials)
+        {
+            // A pack of material standards alone (a store's extension): no drafting standards of the project's.
+            o["drafting"] = new JsonObject();
+            if (materials == null && sets == null) throw new CommandException("There is no material standard to write.");
+            if (materials != null) o["materialGraphics"] = materials;
+            if (sets != null) o[MaterialGraphicsSets.Key] = sets;
+            return LibraryFile.Write(Spec, o, LibraryFile.SourceOf(m));
+        }
+        o["drafting"] = Standards.ToJson(DraftingResources.Book(m));
+        if (materials != null) o["materialGraphics"] = materials;
+        if (sets != null) o[MaterialGraphicsSets.Key] = sets;
+        if (project.Str("hatchPatterns") is { Length: > 0 } pat) o["hatchPatterns"] = pat;
+        var symbols = m.OfClass(Symbols.Class).OrderBy(e => e.Name, StringComparer.OrdinalIgnoreCase).ToList();
+        if (symbols.Count > 0) o["symbols"] = new JsonArray(symbols.Select(e => (JsonNode)new JsonObject { ["name"] = e.Name, ["def"] = e.Attrs["def"]?.DeepClone() }).ToArray());
+        // The marks' symbols by name (a built-in by its id), so the file carries no ids of this project.
+        if (project.Attrs[SymbolSlots.Key] is JsonObject slots)
+            o["symbolSlots"] = new JsonObject(slots.Select(kv => KeyValuePair.Create(kv.Key, (JsonNode?)(BuiltinSymbols.Is((string?)kv.Value) ? (string?)kv.Value : Symbols.NameOf(m, (string?)kv.Value)))));
+        if (project.Attrs["objectStyles"] is JsonObject ost) o["objectStyles"] = ost.DeepClone();
+        if (project.Attrs["penTable"] is JsonObject pt) o["penTable"] = pt.DeepClone();
+        // The rules of the dimensions made at once (exterior, rooms: forum topic 78).
+        if (project.Attrs["dimensionRules"] is JsonObject dr) o["dimensionRules"] = dr.DeepClone();
+        return LibraryFile.Write(Spec, o, LibraryFile.SourceOf(m));
+    }
+
+    public static LibraryFile.Spec Spec => LibraryFile.Of(FileFormat);
+
+    static JsonObject ReadFile(string text) => LibraryFile.Read(text, Spec).Root;
+
+    /// <summary>The file's entries as the import preview shows them: each the same thing as the project's of its id (a line type, a pattern, a symbol: its name), updated by default.</summary>
+    static List<LibraryMerge.Row> Rows(IModelView m, JsonObject file) =>
+        [.. Compare(m, file).Select(e => Row(e.Kind, e.Id, e.Name, e.Exists, e.Same))];
+
+    static LibraryMerge.Row Row(string kind, string id, string name, bool exists, bool same) =>
+        new($"{kind}:{id}", kind, name, !exists ? LibraryMerge.Match.New : same ? LibraryMerge.Match.Same : LibraryMerge.Match.Id);
+
+    /// <summary>A line type of a .lin file as the import preview shows it: a name the project has with other dashes is the same line type, updated by default.</summary>
+    static List<LibraryMerge.Row> LinRows(IModelView m, string text)
+    {
+        var own = OwnDashes(DraftingResources.Book(m).LineTypes);
+        return [.. LinFile.Parse(text, 1).Select(l => LinRow(l, own) with { Differs = ["dashes"] })];
+    }
+
+    /// <summary>The dashes of the project's line type of a name (case aside); null when it has none.</summary>
+    static Func<string, double[]?> OwnDashes(IReadOnlyList<LineTypeDef>? own) =>
+        name => own?.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))?.Dashes;
+
+    /// <summary>
+    /// One line type of a .lin file against the project's, the one reading the preview, the read and the import share: the name it
+    /// comes in under (<see cref="OwnName"/>: „DASHED (file)” beside Lapin's own), and whether the project has it, with the same dashes.
+    /// </summary>
+    static LibraryMerge.Row LinRow(LinFile.Read l, Func<string, double[]?> dashesOf)
+    {
+        var name = OwnName(l.Name);
+        var have = dashesOf(name);
+        var match = have is null ? LibraryMerge.Match.New : have.Length == l.Dashes.Length && have.Zip(l.Dashes).All(p => Math.Abs(p.First - p.Second) < 1e-9) ? LibraryMerge.Match.Same : LibraryMerge.Match.Id;
+        return new LibraryMerge.Row(l.Name, "lineType", name, match);
+    }
+
+    /// <summary>Lapin's own line type names stay Lapin's: a file's comes in beside them.</summary>
+    static string OwnName(string name) => Standards.LineTypes.Contains(name, StringComparer.OrdinalIgnoreCase) || LineStyles.Patterns.Contains(name, StringComparer.OrdinalIgnoreCase) ? name + " (file)" : name;
+
+    /// <summary>The lists the file and the project both hold, by kind: (kind, the list's key in the standards).</summary>
+    static readonly (string Kind, string Key)[] Lists =
+        [("text", "textStyles"), ("dim", "dimStyles"), ("axis", "axisStyles"), ("tag", "tagTypes"), ("layer", "layers"), ("layerGroup", "layerGroups"), ("lineType", "lineTypes"), ("tagRule", "tagRules"), ("table", "tableStyles")];
+
+    /// <summary>Every entry of the file with whether the project has one of its id (a line type: its name) and whether it is the same.</summary>
+    static List<(string Kind, string Id, string Name, bool Exists, bool Same)> Compare(IModelView m, JsonObject file)
+    {
+        var o = new List<(string, string, string, bool, bool)>();
+        // Both read as the project reads them, so a field written another way compares the same.
+        var theirs = Theirs(file);
+        var mine = Standards.ToJson(DraftingResources.Book(m));
+        foreach (var (kind, key) in Lists)
+            foreach (var e in (theirs[key] as JsonArray ?? []).OfType<JsonObject>())
+            {
+                var id = (string?)e["id"] ?? (string?)e["name"] ?? "";
+                var have = (mine[key] as JsonArray ?? []).OfType<JsonObject>().FirstOrDefault(x => string.Equals((string?)x["id"] ?? (string?)x["name"], id, StringComparison.OrdinalIgnoreCase));
+                // A tag rule has no name: what it says (issue #72).
+                var name = kind == "tagRule" ? $"{(string?)e["class"]}: {(string?)e["when"]} → {(string?)e["tagType"]}" : (string?)e["name"] ?? id;
+                // A layer by its name, ignoring case (decision 714).
+                var same = have != null && (kind == "layer" ? JsonNode.DeepEquals(have, LayerAs(e, have)) : JsonNode.DeepEquals(have, e));
+                o.Add((kind, id, name, have != null, same));
+            }
+        var myPatterns = DraftingResources.Patterns(m);
+        if ((string?)file["hatchPatterns"] is { Length: > 0 } pt)
+            foreach (var p in Pat.Parse(pt).Patterns)
+            {
+                var have = myPatterns.FirstOrDefault(x => string.Equals(x.Name, p.Name, StringComparison.OrdinalIgnoreCase));
+                o.Add(("pattern", p.Name, p.Name, have != null, have != null && Pat.Serialize([have]) == Pat.Serialize([p])));
+            }
+        // Material standards by id (decision 681).
+        foreach (var ms in MaterialStandards.InFile(file))
+        {
+            var (exists, same) = MaterialStandards.Compare(m, ms);
+            o.Add(("materialStandard", ms.Id, ms.Name, exists, same));
+        }
+        // Material graphics sets by id (decision 682).
+        foreach (var set in MaterialGraphicsSets.InFile(file))
+        {
+            var (exists, same) = MaterialGraphicsSets.Compare(m, set);
+            o.Add(("materialGraphicsSet", set.Id, set.Name, exists, same));
+        }
+        foreach (var s in (file["symbols"] as JsonArray ?? []).OfType<JsonObject>())
+        {
+            var name = (string?)s["name"] ?? "";
+            var have = m.OfClass(Symbols.Class).FirstOrDefault(e => e.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            o.Add(("symbol", name, name, have != null, have != null && SymbolDef.From(have.Attrs["def"]) is { } d && SymbolDef.From(s["def"]) is { } fd && JsonNode.DeepEquals(d.ToJson(), fd.ToJson())));
+        }
+        return o;
+    }
+
+    /// <summary>A file's layer with the project's name for it (the one its shapes name).</summary>
+    static JsonObject LayerAs(JsonObject theirs, JsonObject mine)
+    {
+        var e = (JsonObject)theirs.DeepClone();
+        e["id"] = mine["id"]?.DeepClone();
+        e["name"] = mine["name"]?.DeepClone();
+        return e;
+    }
+
+    /// <summary>
+    /// The file's drafting standards as the project reads them; none when the file gives none (a pack of material standards alone,
+    /// decision 681, writes an empty <c>drafting</c>: read, it would be every default, shown as entries the project has).
+    /// </summary>
+    /// <remarks>Its layers (decision 714): those it lists, each by its name (an older file's ids were the standards' own).</remarks>
+    static JsonObject Theirs(JsonObject file)
+    {
+        if (file["drafting"] is not JsonObject { Count: > 0 } d) return new JsonObject();
+        var o = Standards.ToJson(Standards.Read(d));
+        o["layers"] = new JsonArray([.. DraftLayers.InFile(d).Select(DraftingResources.LayerJson)]);
+        return o;
+    }
+
+    /// <summary>A free id and name in a list for a copy kept beside the project's (<see cref="LibraryMerge"/>): „Name (2)”, id-2.</summary>
+    static (string Id, string Name) Free(JsonArray list, string id, string name)
+    {
+        var ids = list.OfType<JsonObject>().Select(x => (string?)x["id"] ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var names = list.OfType<JsonObject>().Select(x => (string?)x["name"] ?? "").ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var n = 2; ; n++) if (!ids.Contains($"{id}-{n}") && !names.Contains($"{name} ({n})")) return ($"{id}-{n}", $"{name} ({n})");
+    }
+
+    public static void Register(IModuleRegistry r)
+    {
+        // Lapin's line types and the project's, each with its dashes (mm).
+        r.Query("standards.lineTypes", (q, _) => new JsonObject
+        {
+            ["builtin"] = new JsonArray(Standards.LineTypes.Concat(LineStyles.Patterns).Distinct().Where(n => n is not ("continuous" or "solid"))
+                .Select(n => (JsonNode)new JsonObject { ["name"] = n, ["description"] = Dashes.Description(n), ["dashes"] = new JsonArray(Dashes.Of(n).Select(d => (JsonNode)d).ToArray()) }).ToArray()),
+            ["own"] = new JsonArray((DraftingResources.Book(q.Model).LineTypes ?? []).Select(l => (JsonNode)LineTypeJson(l)).ToArray()),
+        });
+
+        // A line type of the project's made or changed: {name, dashes, description?, newName?} (renamed, what names it follows).
+        r.Command("standards.setLineType", "Line type", (ctx, a) =>
+        {
+            var name = ((string?)a["name"])?.Trim() is { Length: > 0 and <= 64 } n ? n : throw new CommandException("A line type needs a name (64 characters at most).");
+            var newName = ((string?)a["newName"])?.Trim() is { Length: > 0 and <= 64 } nn ? nn : name;
+            foreach (var x in new[] { name, newName })
+                if (Standards.LineTypes.Contains(x, StringComparer.OrdinalIgnoreCase) || LineStyles.Patterns.Contains(x, StringComparer.OrdinalIgnoreCase))
+                    throw new CommandException($"„{x}” is one of Lapin's own line types.");
+            var raw = Standards.ToJson(DraftingResources.Book(ctx.Model));
+            var list = raw["lineTypes"] as JsonArray ?? [];
+            var at = list.OfType<JsonObject>().FirstOrDefault(x => string.Equals((string?)x["name"], name, StringComparison.OrdinalIgnoreCase));
+            if (newName != name && list.OfType<JsonObject>().Any(x => string.Equals((string?)x["name"], newName, StringComparison.OrdinalIgnoreCase)))
+                throw new CommandException($"There is a line type „{newName}” already.");
+            var dashes = a["dashes"] != null ? CheckDashes(a["dashes"]) : at?["dashes"] is JsonArray old ? CheckDashes(old) : throw new CommandException("A new line type needs its dashes.");
+            var entry = LineTypeJson(new LineTypeDef(newName, newName, dashes, ((string?)a["description"])?.Trim() is { Length: > 0 } d ? d : (string?)at?["description"]));
+            if (at != null) list[list.IndexOf(at)] = entry; else list.Add((JsonNode)entry);
+            raw["lineTypes"] = list;
+            if (newName != name) Repoint(ctx, raw, name, newName);
+            WriteBook(ctx, raw);
+            return new JsonObject { ["name"] = newName };
+        });
+
+        // A line type of the project's removed: what named it draws continuous.
+        r.Command("standards.removeLineType", "Remove line type", (ctx, a) =>
+        {
+            var name = (string?)a["name"] ?? throw new CommandException("Which line type?");
+            var raw = Standards.ToJson(DraftingResources.Book(ctx.Model));
+            var list = raw["lineTypes"] as JsonArray ?? [];
+            if (!list.OfType<JsonObject>().Any(x => string.Equals((string?)x["name"], name, StringComparison.OrdinalIgnoreCase))) throw new CommandException("The project has no such line type.");
+            raw["lineTypes"] = new JsonArray(list.OfType<JsonObject>().Where(x => !string.Equals((string?)x["name"], name, StringComparison.OrdinalIgnoreCase)).Select(x => (JsonNode)x.DeepClone()).ToArray());
+            Repoint(ctx, raw, name, null);
+            WriteBook(ctx, raw);
+            return null;
+        });
+
+        static double Unit(JsonObject a) => (string?)a["units"] is "in" or "inch" or "inches" ? 25.4 : 1;
+
+        // A .lin file read: its line types with their dashes (mm), whether each had text or shapes left out, whether the project has one of that name and the same.
+        r.Query("standards.readLin", (q, a) =>
+        {
+            var skipped = new List<string>();
+            var read = LinFile.Parse((string?)a["text"] ?? "", Unit(a), skipped);
+            var own = OwnDashes(DraftingResources.Book(q.Model).LineTypes);
+            return new JsonObject
+            {
+                ["lineTypes"] = new JsonArray(read.Select(l =>
+                {
+                    var row = LinRow(l, own);
+                    return (JsonNode)new JsonObject
+                    {
+                        ["name"] = l.Name, ["as"] = row.Name, ["description"] = l.Description, ["complex"] = l.Complex, ["builtin"] = row.Name != l.Name,
+                        ["dashes"] = new JsonArray(l.Dashes.Select(d => (JsonNode)d).ToArray()), ["exists"] = row.Match != LibraryMerge.Match.New, ["same"] = row.Match == LibraryMerge.Match.Same,
+                    };
+                }).ToArray()),
+                ["skipped"] = new JsonArray(skipped.Select(s => (JsonNode)s).ToArray()),
+            };
+        });
+
+        // A .lin file's line types brought in ({text, units: mm | in, names?, choices?: {name: update | both | skip}, all?}): one the project has that differs takes its choice (default: update).
+        r.Command("standards.importLin", "Import line types", (ctx, a) =>
+        {
+            var only = a["names"] is JsonArray na ? na.Select(x => (string?)x).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
+            return ImportLin(ctx, (string?)a["text"] ?? "", Unit(a), a["choices"] as JsonObject, (string?)a["all"], only);
+        });
+
+        // The project's line types (all, or those named) as a .lin file in mm.
+        r.Query("standards.exportLin", (q, a) =>
+        {
+            var only = a["names"] is JsonArray na ? na.Select(x => (string?)x).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase) : null;
+            var types = (DraftingResources.Book(q.Model).LineTypes ?? []).Where(l => only == null || only.Contains(l.Name)).ToList();
+            if (types.Count == 0) throw new CommandException("The project has no line types of its own to write.");
+            return new JsonObject { ["text"] = LinFile.Write(types.Select(l => (l.Name, l.Description, l.Dashes))), ["file"] = "lapin.lin" };
+        });
+
+        // The project's standards as a .lapinstandards file.
+        r.Query("standards.export", (q, a) =>
+        {
+            var ids = a["materialStandards"] is JsonArray ms ? ms.Select(x => (string?)x).OfType<string>().ToList() : null;
+            var setIds = a["materialGraphicsSets"] is JsonArray mgs ? mgs.Select(x => (string?)x).OfType<string>().ToList() : null;
+            var o = Export(q.Model, (string?)a["name"], ids, (string?)a["only"] == "materialGraphics", setIds);
+            return new JsonObject { ["text"] = o.ToJsonString(new JsonSerializerOptions { WriteIndented = true }), ["file"] = ((string?)a["name"] is { Length: > 0 } n ? n : "standards") + ".lapinstandards" };
+        });
+
+        // A standards file read: every entry with whether the project has it and whether it is the same; whether it carries options.
+        r.Query("standards.readPack", (q, a) =>
+        {
+            var file = ReadFile((string?)a["text"] ?? "");
+            return new JsonObject
+            {
+                ["name"] = (string?)file["name"],
+                ["entries"] = new JsonArray(Compare(q.Model, file).Select(e => (JsonNode)new JsonObject { ["kind"] = e.Kind, ["id"] = e.Id, ["name"] = e.Name, ["exists"] = e.Exists, ["same"] = e.Same }).ToArray()),
+                ["options"] = file["objectStyles"] != null || file["penTable"] != null || file["symbolSlots"] != null || file["dimensionRules"] != null,
+                // Its material standards (decision 681), each with what it says of itself and whether the project has it.
+                ["materialStandards"] = new JsonArray(MaterialStandards.InFile(file).Select(ms =>
+                {
+                    var (exists, same) = MaterialStandards.Compare(q.Model, ms);
+                    var so = ms.Summary();
+                    so["builtin"] = MaterialStandard.FindBuiltIn(ms.Id) != null;
+                    so["exists"] = exists;
+                    so["same"] = same;
+                    return (JsonNode)so;
+                }).ToArray()),
+                // Its material graphics sets (decision 682): {id, name, entries (their count), exists, same}.
+                ["materialGraphicsSets"] = new JsonArray(MaterialGraphicsSets.InFile(file).Select(set =>
+                {
+                    var (exists, same) = MaterialGraphicsSets.Compare(q.Model, set);
+                    return (JsonNode)new JsonObject { ["id"] = set.Id, ["name"] = set.Name, ["entries"] = set.Entries.Count, ["exists"] = exists, ["same"] = same };
+                }).ToArray()),
+            };
+        });
+
+        // A standards file brought in, one undo step: each entry the project lacks added, one the same kept, one that differs taking
+        // its choice ({"kind:id": update | both | skip}, else `all`, else update); `options`: the units, scales, marker sizes, object
+        // styles, pen table, the marks' symbols and the dimension rules too.
+        r.Command("standards.importFrom", "Import drafting standards", (ctx, a) =>
+        {
+            var file = ReadFile((string?)a["text"] ?? "");
+            var withOptions = a["options"] is JsonValue ov && ov.TryGetValue<bool>(out var opt) && opt;
+            return Import(ctx, file, a["choices"] as JsonObject, (string?)a["all"], withOptions);
+        });
+
+        r.Service<ILibraryFormat>(new LibraryFormat(Spec, (q, text) => Rows(q.Model, ReadFile(text)), (ctx, text, choices, all) => Import(ctx, ReadFile(text), choices, all, true)));
+        r.Service<ILibraryFormat>(new LibraryFormat(LibraryFile.Of("autocad-lin"), (q, text) => LinRows(q.Model, text), (ctx, text, choices, all) => ImportLin(ctx, text, 1, choices, all, null)));
+    }
+
+    /// <summary>A .lin file's line types brought in: each the project lacks added; one it has with other dashes as its choice says (update by default, „Name (2)” beside, skip).</summary>
+    static JsonObject ImportLin(ICommandContext ctx, string text, double unit, JsonObject? choices, string? all, IReadOnlySet<string>? only)
+    {
+        var read = LinFile.Parse(text, unit);
+        if (read.Count == 0) throw new CommandException("The file has no line types Lapin can read (a .lin file: *NAME, then A, dash, -gap, …).");
+        var raw = Standards.ToJson(DraftingResources.Book(ctx.Model));
+        var list = raw["lineTypes"] as JsonArray ?? [];
+        var tally = new LibraryMerge.Tally();
+        foreach (var l in read)
+        {
+            if (only != null && !only.Contains(l.Name)) continue;
+            JsonObject? At(string n) => list.OfType<JsonObject>().FirstOrDefault(x => string.Equals((string?)x["name"], n, StringComparison.OrdinalIgnoreCase));
+            var row = LinRow(l, n => At(n) is { } x ? (x["dashes"] as JsonArray)?.Select(d => Json.Number(d) ?? double.NaN).ToArray() ?? [] : null);
+            var name = row.Name;
+            var at = At(name);
+            var entry = LineTypeJson(new LineTypeDef(name, name, l.Dashes, l.Description));
+            switch (LibraryMerge.Decide(row, choices, all))
+            {
+                case LibraryMerge.Add: list.Add((JsonNode)entry); tally.Added++; break;
+                case LibraryMerge.Same: tally.Kept++; break;
+                case LibraryMerge.Skip: tally.Skipped++; break;
+                case LibraryMerge.Both:
+                    var (_, free) = Free(list, name, name);
+                    list.Add((JsonNode)LineTypeJson(new LineTypeDef(free, free, l.Dashes, l.Description)));
+                    tally.Added++;
+                    tally.Renamed.Add(free);
+                    break;
+                default: list[list.IndexOf(at!)] = entry; tally.Updated++; break;
+            }
+        }
+        raw["lineTypes"] = list;
+        WriteBook(ctx, raw);
+        return tally.ToJson();
+    }
+
+    /// <summary>
+    /// A standards file brought in, one undo step: each entry the project lacks added, one the same kept, one that differs taking
+    /// its choice (<see cref="LibraryMerge"/>: {"kind:id": update | both | skip}, else `all`, else update); `options`: the project's
+    /// units, scales, marker sizes, object styles, pen table, the marks' symbols and the dimension rules too.
+    /// </summary>
+    static JsonObject Import(ICommandContext ctx, JsonObject file, JsonObject? choices, string? all, bool withOptions)
+    {
+            string Choice(string kind, string id, bool exists = true, bool same = false) => LibraryMerge.Decide(Row(kind, id, id, exists, same), choices, all);
+            int added = 0, updated = 0, kept = 0, skipped = 0;
+            var renamed = new List<string>();
+
+            // The drafting standards' lists.
+            var theirs = Theirs(file);
+            var raw = Standards.ToJson(DraftingResources.Book(ctx.Model));
+            foreach (var (kind, key) in Lists)
+            {
+                var list = raw[key] as JsonArray ?? [];
+                foreach (var entry in (theirs[key] as JsonArray ?? []).OfType<JsonObject>())
+                {
+                    var id = (string?)entry["id"] ?? (string?)entry["name"] ?? "";
+                    var at = list.OfType<JsonObject>().FirstOrDefault(x => string.Equals((string?)x["id"] ?? (string?)x["name"], id, StringComparison.OrdinalIgnoreCase));
+                    if (at == null) { list.Add((JsonNode)entry.DeepClone()); added++; continue; }
+                    // A drafting layer keeps the project's name, the one its shapes name (decision 714).
+                    var e = kind == "layer" ? LayerAs(entry, at) : entry;
+                    if (JsonNode.DeepEquals(at, e)) { kept++; continue; }
+                    switch (Choice(kind, id))
+                    {
+                        case LibraryMerge.Skip: skipped++; break;
+                        case LibraryMerge.Both:
+                        {
+                            var copy = (JsonObject)e.DeepClone();
+                            var (nid, nname) = Free(list, id, (string?)e["name"] ?? id);
+                            copy["id"] = kind is "lineType" or "layer" ? nname : nid;
+                            copy["name"] = nname;
+                            list.Add((JsonNode)copy);
+                            added++;
+                            renamed.Add(nname);
+                            break;
+                        }
+                        default: list[list.IndexOf(at)] = e.DeepClone(); updated++; break;
+                    }
+                }
+                raw[key] = list;
+            }
+            if (withOptions)
+                foreach (var k in new[] { "units", "lineCap", "areaRounding", "suppressZeros", "levelDecimals", "levelZeros", "dimAutoText", "dimTextLeader", "sectionMarkSize", "sectionMarkText", "elevationMarkSize", "elevationMarkText", "scales", "planScale", "sectionScale", "elevationScale", "defaultAxisStyle", "dateFormat", "floorSlopeMarks", "drawingLang", "materialKeyFormat" })
+                    if (theirs[k] != null) raw[k] = theirs[k]!.DeepClone();
+            // How callouts' boundaries and insets' frames are drawn (issue #73).
+            if (withOptions)
+                foreach (var k in new[] { FrameLines.CalloutKey, FrameLines.InsetKey })
+                    if (theirs[k] != null) raw[k] = theirs[k]!.DeepClone();
+            WriteBook(ctx, raw);
+
+            // Hatch patterns by name.
+            if ((string?)file["hatchPatterns"] is { Length: > 0 } pt)
+            {
+                var mine = DraftingResources.Patterns(ctx.Model).ToList();
+                foreach (var p in Pat.Parse(pt).Patterns)
+                {
+                    var i = mine.FindIndex(x => string.Equals(x.Name, p.Name, StringComparison.OrdinalIgnoreCase));
+                    if (i < 0) { mine.Add(p); added++; continue; }
+                    if (Pat.Serialize([mine[i]]) == Pat.Serialize([p])) { kept++; continue; }
+                    switch (Choice("pattern", p.Name))
+                    {
+                        case LibraryMerge.Skip: skipped++; break;
+                        case LibraryMerge.Both:
+                            // A pattern's name stays one word, as a .pat file writes it: „NAME_2”.
+                            var n = 2;
+                            while (mine.Any(x => string.Equals(x.Name, $"{p.Name}_{n}", StringComparison.OrdinalIgnoreCase))) n++;
+                            mine.Add(p with { Name = $"{p.Name}_{n}" });
+                            added++;
+                            renamed.Add($"{p.Name}_{n}");
+                            break;
+                        default: mine[i] = p; updated++; break;
+                    }
+                }
+                var project = Project(ctx.Model);
+                var attrs = project.CloneAttrs();
+                attrs["hatchPatterns"] = Pat.Serialize(mine);
+                ctx.Replace(project.With(attrs: attrs));
+            }
+
+            // Symbols, through the symbols' own import (its choices by name).
+            if (file["symbols"] is JsonArray { Count: > 0 } syms)
+            {
+                var pack = new JsonObject { ["format"] = Symbols.FileFormat, ["version"] = Symbols.FileVersion, ["symbols"] = syms.DeepClone() };
+                var text = pack.ToJsonString();
+                // Each symbol the project has by name that differs as its choice in the standards says (update by default).
+                var symChoices = new JsonObject();
+                foreach (var row in Symbols.Rows(ctx.Model, Symbols.Read(text)).Where(x => x.Conflict)) symChoices[row.Key] = Choice("symbol", row.Key);
+                var result = Symbols.Import(ctx, text, symChoices, null, null);
+                added += (int?)result["added"] ?? 0; updated += (int?)result["updated"] ?? 0; kept += (int?)result["kept"] ?? 0; skipped += (int?)result["skipped"] ?? 0;
+                renamed.AddRange((result["renamed"] as JsonArray ?? []).Select(x => (string?)x).OfType<string>());
+            }
+
+            // Material standards (decision 681), after the patterns and line types their rules may name; never applied by importing.
+            MaterialStandards.Import(ctx, file, (kind, id) => Choice(kind, id), ref added, ref updated, ref kept, ref skipped, renamed);
+            // Material graphics sets (decision 682), by id, with the same choices; never named by a style by importing.
+            MaterialGraphicsSets.Import(ctx, file, (kind, id) => Choice(kind, id), ref added, ref updated, ref kept, ref skipped, renamed);
+
+            if (withOptions)
+            {
+                var project = Project(ctx.Model);
+                var attrs = project.CloneAttrs();
+                if (file["objectStyles"] is JsonObject os) attrs["objectStyles"] = os.DeepClone();
+                if (file["penTable"] is JsonObject ptab) attrs["penTable"] = ptab.DeepClone();
+                if (file["dimensionRules"] is JsonObject drules) attrs["dimensionRules"] = drules.DeepClone();
+                // The marks' symbols, named: a built-in by its id, else the project's symbol of that name.
+                if (file["symbolSlots"] is JsonObject slots)
+                {
+                    var mine = attrs[SymbolSlots.Key] as JsonObject is { } had ? (JsonObject)had.DeepClone() : new JsonObject();
+                    foreach (var (slot, v) in slots)
+                    {
+                        if (!SymbolSlots.Known(slot) || (string?)v is not { Length: > 0 } named) continue;
+                        var id = BuiltinSymbols.Is(named) ? named : ctx.Model.OfClass(Symbols.Class).FirstOrDefault(e => e.Name.Equals(named, StringComparison.OrdinalIgnoreCase))?.Id;
+                        if (id != null) mine[slot] = id;
+                    }
+                    if (mine.Count > 0) attrs[SymbolSlots.Key] = mine;
+                }
+                ctx.Replace(project.With(attrs: attrs));
+            }
+            return new JsonObject { ["added"] = added, ["updated"] = updated, ["kept"] = kept, ["skipped"] = skipped, ["renamed"] = new JsonArray(renamed.Select(x => (JsonNode)x).ToArray()) };
+    }
+}

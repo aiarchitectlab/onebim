@@ -1,0 +1,140 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Drafting.Cad;
+
+/// <summary>Moving, turning and mirroring what drafting draws: shapes and hatches, texts, dimensions, grid axes.</summary>
+public sealed class AnnotationPlacement : IElementPlacement
+{
+    public bool Handles(Entity e) => e.Class is IfcClass.Annotation or IfcClass.Grid;
+
+    public static Shape Map(Shape s, Placement2D t) => s switch
+    {
+        Line l => new Line(t.Point(l.A), t.Point(l.B)),
+        Polyline p => new Polyline(p.Pts.Select(t.Point).ToList(), p.Closed),
+        Circle c => c with { C = t.Point(c.C) },
+        Arc a => t.Mirrored
+            ? new Arc(t.Point(a.C), a.R, Geo.NormAngle(t.Angle(a.End)), Geo.NormAngle(t.Angle(a.Start)))
+            : new Arc(t.Point(a.C), a.R, Geo.NormAngle(t.Angle(a.Start)), Geo.NormAngle(t.Angle(a.End))),
+        // Its parameters run from its own major axis; mirrored, that axis is taken the other way and t goes to π − t.
+        Ellipse el => t.Mirrored
+            ? new Ellipse(t.Point(el.C), t.Dir(el.M) * -1, el.Ratio, el.Whole ? 0 : Geo.NormAngle(Math.PI - el.End), el.Whole ? 0 : Geo.NormAngle(Math.PI - el.Start))
+            : el with { C = t.Point(el.C), M = t.Dir(el.M) },
+        _ => s,
+    };
+
+    static Vec2 P(JsonNode? n) => Args.PointOf(n);
+
+    /// <summary>
+    /// A transformation of the paper's view (m, y up) as a sheet's own symbol takes it (audit §16 leftovers): its point is kept in
+    /// paper mm, y down, so the move is taken across (turns and mirrors the other way round); any other symbol's as it is.
+    /// </summary>
+    public static Placement2D OnPaper(IModelView m, JsonObject attrs, Placement2D t)
+    {
+        if ((string?)attrs["sheetId"] is not { } sheetId || m.Get(sheetId) is not { Class: Sheets.Class } sheet) return t;
+        var h = Sheets.PaperOf(sheet).H;
+        return new Placement2D(p => PaperViews.ToPaper(t.Point(PaperViews.ToView(p, h)), h), -t.Turn, t.Mirrored, -t.Axis, t.Rise);
+    }
+    static JsonArray J(Vec2 p) => new(p.X, p.Y);
+
+    public static JsonObject Carry(IModelView m, Entity e, Placement2D t, IReadOnlySet<string> moving)
+    {
+        var attrs = e.CloneAttrs();
+        if (e.Class == IfcClass.Grid)
+        {
+            if (attrs["axes"] is JsonArray axes)
+                foreach (var ax in axes.OfType<JsonObject>()) { ax["a"] = J(t.Point(P(ax["a"]))); ax["b"] = J(t.Point(P(ax["b"]))); }
+            return attrs;
+        }
+        switch (e.PredefinedType)
+        {
+            case Drafts.Predefined:
+                if (Drafts.ShapeOf(e) is { } s) attrs["shape"] = Map(s, t).ToJson();
+                if (attrs["hatch"] is JsonObject h)
+                    h["loops"] = new JsonArray(Drafts.HatchLoops(e).Select(l => (JsonNode)new JsonArray(l.Select(q => (JsonNode)J(t.Point(q))).ToArray())).ToArray());
+                break;
+            case "TAG" or "LEGEND":
+                attrs["at"] = J(t.Point(P(attrs["at"])));
+                // A tag's leader: its elbow goes with the tag; its end stays on the element unless the element goes too, or the wall it is in (or it tags nothing now).
+                if (attrs["elbow"] is JsonArray) attrs["elbow"] = J(t.Point(P(attrs["elbow"])));
+                if (attrs["end"] is JsonArray && ((string?)attrs["element"] is not { } tagged || TagHold.Moves(m, tagged, moving) || m.Get(tagged) == null))
+                    attrs["end"] = J(t.Point(P(attrs["end"])));
+                break;
+            case SymbolInstances.Predefined:
+                SymbolInstances.Carry(attrs, OnPaper(m, attrs, t));
+                break;
+            // A legend, a scale bar or a north arrow (issue #111): its point; one standing by itself (no point) stays so.
+            case DrawingKeys.Legend or DrawingKeys.ScaleBar or DrawingKeys.NorthArrow:
+                if (attrs["at"] is JsonArray) attrs["at"] = J(t.Point(P(attrs["at"])));
+                break;
+            case "TEXT" or DraftingTables.Predefined or DraftingTables.PartPredefined:
+                attrs["at"] = J(t.Point(P(attrs["at"])));
+                var deg = Json.Number(attrs["angle"]) ?? 0;
+                var turned = t.Angle(deg * Math.PI / 180) * 180 / Math.PI;
+                // A text mirrored stays readable, as a symbol's and a DXF's do: never upside down (a component's mirrored instance, forum #224).
+                if (t.Mirrored && e.PredefinedType == "TEXT")
+                {
+                    turned = Math.IEEERemainder(turned, 360);
+                    if (turned > 90 + 1e-9 || turned <= -90 + 1e-9)
+                    {
+                        turned += turned > 0 ? -180 : 180;
+                        // Turned back to read, its box is the mirror of what it was: a box of its own drawn back from its point, else its lines aligned the other way.
+                        var dir = new Vec2(Math.Cos(turned * Math.PI / 180), Math.Sin(turned * Math.PI / 180));
+                        if (Json.Number(attrs["width"]) is { } w && w > 0) attrs["at"] = J(P(attrs["at"]) - dir * w);
+                        else if ((string?)attrs["align"] is not "center") attrs["align"] = (string?)attrs["align"] == "right" ? "left" : "right";
+                    }
+                }
+                attrs["angle"] = turned;
+                break;
+            case "DIMENSION" when Dimensions.IsLinear(e) && Held(e, t, moving) is { } shift:
+                // Moved on its own while it measures elements that stay: it keeps measuring them, and only its line slides square to it (report #37).
+                attrs["at"] = J(P(attrs["at"]) + shift);
+                break;
+            case "DIMENSION" when Dimensions.IsLinear(e):
+            {
+                // The whole string: every point, its line, its direction; a point whose element stays behind measures where it is now.
+                var stations = Dimensions.Stations(e).Select(s => (t.Point(s.P), s.Ref is { } r && moving.Contains(r.Element) ? r : null)).ToList();
+                Dimensions.Write(attrs, stations);
+                if (attrs["at"] is JsonArray) attrs["at"] = J(t.Point(P(attrs["at"])));
+                if (attrs["dir"] is JsonArray) attrs["dir"] = J(t.Dir(P(attrs["dir"])));
+                // Texts moved by hand turn and mirror with the string.
+                Dimensions.WriteOffsets(attrs, Dimensions.OffsetsOf(attrs, stations.Count - 1).Select(o => o is { } v ? t.Dir(v) : (Vec2?)null).ToList());
+                break;
+            }
+            case "DIMENSION":
+                foreach (var k in new[] { "a", "b", "at" }) if (attrs[k] is JsonArray) attrs[k] = J(t.Point(P(attrs[k])));
+                break;
+        }
+        return attrs;
+    }
+
+    /// <summary>
+    /// A move of a string some of whose points hang on elements that are not moving with it: the part of the move
+    /// square to the string, which is all that moving it may do; null for a turn, a mirror, a copy or a free string.
+    /// </summary>
+    static Vec2? Held(Entity e, Placement2D t, IReadOnlySet<string> moving)
+    {
+        if (t.Turn != 0 || t.Mirrored || moving.Count == 0 || e.Attrs["at"] is not JsonArray) return null;
+        var stations = Dimensions.Stations(e);
+        if (stations.Count < 2 || !stations.Any(s => s.Ref is { } r && !moving.Contains(r.Element))) return null;
+        if (Dimensions.Along(e.Attrs, stations[0].P, stations[^1].P) is not { } u) return null;
+        var by = t.Point(default);
+        var n = u.Perp;
+        return n * Vec2.Dot(by, n);
+    }
+
+    public void Transform(ICommandContext ctx, Entity e, Placement2D t, IReadOnlySet<string> moving)
+    {
+        if (e.PredefinedType == Drafts.Predefined) Drafts.Require(ctx.Model, e.Id);
+        ctx.Replace(e.With(attrs: Carry(ctx.Model, e, t, moving)));
+    }
+
+    public string? Copy(ICommandContext ctx, Entity e, Placement2D t)
+    {
+        var copy = new Entity(ctx.NewId(), e.Class, e.Name, Carry(ctx.Model, e, t, new HashSet<string>()), e.PredefinedType);
+        ctx.Add(copy);
+        return copy.Id;
+    }
+}

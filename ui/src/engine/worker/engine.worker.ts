@@ -1,0 +1,198 @@
+/// <reference lib="webworker" />
+/**
+ * The engine in a Web Worker (the web build, docs/plan-browser-engine.md):
+ * the desktop's engine compiled to WebAssembly, started from engine/ next to
+ * the page. The page posts `{ start: <engine folder URL> }`, then
+ * `{ call: <JSON text> }` for each message of the protocol; the worker posts
+ * back `{ ready }` or `{ failed }`, then every frame (`{ frame }`, its buffer
+ * transferred): a call's diff first, then its reply, as the desktop's engine
+ * sends them.
+ *
+ * The recovery journals live in the browser's own storage (the origin
+ * private file system, folder "recovery"). The engine writes them
+ * synchronously; the worker keeps them in memory, read at start, and writes
+ * each line through to storage in order. A journal another tab is writing is
+ * held by its lock ("lapin-journal:<name>") and counts as in use.
+ *
+ * The lazy parts (docs/plan-browser-engine.md, Lazy parts): assemblies the
+ * build leaves out of the first download (point clouds, the 3D exchange, XML,
+ * DXF's code pages). The engine asks for one the first time it needs it
+ * (`part`), and the worker fetches it there and then, synchronously (a worker
+ * may), telling the page `{ part, state: 'loading' | 'loaded' | 'failed' }`.
+ *
+ * Calls are answered one at a time, in the order they came. The history's and the remote's (`history.*`, `remote.*`: a server
+ * reached through fetch, Atrium docs/plan-cde-web.md §2.1 A) are awaited (`CallAsync`, which posts its frames itself); the calls
+ * that come meanwhile wait in the queue, so the project does not change under a push or a pull.
+ */
+
+interface Exports { Start(): string; Call(message: string): Uint8Array; CallAsync(message: string): Promise<void> }
+interface Journal { lines: string[]; at: number }
+
+const scope = self as unknown as DedicatedWorkerGlobalScope;
+const journals = new Map<string, Journal>();
+const mine = new Set<string>();
+const releases = new Map<string, () => void>();
+let othersHeld = new Set<string>();
+let engine: Exports | null = null;
+
+// ─── The journals' storage ───────────────────────────────────────────────
+
+let dir: FileSystemDirectoryHandle | null = null;
+let queue: Promise<void> = Promise.resolve();
+/** Storage work, one after another (a line is never written before the one before it). */
+const later = (job: () => Promise<void>) => { queue = queue.then(job).catch((e) => console.warn('[lapin] journal storage:', e)); };
+
+async function loadJournals(): Promise<void> {
+  try {
+    dir = await (await navigator.storage.getDirectory()).getDirectoryHandle('recovery', { create: true });
+    for await (const [name, handle] of (dir as unknown as AsyncIterable<[string, FileSystemHandle]>)) {
+      if (handle.kind !== 'file' || !name.endsWith('.jsonl')) continue;
+      const file = await (handle as FileSystemFileHandle).getFile();
+      journals.set(name, { lines: (await file.text()).split('\n').filter((l) => l.length > 0), at: file.lastModified });
+    }
+    const held = await navigator.locks.query();
+    othersHeld = new Set((held.held ?? []).map((l) => l.name ?? '').filter((n) => n.startsWith('lapin-journal:')).map((n) => n.slice('lapin-journal:'.length)));
+  } catch (e) {
+    // No storage (a private window that refuses it): journals live as long as the tab.
+    console.warn('[lapin] no storage for the recovery journals:', e);
+    dir = null;
+  }
+}
+
+function hold(name: string): void {
+  mine.add(name);
+  void navigator.locks?.request(`lapin-journal:${name}`, () => new Promise<void>((release) => releases.set(name, release)));
+}
+
+function letGo(name: string): void {
+  mine.delete(name);
+  releases.get(name)?.();
+  releases.delete(name);
+}
+
+const journalModule = {
+  create(name: string) {
+    journals.set(name, { lines: [], at: Date.now() });
+    hold(name);
+    later(async () => { await dir?.getFileHandle(name, { create: true }); });
+  },
+  open(name: string) { hold(name); },
+  close(name: string) { letGo(name); },
+  write(name: string, line: string) {
+    const j = journals.get(name) ?? { lines: [], at: 0 };
+    j.lines.push(line);
+    j.at = Date.now();
+    journals.set(name, j);
+    const text = j.lines.join('\n') + '\n';
+    later(async () => {
+      if (!dir) return;
+      const w = await (await dir.getFileHandle(name, { create: true })).createWritable();
+      await w.write(text);
+      await w.close();
+    });
+  },
+  names: () => [...journals.keys()],
+  inUse: (name: string) => mine.has(name) || othersHeld.has(name),
+  lines: (name: string) => journals.get(name)?.lines ?? [],
+  lastWrite: (name: string) => journals.get(name)?.at ?? 0,
+  remove(name: string) {
+    journals.delete(name);
+    later(async () => { await dir?.removeEntry(name).catch(() => undefined); });
+  },
+};
+
+// ─── The engine ──────────────────────────────────────────────────────────
+
+/** A frame to the page, its buffer handed over (no copy on the way). */
+function post(bytes: Uint8Array): void {
+  const copy = bytes.slice();
+  scope.postMessage({ frame: copy.buffer }, [copy.buffer]);
+}
+
+// ─── The lazy parts ──────────────────────────────────────────────────────
+
+/** Each lazy part's file in _framework, by its assembly's name (from the runtime's boot configuration). */
+const parts = new Map<string, string>();
+let framework = '';
+
+/** A lazy part's bytes, fetched now; null when the name is not a lazy part or it could not be fetched (the engine then says what it could not load). */
+function part(name: string): Uint8Array | null {
+  const file = parts.get(name);
+  if (!file) return null;
+  scope.postMessage({ part: name, state: 'loading' });
+  // Tried twice: the runtime remembers an assembly it was refused for as long as it runs, so a blip is worth a second try.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const xhr = new XMLHttpRequest();
+      xhr.open('GET', framework + file, false);
+      xhr.responseType = 'arraybuffer';
+      xhr.send();
+      if (xhr.status !== 200) throw new Error(`HTTP ${xhr.status}`);
+      parts.delete(name);
+      scope.postMessage({ part: name, state: 'loaded' });
+      return new Uint8Array(xhr.response as ArrayBuffer);
+    } catch (e) {
+      console.warn(`[lapin] the part ${name} could not be fetched:`, e);
+    }
+  }
+  scope.postMessage({ part: name, state: 'failed' });
+  return null;
+}
+
+/** Where the start has got to, for the page to show (and for a start that hangs, to tell where). */
+const step = (s: string) => scope.postMessage({ step: s });
+
+async function start(base: string): Promise<void> {
+  step('storage');
+  await loadJournals();
+  step('runtime');
+  // The runtime's own main thread, run in this worker (.NET calls it a sidecar): said before dotnet.js loads, else it
+  // takes a worker with a message handler for one of its helper threads and waits for orders that never come.
+  (globalThis as unknown as { dotnetSidecar: boolean }).dotnetSidecar = true;
+  const { dotnet } = await import(/* @vite-ignore */ `${base}_framework/dotnet.js`);
+  const runtime = await dotnet.create();
+  step('engine');
+  framework = `${base}_framework/`;
+  for (const a of (runtime.getConfig().resources?.lazyAssembly ?? []) as { name: string; virtualPath: string }[]) parts.set(a.virtualPath.replace(/\.(wasm|dll)$/, ''), a.name);
+  runtime.setModuleImports('lapin-host', { frame: post, part });
+  runtime.setModuleImports('lapin-journal', journalModule);
+  await runtime.runMain(runtime.getConfig().mainAssemblyName, []);
+  const exports = await runtime.getAssemblyExports(runtime.getConfig().mainAssemblyName);
+  engine = exports.Lapin.Browser.Engine as Exports;
+  engine.Start();
+}
+
+scope.onmessage = async (ev: MessageEvent<{ start?: string; call?: string }>) => {
+  if (ev.data.start) {
+    try {
+      await start(ev.data.start);
+      scope.postMessage({ ready: true });
+    } catch (e) {
+      scope.postMessage({ failed: e instanceof Error ? e.message : String(e) });
+    }
+    return;
+  }
+  if (ev.data.call && engine) enqueue(ev.data.call);
+};
+
+/** A call that may wait for the network: the history's and the remote's (client.ts writes `{"id":…,"method":…` first). */
+const awaitsNetwork = (text: string) => /^\{(?:"id":[^,]*,)?"method":"(?:remote|history)\./.test(text);
+
+let calls: Promise<void> = Promise.resolve();
+let waiting = 0;
+
+/** A call answered after those before it: at once while none waits, else in the queue behind the one awaited. */
+function enqueue(text: string): void {
+  const e = engine;
+  if (!e) return;
+  if (waiting === 0 && !awaitsNetwork(text)) { post(e.Call(text)); return; }
+  waiting++;
+  calls = calls.then(async () => {
+    try {
+      if (awaitsNetwork(text)) await e.CallAsync(text);
+      else post(e.Call(text));
+    } catch (err) {
+      console.error('[lapin] call failed:', err);
+    } finally { waiting--; }
+  });
+}

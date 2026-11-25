@@ -1,0 +1,19 @@
+/** Which of a view's fields its kind shows (docs/plan-studio-thick.md): a reference plane's place and turn, an elevation's sketch plane. */
+
+/** A reference plane's own fields: its origin and its three angles, and how large the 3D view draws it. */
+const PLANE_KEYS = ['x', 'y', 'z', 'bearing', 'tilt', 'spin', 'width', 'height'];
+
+/** Whether a view of this kind shows the field: a reference plane's place only on a plane, the sketch plane depth only on an elevation. */
+export function viewShowsField(kind: unknown, key: string): boolean {
+  if (PLANE_KEYS.includes(key)) return kind === 'plane';
+  if (key === 'planeDepth') return kind === 'elevation';
+  // A view's depth (decision 721): how far a section, an elevation or a plane sees; a plan has its view range instead.
+  if (key === 'depth') return kind === 'section' || kind === 'elevation' || kind === 'plane';
+  // The layer a section's marker is on (decision 223): only a section has a marker.
+  if (key === 'markerLayer') return kind === 'section';
+  // A view's mark (report #167) is under Marker symbol, with what it writes without one as its placeholder.
+  if (key === 'detailNumber') return false;
+  // A marker's size and text height (decision 455): sections and elevations have markers.
+  if (key === 'markSize' || key === 'markTextSize') return kind === 'section' || kind === 'elevation';
+  return true;
+}

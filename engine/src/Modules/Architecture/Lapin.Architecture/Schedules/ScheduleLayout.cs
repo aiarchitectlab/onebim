@@ -1,0 +1,480 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing.Views;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Architecture.Schedules;
+
+/// <summary>A schedule's own rows, typed cells, row order and card order (what its table settings say).</summary>
+public sealed record ScheduleTable(IReadOnlyList<string>? Rows, IReadOnlyList<(string Id, string Label)> CustomRows,
+    IReadOnlyDictionary<string, Dictionary<string, string>> Cells, string? Sort, bool? Lintel = null)
+{
+    public static ScheduleTable Of(Entity schedule)
+    {
+        var rows = schedule.Attrs["rows"] is JsonArray r ? r.Select(x => (string?)x).OfType<string>().ToList() : null;
+        var custom = schedule.Attrs["customRows"] is JsonArray c
+            ? c.OfType<JsonObject>().Where(o => (string?)o["id"] != null).Select(o => ((string)o["id"]!, (string?)o["label"] ?? "")).ToList() : [];
+        var cells = new Dictionary<string, Dictionary<string, string>>();
+        if (schedule.Attrs["cells"] is JsonObject co)
+            foreach (var (k, v) in co)
+                if (v is JsonObject row) cells[k] = row.Where(x => x.Value is JsonValue).ToDictionary(x => x.Key, x => (string?)x.Value ?? "");
+        return new ScheduleTable(rows, custom, cells, schedule.Str("sort"), schedule.Str("kind") == "lintel");
+    }
+}
+
+/// <summary>A row of the table: its id and label, its value per entry, whether the model gives it, bold; a parameter's row names the parameter (typed into the type).</summary>
+public sealed record ScheduleRow(string Id, string Label, Func<ScheduleEntry, string> Value, bool FromModel, bool Strong = false, string? Param = null);
+
+/// <summary>A band of cards (paper mm, y down from its top): its size and pens.</summary>
+public sealed record ScheduleBand(double W, double H, List<Pen> Pens);
+
+/// <summary>
+/// A schedule as cards (the old Lapin's schedule layout, in paper mm): a label
+/// column, then a card per entry with its mark, its drawing (the type in
+/// elevation, dimensioned; a lintel in elevation and section) and its values,
+/// row by row; cards wrap into bands no wider than asked, and bands into pages.
+/// </summary>
+public static class ScheduleLayout
+{
+    const double Gap = 6, DimBelow = 7, DimLeft = 6, LabelW = 34, Row = 6, MarkRow = 10, Text = 2.5;
+    const double FramePen = 0.35, GridPen = 0.18;
+    static readonly Dictionary<string, double> DrawingPen = new() { ["cut"] = 0.35, ["outline"] = 0.25, ["thin"] = 0.13 };
+    public const double TitleH = 10, BandGap = 8, TableGap = 10;
+
+    public static readonly string[] JoineryRows = ["name", "size", "bay", "operation", "hanging", "sill", "levels", "total", "uValue", "fire", "lintel"];
+    public static readonly string[] LintelRows = ["lintelKind", "product", "section", "length", "levels", "total", "openings", "concrete", "steel"];
+
+    internal static string Mm(double m) => Lapin.Model.Numbers.Mm(m);
+
+    static readonly Dictionary<string, string> OperationLabel = new()
+    {
+        ["fixed"] = "fixed",
+        // A window's hand is the architects' too: seen from the side its sashes open to, inside (Lapin's windows open inwards).
+        // "side-left" (IFC's left: the hinges on the left seen from outside) has them on the right seen from inside.
+        ["side-left"] = "side hung right", ["side-right"] = "side hung left", ["tilt-turn-left"] = "tilt & turn right", ["tilt-turn-right"] = "tilt & turn left",
+        ["bottom-hung"] = "bottom hung", ["top-hung"] = "top hung", ["pivot-horizontal"] = "horizontal pivot", ["pivot-vertical"] = "vertical pivot",
+        ["sliding-left"] = "sliding left", ["sliding-right"] = "sliding right", ["sliding-vertical"] = "vertical sliding",
+        // A hinged door's hand is the architects' (report #91), not IFC's: see DoorHand. "swing-left" (IFC's left: the hinges on
+        // the left of someone pushing it open) opens to the right of the line from its handle to its hinges, a right swing.
+        ["swing-left"] = "swing right", ["swing-right"] = "swing left", ["double-acting-left"] = "double acting right", ["double-acting-right"] = "double acting left",
+        ["door-sliding-left"] = "sliding left", ["door-sliding-right"] = "sliding right", ["folding-left"] = "folding right", ["folding-right"] = "folding left",
+        // Lift-and-slide and tilt-and-slide leaves (forum topic 34), named by the way they run.
+        ["lift-slide-left"] = "lift & slide left", ["lift-slide-right"] = "lift & slide right", ["tilt-slide-left"] = "tilt & slide left", ["tilt-slide-right"] = "tilt & slide right",
+    };
+
+    /// <summary>
+    /// A hinged door leaf's hand as schedules name it (report #91, the architects' rule): looking from its handle towards its
+    /// hinges, a leaf that opens to the left of that line is a left swing, to the right a right swing. It is the opposite of
+    /// IFC's naming (<c>SINGLE_SWING_LEFT</c>: the hinges on the left looking the way the leaf opens, docs/spec-ifc.md), which
+    /// the configurator's operations follow and the IFC export keeps: facing the way the leaf opens (+Y, Z up) with the hinges
+    /// on the left (−X), the line from the handle to the hinges runs −X, whose left is −Y, behind; the leaf opens to its right.
+    /// Null for anything not hinged on a vertical side of a door (sliding, fixed, windows).
+    /// </summary>
+    public static string? DoorHand(string operation) => operation switch
+    {
+        "swing-left" or "double-acting-left" or "folding-left" => "right",
+        "swing-right" or "double-acting-right" or "folding-right" => "left",
+        _ => null,
+    };
+
+    /// <summary>
+    /// The Opening row: each operation once, in the schedule's words; a pair of leaves swinging apart from the middle
+    /// (one of each IFC hand) is a double door.
+    /// </summary>
+    public static string OperationText(JoinerySpec spec)
+    {
+        // A bay, bow or box window (report #60): its faces' panels, left to right.
+        if (BayWindows.Projecting(spec)) spec = BayWindows.Developed(spec);
+        var ops = Joinery.Normalised(spec).Select(p => p.Operation).ToList();
+        var leaves = ops.Where(o => DoorHand(o) != null).ToList();
+        if (spec.IsDoor && leaves.Count == 2 && DoorHand(leaves[0]) != DoorHand(leaves[1]) && leaves.All(o => o.StartsWith("swing", StringComparison.Ordinal) || o.StartsWith("double-acting", StringComparison.Ordinal)))
+        {
+            var pair = leaves.All(o => o.StartsWith("double-acting", StringComparison.Ordinal)) ? "double acting, double" : "double swing";
+            return string.Join(" + ", ops.Where(o => !leaves.Contains(o)).Distinct().Select(o => OperationLabel.GetValueOrDefault(o, o)).Prepend(pair));
+        }
+        return string.Join(" + ", ops.Distinct().Select(o => GarageDoors.Is(o) ? GarageDoors.Label(o) : OperationLabel.GetValueOrDefault(o, o)));
+    }
+
+    /// <summary>
+    /// The Hanging row (topic #28): what holds a frameless glass door's leaves, in the schedule's words ("floor spring 100 kg
+    /// (EN 1–4), double action, pivot 55 mm, heel strap, hold-open 90°"); null for a framed type or a frameless window.
+    /// </summary>
+    public static string? HangingText(JoinerySpec spec)
+    {
+        // A garage door (topic #48): its panels, finish, track or box, wicket and the room it needs.
+        if (GarageDoors.Of(spec)) return GarageDoors.Describe(spec);
+        if (spec.Frameless is not { } f || !spec.IsDoor) return null;
+        if (f.Fixing == "hinges") return "glass hinges";
+        if (f.Fixing != "floor-spring") return "pivots and patch fittings";
+        var leaves = Joinery.Normalised(spec).Where(p => Frameless.OnSpring(spec, p)).ToList();
+        var parts = new List<string> { Frameless.SpringOf(spec) is { } m ? $"floor spring {m.MaxMass.ToString(CultureInfo.InvariantCulture)} kg ({m.Strength})" : "floor spring" };
+        if (leaves.Count > 0)
+        {
+            var dbl = leaves.Count(p => p.Operation.StartsWith("double-acting", StringComparison.Ordinal));
+            parts.Add(dbl == leaves.Count ? "double action" : dbl == 0 ? "single action" : "single and double action");
+        }
+        parts.Add($"pivot {Mm(f.Pivot)} mm");
+        parts.Add(f.Bottom == "strap" ? "heel strap" : "bottom patch");
+        if (f.HoldOpen > 0) parts.Add($"hold-open {Math.Round(f.HoldOpen).ToString(CultureInfo.InvariantCulture)}°");
+        return string.Join(", ", parts);
+    }
+
+    /// <summary>The rows the data takes (lintel rows when every entry is a lintel), in the table's order, typed text over the model's.</summary>
+    public static List<ScheduleRow> Rows(ScheduleData data, ScheduleTable table)
+    {
+        var lintel = table.Lintel ?? (data.Entries.Count > 0 && data.Entries.All(e => e.Kind == "lintel"));
+        var builtIn = lintel ? LintelRows : JoineryRows;
+        var paramRows = lintel ? [] : ParamRows(data);
+        var order = table.Rows ?? [.. builtIn, .. paramRows, .. table.CustomRows.Select(c => "custom:" + c.Id)];
+        var rows = new List<ScheduleRow>();
+        foreach (var id in order)
+        {
+            if (id.StartsWith(ParamPrefix, StringComparison.Ordinal))
+            {
+                var name = id[ParamPrefix.Length..];
+                if (!lintel) rows.Add(new ScheduleRow(id, name, e => e.Params?.GetValueOrDefault(name) is { Length: > 0 } v ? v : "—", true, Param: name));
+                continue;
+            }
+            if (id.StartsWith("custom:", StringComparison.Ordinal))
+            {
+                var c = table.CustomRows.FirstOrDefault(x => x.Id == id[7..]);
+                if (c.Id != null) rows.Add(new ScheduleRow(id, c.Label, e => table.Cells.GetValueOrDefault(e.Key)?.GetValueOrDefault(id) ?? "", false));
+                continue;
+            }
+            if (!builtIn.Contains(id)) continue;
+            if (id == "levels")
+            {
+                foreach (var level in data.Levels) rows.Add(new ScheduleRow("level:" + level, level, e => e.Counts.TryGetValue(level, out var n) ? n.ToString(CultureInfo.InvariantCulture) : "", true));
+                continue;
+            }
+            ScheduleRow? row = id switch
+            {
+                "name" => new(id, "Name", e => e.Name, true),
+                "size" => new(id, "Size W × H (mm)", e => $"{Mm(e.Width)} × {Mm(e.Height)}", true),
+                // A bay, bow or box window's projection and faces (report #60): one row per type, as it is ordered.
+                "bay" => data.Entries.Any(e => e.Spec != null && BayWindows.Projecting(e.Spec))
+                    ? new(id, "Projecting", e => e.Spec != null && BayWindows.Projecting(e.Spec) ? BayWindows.Describe(e.Spec) : "—", true) : null,
+                "operation" => new(id, "Opening", e => e.Spec == null ? "—" : OperationText(e.Spec), true),
+                "hanging" => data.Entries.Any(e => e.Spec != null && HangingText(e.Spec) != null)
+                    ? new(id, "Hanging", e => e.Spec != null && HangingText(e.Spec) is { } h ? h : "—", true) : null,
+                "sill" => data.Entries.Any(e => e.Kind == "window") ? new(id, "Sill height (mm)", e => e.Kind == "window" && e.Spec != null ? Mm(e.Spec.SillHeight) : "—", true) : null,
+                "total" => new(id, "Total", e => e.Total.ToString(CultureInfo.InvariantCulture), true, true),
+                "uValue" => new(id, "U (W/m²K)", e => UValue(e) is { Length: > 0 } u ? u : "—", true),
+                "fire" => new(id, "Fire rating", e => FireRating(e) is { Length: > 0 } f ? f : "—", true),
+                "lintel" => data.LintelMarks is { Count: > 0 } lm
+                    ? new(id, "Lintel", e => e.Occurrences.Select(o => lm.GetValueOrDefault(o.Id)).OfType<string>().Distinct().Order().ToList() is { Count: > 0 } l ? string.Join(", ", l) : "—", true) : null,
+                "lintelKind" => new(id, "Precast or cast", e => e.Lintel!.Precast ? "Precast" : "Cast in place", true),
+                "product" => new(id, "Product", e => e.Lintel!.Product ?? "—", true),
+                "section" => new(id, "Section W × H (mm)", e => $"{Mm(e.Lintel!.Width)} × {Mm(e.Lintel.Height)}", true),
+                "length" => new(id, "Length (mm; ! no stock length)", e => Mm(e.Lintel!.Length) + (e.Lintel.Fits ? "" : " !"), true),
+                "openings" => new(id, "Over", e => e.Lintel!.Openings.Count > 0 ? string.Join(", ", e.Lintel.Openings) : "—", true),
+                "concrete" => new(id, "Concrete (m³)", e => e.Lintel!.Precast ? "—" : (e.Lintel.Volume * e.Total).ToString("0.000", CultureInfo.InvariantCulture), true),
+                "steel" => new(id, "Steel (kg)", e => e.Lintel!.SteelKg > 0 ? (e.Lintel.SteelKg * e.Total).ToString("0.0", CultureInfo.InvariantCulture) : "—", true),
+                _ => null,
+            };
+            if (row != null) rows.Add(row);
+        }
+        // Typed text wins over the model's value; a column of the schedule's own has only what is typed.
+        return rows.Select(r => r.FromModel ? r with { Value = e => table.Cells.GetValueOrDefault(e.Key)?.GetValueOrDefault(r.Id) ?? (e.Kind == ScheduleEntry.Manual ? "" : r.Value(e)) } : r).ToList();
+    }
+
+    /// <summary>A parameter's row: <c>param:</c> and its name.</summary>
+    public const string ParamPrefix = "param:";
+
+    /// <summary>The rows of the parameters the listed types and their elements carry (decision 251), in the order first met; a fire rating goes in its own row.</summary>
+    public static List<string> ParamRows(ScheduleData data) =>
+        data.Entries.SelectMany(e => e.Params?.Keys ?? []).Where(n => !Schedules.IsFireRating(n) && TagText.Squash(n) != "uvalue").Distinct(StringComparer.OrdinalIgnoreCase).Select(n => ParamPrefix + n).ToList();
+
+    /// <summary>A type's U-value: the data's free text (report #76), else the number the spec keeps.</summary>
+    public static string? UValue(ScheduleEntry e) =>
+        e.Params?.Where(p => TagText.Squash(p.Key) == "uvalue" && p.Value.Length > 0).Select(p => p.Value).FirstOrDefault()
+        ?? e.Spec?.ThermalTransmittance?.ToString(CultureInfo.InvariantCulture);
+
+    /// <summary>A type's fire rating: its parameter (or its elements') named so, Pset_DoorCommon's or Pset_WindowCommon's FireRating among them.</summary>
+    public static string? FireRating(ScheduleEntry e) => e.Params?.Where(p => Schedules.IsFireRating(p.Key) && p.Value.Length > 0).Select(p => p.Value).FirstOrDefault();
+
+    /// <summary>The cards' order: the data's (absent), by mark, name, width, height, or most first.</summary>
+    public static List<ScheduleEntry> Sort(IEnumerable<ScheduleEntry> entries, string? sort) => sort switch
+    {
+        "mark" => entries.OrderBy(e => e.Mark, Comparer<string>.Create((a, b) => string.Compare(a, b, CultureInfo.InvariantCulture, CompareOptions.NumericOrdering))).ToList(),
+        "name" => entries.OrderBy(e => e.Name, StringComparer.CurrentCulture).ToList(),
+        "width" => entries.OrderBy(e => e.Width).ToList(),
+        "height" => entries.OrderBy(e => e.Height).ToList(),
+        "total" => entries.OrderByDescending(e => e.Total).ToList(),
+        _ => entries.ToList(),
+    };
+
+    sealed class Sink
+    {
+        public readonly Dictionary<string, Pen> Pens = [];
+        public void Line(Vec2 a, Vec2 b, double width, double[]? dash = null, string layer = "SCHEDULE")
+        {
+            var key = $"{layer}:{width}:{(dash == null ? "" : string.Join(" ", dash))}";
+            if (!Pens.TryGetValue(key, out var p)) Pens[key] = p = new Pen(layer, "#000000", width, null, dash);
+            p.Segments.Add((a, b));
+        }
+        public void Text(Vec2 at, string text, double size, bool bold = false, string anchor = "start", double angle = 0, string baseline = "bottom")
+        {
+            if (!Pens.TryGetValue("TEXT", out var p)) Pens["TEXT"] = p = new Pen("TEXT", "#000000", 0, null, null);
+            p.Texts.Add(new PenText(at, text, size, angle, anchor, baseline, bold));
+        }
+    }
+
+    /// <summary>A card's drawing: its size (paper mm) and how to draw it with its top-left at a point.</summary>
+    static (double W, double H, Action<Sink, Vec2> Draw) Block(ScheduleEntry e, double k, IReadOnlyList<string> drawings, string convention = "handle", bool hardware = false)
+    {
+        void Dim(Sink s, Vec2 a, Vec2 b, string text, bool vertical)
+        {
+            s.Line(a, b, GridPen, layer: "SCHEDULE-SYMBOLS");
+            foreach (var p in new[] { a, b }) s.Line(p + new Vec2(-0.8, 0.8), p + new Vec2(0.8, -0.8), DrawingPen["outline"], layer: "SCHEDULE-SYMBOLS");
+            var mid = (a + b) * 0.5;
+            if (vertical) s.Text(mid + new Vec2(-1, 0), text, 2, anchor: "middle", angle: 90);
+            else s.Text(mid + new Vec2(0, -0.8), text, 2, anchor: "middle");
+        }
+        if (e.Kind == ScheduleEntry.Manual) return (0, 0, (_, _) => { });
+        if (e.Kind == "lintel" && e.Lintel is { } l)
+        {
+            var (lw, lh, sw) = (l.Length * k, l.Height * k, l.Width * k);
+            var w = 6 + lw + 6 + sw;
+            var h = lh + 7;
+            return (w, h, (s, at) =>
+            {
+                void Box(double x, double y, double bw, double bh)
+                {
+                    var (a, b, c, d) = (at + new Vec2(x, y), at + new Vec2(x + bw, y), at + new Vec2(x + bw, y + bh), at + new Vec2(x, y + bh));
+                    s.Line(a, b, DrawingPen["cut"], layer: "SCHEDULE-SYMBOLS"); s.Line(b, c, DrawingPen["cut"], layer: "SCHEDULE-SYMBOLS");
+                    s.Line(c, d, DrawingPen["cut"], layer: "SCHEDULE-SYMBOLS"); s.Line(d, a, DrawingPen["cut"], layer: "SCHEDULE-SYMBOLS");
+                }
+                Box(6, 0, lw, lh);
+                Box(6 + lw + 6, 0, sw, lh);
+                Dim(s, at + new Vec2(6, lh + 4.5), at + new Vec2(6 + lw, lh + 4.5), Mm(l.Length), false);
+                Dim(s, at + new Vec2(2, 0), at + new Vec2(2, lh), Mm(l.Height), true);
+                Dim(s, at + new Vec2(12 + lw, lh + 4.5), at + new Vec2(12 + lw + sw, lh + 4.5), Mm(l.Width), false);
+            });
+        }
+        var views = drawings.Where(d => d is "interior" or "exterior" or "plan" or "section").DefaultIfEmpty("interior").ToList();
+        // Each drawing's extent (m): an elevation is the type's width × height; a plan the width by its depth and swing; a section its depth by its height.
+        static List<Stroke> Segs(IEnumerable<JStroke> strokes) => strokes.SelectMany(st => Enumerable.Range(0, st.Pts.Count - (st.Closed ? 0 : 1))
+            .Select(i => new Stroke(st.Pts[i], st.Pts[(i + 1) % st.Pts.Count], st.Weight, st.Dashed))).ToList();
+        // The type's frame is the model's mirror image (X along the wall, +Y to the exterior on its right): its drawings are
+        // turned over to show the door as it stands (report #83), the plan from above, the elevation from the interior, the
+        // side it opens to, where a swing-left door's hinges are on the right.
+        static List<Stroke> AsBuilt(List<Stroke> strokes) => strokes.Select(x => x with { A = new Vec2(-x.A.X, x.A.Y), B = new Vec2(-x.B.X, x.B.Y) }).ToList();
+        var plan = e.Spec != null ? AsBuilt(Segs(JoinerySymbols.Plan(e.Spec))) : [];
+        var section = e.Spec != null ? Segs(JoinerySymbols.Section(e.Spec)) : [];
+        var (sMinX, sMaxX) = section.Count > 0 ? (section.Min(x => Math.Min(x.A.X, x.B.X)), section.Max(x => Math.Max(x.A.X, x.B.X))) : (0, 0);
+        var (pMinX, pMaxX) = plan.Count > 0 ? (plan.Min(x => Math.Min(x.A.X, x.B.X)), plan.Max(x => Math.Max(x.A.X, x.B.X))) : (-e.Width / 2, e.Width / 2);
+        var (pMinY, pMaxY) = plan.Count > 0 ? (plan.Min(x => Math.Min(x.A.Y, x.B.Y)), plan.Max(x => Math.Max(x.A.Y, x.B.Y))) : (0, 0);
+        double WidthOf(string v) => v == "plan" ? (pMaxX - pMinX) * k : v == "section" ? (sMaxX - sMinX) * k : e.Width * k;
+        double HeightOf(string v) => v == "plan" ? (pMaxY - pMinY) * k : e.Height * k;
+        var (ew, eh) = (e.Width * k, Math.Max(e.Height * k, views.Contains("plan") ? HeightOf("plan") : 0));
+        var rowW = views.Sum(WidthOf) + (views.Count - 1) * Gap;
+        return (DimLeft + rowW, eh + DimBelow, (s, at) =>
+        {
+            var x0 = at.X + DimLeft;
+            foreach (var view in views)
+            {
+                var bottom = at.Y + eh;
+                if (view == "plan")
+                {
+                    // The plan, its interior side (and the door's swing) down, lined up with the elevations' bottom.
+                    var left = x0;
+                    Vec2 Pp(Vec2 q) => new(left + (q.X - pMinX) * k, bottom - (q.Y - pMinY) * k);
+                    foreach (var st in plan) s.Line(Pp(st.A), Pp(st.B), DrawingPen[st.Weight], st.Dashed ? [1.2, 0.8] : null, "SCHEDULE-SYMBOLS");
+                    x0 += WidthOf(view) + Gap;
+                    continue;
+                }
+                if (view == "section")
+                {
+                    // The vertical section: across the wall left to right (the exterior to the right), its bottom on the line.
+                    var left = x0;
+                    Vec2 Ps(Vec2 q) => new(left + (q.X - sMinX) * k, bottom - q.Y * k);
+                    foreach (var st in section) s.Line(Ps(st.A), Ps(st.B), DrawingPen[st.Weight], st.Dashed ? [1.2, 0.8] : null, "SCHEDULE-SYMBOLS");
+                    x0 += WidthOf(view) + Gap;
+                    continue;
+                }
+                var xv = x0;
+                Vec2 P(Vec2 q) => new(xv + (q.X + e.Width / 2) * k, bottom - q.Y * k);
+                if (e.Spec != null)
+                    foreach (var st in AsBuilt(Segs(JoinerySymbols.Elevation(e.Spec, view == "exterior", convention, hardware))))
+                        s.Line(P(st.A), P(st.B), DrawingPen[st.Weight], st.Dashed ? [1.2, 0.8] : null, "SCHEDULE-SYMBOLS");
+                else
+                {
+                    var (a, b) = (new Vec2(-e.Width / 2, 0), new Vec2(e.Width / 2, e.Height));
+                    foreach (var (p, q) in new[] { (a, new Vec2(b.X, a.Y)), (new Vec2(b.X, a.Y), b), (b, new Vec2(a.X, b.Y)), (new Vec2(a.X, b.Y), a) })
+                        s.Line(P(p), P(q), DrawingPen["outline"], layer: "SCHEDULE-SYMBOLS");
+                }
+                x0 += WidthOf(view) + Gap;
+            }
+            var x = at.X + DimLeft;
+            Dim(s, new Vec2(x, at.Y + eh + 4.5), new Vec2(x + ew, at.Y + eh + 4.5), Mm(e.Width), false);
+            Dim(s, new Vec2(x - 4, at.Y + eh - e.Height * k), new Vec2(x - 4, at.Y + eh), Mm(e.Height), true);
+        });
+    }
+
+    /// <summary>
+    /// What a joinery schedule says under its cards (report #83): how it names the hand (a door's by the architects' rule,
+    /// report #91; a window's seen from inside, the side it opens to),
+    /// where its elevations are seen from, and what a mark's -M is.
+    /// </summary>
+    public static List<string> HandNote(ScheduleData data, IReadOnlyList<string> drawings)
+    {
+        if (!data.Entries.Any(e => e.Spec != null)) return [];
+        var lines = new List<string>();
+        if (data.Entries.Any(e => e.Spec?.IsDoor == true)) lines.Add("Swing left or right: the leaf opens to the left or right of the line from its handle to its hinges.");
+        if (data.Entries.Any(e => e.Spec is { IsDoor: false })) lines.Add("Windows' left and right: the hinges as seen from inside, the side the sashes open to.");
+        if (drawings.Contains("interior") || !drawings.Any(d => d is "interior" or "exterior")) lines.Add("Elevations seen from the interior, the side it opens to" + (drawings.Contains("exterior") ? "; exterior ones from outside." : "."));
+        else if (drawings.Contains("exterior")) lines.Add("Elevations seen from outside, the side it is pushed from.");
+        if (data.Entries.Any(e => e.Mirrored)) lines.Add($"{Schedules.MirroredMark}: the type's mirror image, flipped to the other hand.");
+        return lines;
+    }
+
+    const double NoteRow = 4.2;
+
+    /// <summary>A table's cards in bands no wider than <paramref name="maxWidth"/> (paper mm), each band's pens from its own top; <paramref name="note"/> under the last.</summary>
+    public static List<ScheduleBand> Bands(ScheduleData data, ScheduleTable table, double scale = 50, double maxWidth = 380, Func<ScheduleEntry, IReadOnlyList<string>>? drawingsOf = null, string convention = "handle", bool hardware = false, IReadOnlyList<string>? note = null)
+    {
+        var k = 1000 / scale;
+        var rows = Rows(data, table);
+        var entries = Sort(data.Entries, table.Sort);
+        var blocks = entries.Select(e => Block(e, k, drawingsOf?.Invoke(e) ?? ["interior"], convention, hardware)).ToList();
+        double CardW(int i) => Math.Max(30, blocks[i].W + 10);
+        var drawingH = Math.Max(30, blocks.Count == 0 ? 0 : blocks.Max(b => b.H) + 7);
+        var bandH = MarkRow + drawingH + rows.Count * Row;
+
+        var groups = new List<List<int>> { new() };
+        var used = LabelW;
+        for (var i = 0; i < entries.Count; i++)
+        {
+            if (groups[^1].Count > 0 && used + CardW(i) > maxWidth) { groups.Add([]); used = LabelW; }
+            groups[^1].Add(i);
+            used += CardW(i);
+        }
+        var bands = new List<ScheduleBand>();
+        foreach (var g in groups)
+        {
+            var s = new Sink();
+            var w = LabelW + g.Sum(CardW);
+            const double top = 0;
+            foreach (var (a, b) in new[] { (new Vec2(0, top), new Vec2(w, top)), (new Vec2(w, top), new Vec2(w, top + bandH)), (new Vec2(w, top + bandH), new Vec2(0, top + bandH)), (new Vec2(0, top + bandH), new Vec2(0, top)) })
+                s.Line(a, b, FramePen, layer: "SCHEDULE-SYMBOLS");
+            s.Line(new Vec2(LabelW, top), new Vec2(LabelW, top + bandH), FramePen);
+            s.Line(new Vec2(0, top + MarkRow), new Vec2(w, top + MarkRow), GridPen);
+            s.Text(new Vec2(2, top + 6.5), "Mark", Text, bold: true);
+            var yRows = top + MarkRow + drawingH;
+            for (var r = 0; r < rows.Count; r++)
+            {
+                var y = yRows + r * Row;
+                s.Line(new Vec2(0, y), new Vec2(w, y), r == 0 ? FramePen : GridPen);
+                s.Text(new Vec2(2, y + 4.2), rows[r].Label, Text, bold: rows[r].Strong);
+            }
+            var x = LabelW;
+            foreach (var i in g)
+            {
+                var cw = CardW(i);
+                var cx = x + cw / 2;
+                s.Line(new Vec2(x + cw, top), new Vec2(x + cw, top + bandH), GridPen);
+                s.Text(new Vec2(cx, top + 7), entries[i].Mark, 4, bold: true, anchor: "middle");
+                var (bw, bh, draw) = blocks[i];
+                draw(s, new Vec2(cx - bw / 2, top + MarkRow + drawingH - bh));
+                for (var r = 0; r < rows.Count; r++)
+                {
+                    var text = rows[r].Value(entries[i]);
+                    var size = text.Length > cw / 1.6 ? Math.Max(1.6, (cw - 2) / text.Length * 1.7) : Text;
+                    s.Text(new Vec2(cx, yRows + r * Row + 4.2), text, size, rows[r].Strong, "middle");
+                }
+                x += cw;
+            }
+            var h = bandH;
+            if (note is { Count: > 0 } && g == groups[^1])
+                foreach (var line in note) { h += NoteRow; s.Text(new Vec2(0, h - 0.8), line, 2); }
+            bands.Add(new ScheduleBand(w, h, s.Pens.Values.ToList()));
+        }
+        return bands;
+    }
+
+    /// <summary>A plain table (a module's schedule): a header row and the rows, columns as wide as their longest text, within the width.</summary>
+    public static List<ScheduleBand> Table(ScheduleGrid grid, double maxWidth = 380)
+    {
+        const double header = 8, row = 6, pad = 2;
+        var widths = grid.Columns.Select((c, i) => Math.Max(c.Length, grid.Rows.Count == 0 ? 0 : grid.Rows.Max(r => i < r.Count ? r[i].Length : 0)) * 1.9 + 2 * pad).Select(w => Math.Clamp(w, 16, 90)).ToList();
+        var total = widths.Sum();
+        if (total > maxWidth) { var f = maxWidth / total; widths = widths.Select(w => w * f).ToList(); total = maxWidth; }
+        var s = new Sink();
+        var h = header + grid.Rows.Count * row;
+        s.Line(new Vec2(0, 0), new Vec2(total, 0), FramePen); s.Line(new Vec2(total, 0), new Vec2(total, h), FramePen);
+        s.Line(new Vec2(total, h), new Vec2(0, h), FramePen); s.Line(new Vec2(0, h), new Vec2(0, 0), FramePen);
+        s.Line(new Vec2(0, header), new Vec2(total, header), FramePen);
+        var x = 0.0;
+        for (var i = 0; i < widths.Count; i++)
+        {
+            if (i > 0) s.Line(new Vec2(x, 0), new Vec2(x, h), GridPen);
+            s.Text(new Vec2(x + pad, header - 2.5), grid.Columns[i], Text, bold: true);
+            x += widths[i];
+        }
+        for (var r = 0; r < grid.Rows.Count; r++)
+        {
+            var y = header + r * row;
+            if (r > 0) s.Line(new Vec2(0, y), new Vec2(total, y), GridPen);
+            x = 0;
+            for (var i = 0; i < widths.Count; i++)
+            {
+                var text = i < grid.Rows[r].Count ? grid.Rows[r][i] : "";
+                var size = text.Length * 1.9 > widths[i] - 2 * pad ? Math.Max(1.6, (widths[i] - 2 * pad) / Math.Max(text.Length, 1) / 1.9 * Text) : Text;
+                var numeric = double.TryParse(text.Replace(',', '.'), System.Globalization.NumberStyles.Float, CultureInfo.InvariantCulture, out _);
+                s.Text(new Vec2(numeric ? x + widths[i] - pad : x + pad, y + 4.2), text, size, r == grid.Rows.Count - 1 && grid.Rows.Count > 1 && text.Length > 0 && grid.Rows[r][0].StartsWith("Total", StringComparison.Ordinal), numeric ? "end" : "start");
+                x += widths[i];
+            }
+        }
+        return [new ScheduleBand(total, h, s.Pens.Values.ToList())];
+    }
+
+    /// <summary>
+    /// Tables (each a title and its bands) as pages no taller than <paramref name="maxHeight"/>:
+    /// a table's title over its first band, "(continued)" atop a new page; bands 8 mm
+    /// apart, tables 10. Without a height, one page.
+    /// </summary>
+    public static List<(double W, double H, List<Pen> Pens)> Pages(IReadOnlyList<(string Title, List<ScheduleBand> Bands)> tables, double? maxHeight)
+    {
+        var pages = new List<(double W, double H, List<Pen> Pens)>();
+        var cur = new List<Pen>();
+        double y = 0, w = 0;
+        var text = new Pen("TEXT", "#000000", 0, null, null);
+        void Flush()
+        {
+            if (text.Texts.Count > 0) cur.Add(text);
+            pages.Add((w, Math.Max(0, y - TableGap), cur));
+            cur = []; text = new Pen("TEXT", "#000000", 0, null, null); y = 0; w = 0;
+        }
+        foreach (var (title, bands) in tables)
+        {
+            for (var i = 0; i < bands.Count; i++)
+            {
+                var band = bands[i];
+                var needs = band.H + (i == 0 ? TitleH : 0);
+                if (cur.Count > 0 && maxHeight is { } mh && y + needs > mh) Flush();
+                if (i == 0 || cur.Count == 0)
+                {
+                    text.Texts.Add(new PenText(new Vec2(0, y + 6), i == 0 ? title : $"{title} (continued)", 5, Anchor: "start", Bold: true));
+                    y += TitleH;
+                }
+                var dy = y;
+                foreach (var p in band.Pens)
+                {
+                    var o = new Pen(p.Layer, p.Stroke, p.Width, p.Fill, p.Dash);
+                    o.Segments.AddRange(p.Segments.Select(sg => (sg.A + new Vec2(0, dy), sg.B + new Vec2(0, dy))));
+                    o.Texts.AddRange(p.Texts.Select(t => t with { At = t.At + new Vec2(0, dy) }));
+                    o.Loops.AddRange(p.Loops.Select(l => (IReadOnlyList<Vec2>)l.Select(q => q + new Vec2(0, dy)).ToList()));
+                    cur.Add(o);
+                }
+                w = Math.Max(w, band.W);
+                y += band.H + BandGap;
+            }
+            y += TableGap - BandGap;
+        }
+        if (cur.Count > 0 || text.Texts.Count > 0 || pages.Count == 0) Flush();
+        return pages;
+    }
+}

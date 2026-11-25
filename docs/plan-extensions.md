@@ -1,0 +1,266 @@
+# Lapin Extensions: plan
+
+Hotărârea utilizatorului (12.11.2026): un magazin de extensii, **Lapin Extensions**, cu adresa viitoare store.lapinbim.com. Etapa 0 e făcută (decizia 499); etapa 1 e construită și **publicată pe 12.11.2026** (decizia 504, §10): store.lapinbim.com live, containerul `lapin-store`, DiscourseConnect pornit pe forum, catalogul **semnat** cu cheia magazinului (`2daeb4d5dc6eae92`, în `STORE_KEYS` din același zi); pașii și întreținerea în `deploy/store/README.md`; etapa 2 e hotărâtă în §11, iar 2a (extensiile plătite) e construită în §12 (decizia 660, nepublicată). Extensiile vin în patru feluri, în ordinea asta:
+
+1. **Pachete de conținut** (fără cod): mobilier (`.lapinlib`), șabloane de proiect (`.lapin`), profile (`.lapinprofiles`), hașuri (`.pat`), cartușe (`.json` al cartușelor), liste de prețuri (`.lapinprices`), tipuri de pereți, plăci, uși, ferestre, stâlpi, grinzi, scări (`.lapintypes`, felul `types`, §9.1). **Primele.**
+2. **Scripturi și unelte Python**, după etapa 4 a planului Python (`docs/plan-python-scripting.md`, decizia 489).
+3. **Plug-in-uri de interfață în JS**, mai târziu, pe contractul `ui/src/platform/module.ts` și punctele de înlocuire (`docs/overrides.md`).
+4. **Module C#** pentru parteneri, semnate (contractul motorului, `module.json`).
+
+## 1. Hotărârile (12.11.2026)
+
+- **Etapa 0, acum, fără server nou:** un depozit GitHub public `lapin-extensions` cu un index JSON construit din câte un manifest pe extensie (`extensions/<id>/manifest.json`); autorii își adaugă extensia prin pull request; fișierul pachetului stă în release-ul GitHub al autorului, cu SHA-256-ul lui în manifest.
+- **În Lapin:** Fișier → Extensii…, cu **Răsfoiește** (căutare, categorii, detalii, licență, autor, versiuni compatibile) și **Instalate**; Instalează (descarcă, verifică SHA-256, pune în biblioteca potrivită), Actualizează, Dezinstalează. Merge pe desktop și în browser (în browser doar pachete de conținut).
+- **Manifestul:** id, nume, versiune (semver), autor, licență (**SPDX, obligatorie, arătată utilizatorului**; orice licență e acceptată, cele permisive sunt marcate așa), intervalul de versiuni Lapin, fel, permisiuni cerute, conținut, sha256, pagină, subiect pe forum.
+- **Verificarea:** automată pentru conținut, în CI-ul depozitului de catalog (un GitHub Action care validează PR-urile, Node pur, fără dependențe): schema manifestului și schema datelor pachetului. **Codul** (scripturi, mai târziu JS și C#) e citit de Claude, cu aprobarea finală a utilizatorului.
+- **0 % comision** în prima fază; extensiile plătite mai târziu, printr-un *merchant of record* (etapa 2); acolo se vor vinde și modulele premium Lapin (mep-pro, urban, rail, planning-pro).
+- **Etapa 1, mai târziu:** store.lapinbim.com, conturi prin SSO-ul Discourse al forumului (forum.lapinbim.com), panoul autorului, pachete semnate de Lapin, cu o cheie nouă, separată de a updater-ului (§9.7); statisticile de descărcare (§9.9).
+- **Primele extensii, ale noastre, ca exemple:** un pachet de mobilier, un șablon de proiect românesc, un script Python (manifest + script; se instalează, dar rulează doar când există consola Python, marcat așa).
+
+## 2. Arhitectura (etapa 0)
+
+```
+lapin-extensions (GitHub, public)          lapinbim.com                         Lapin
+  extensions/<id>/manifest.json   ──CI──▶  /extensions/index.json      ◀──────  Fișier → Extensii… (index)
+  tools/validate.mjs, build-index.mjs      /extensions/files/<id>/<v>/… (copii, pentru browser)
+release-ul autorului (GitHub)  ◀──────────────────────────────────────────────  pachetul (desktop: prin motor)
+```
+
+- **Indexul**: `{format: "lapin-extensions-index", version: 1, generated, extensions: [manifest…]}`; o intrare cu manifest greșit e lăsată afară (se scrie în consolă), nu tot indexul. Adresa: cea scrisă în dialog (Catalog…, `lapin.extensions.index`), altfel `LAPIN_EXTENSIONS_INDEX` dat motorului desktop (un index local în dezvoltare), altfel `https://lapinbim.com/extensions/index.json` (**încă nepublicat**).
+- **Descărcarea**: pe desktop prin motor (`extensions.fetch {url}` în `EngineHub`, în afara cozii de apeluri, deci o descărcare nu ține pe loc editările): webview-ul Tauri are voie doar la `127.0.0.1` (CSP), iar fișierele release-urilor GitHub nu răspund browserelor (fără CORS). Doar https oriunde, http doar pe acest calculator, fișiere locale după cale sau `file://`; cel mult 64 MB; oaspeții unei sesiuni partajate sunt refuzați. În browser, `fetch`, iar pachetele din copiile de pe lapinbim.com (`package.mirror`, puse de `build-index.mjs --mirror` la publicare).
+- **Verificarea în Lapin**: înainte de orice, versiunea Lapin în intervalul manifestului, modulul felului prezent în ediție, codul doar pe desktop; apoi mărimea și SHA-256-ul exact ca în manifest (WebCrypto), apoi fișierul citit și verificat ca fișier al felului lui (`packs.ts`), apoi importatorul existent. Un pachet greșit nu atinge nimic (nici versiunea instalată, la o actualizare).
+- **Instalatoarele, pe fel** (`addContentInstaller`, înregistrate de modulul care are biblioteca, ca la „Salvează ca șablon”): mobilier → Mobilierul meu (`furnitureLibrary.import` / IndexedDB în browser); șablon → șabloanele de proiect (`templates.import` / IndexedDB); profile → bibliotecile de profile ale calculatorului; hașuri → Hașurile mele; cartușe → cartușele calculatorului; liste de prețuri → bibliotecile de prețuri ale calculatorului; tipuri → păstrate pe calculator și aduse în proiectul deschis (`types.importFrom`, §9.1); **felurile bibliotecilor (§3.1)**: fiecare fișier verificat fără motor (`packs.ts`), păstrat pe calculator (simboluri → simbolurile calculatorului, `keepSymbol`; tipuri de linie, standarde, pachete de reguli, forme de bare, parametri, familii → fișiere în IndexedDB `lapin-libraries`, `computerFileRows`; corespondențele → memoria de potriviri a calculatorului, puse la loc la dezinstalare) și adus în proiect la cerere („Adaugă în acest proiect”, prin importatorul bibliotecii: `symbols.importFrom`, `standards.importLin`, `standards.importFrom`, `rules.import`, `rebar.importShapes`, `params.importDefs`, `studio.importFamily`); scripturi → păstrate ca fișiere (IndexedDB `lapin-extensions`, pe care consola le va citi), **niciodată rulate**. Un element cu același nume deja în bibliotecă e înlocuit doar dacă spune utilizatorul.
+- **Ce e instalat** (`lapin.extensions`, cu celelalte setări `lapin.*`, deci și în copia desktopului `settings.json`): manifestul instalat și **chitanța** (ce a adăugat: id-urile mobilierului, id-ul șablonului, numele bibliotecii). Dezinstalarea scoate doar ce e pe chitanță; ce era deja în bibliotecă la fel (sărit la import) rămâne, iar ce s-a pus deja în proiecte rămâne. Actualizarea = descarcă și verifică versiunea nouă, apoi dezinstalează vechea, apoi instalează noua.
+- **Nicio dependență nouă**, niciun cod din extensii rulat, motorul schimbat doar în gazdă (`extensions.fetch`, `extensions.source`, legătura `extensionPage` pentru pagini https).
+
+## 3. Manifestul (schema 1)
+
+Schema JSON e în depozitul catalogului (`schema/manifest.schema.json`); regulile sunt scrise de două ori, identic: `ui/src/platform/extensions/manifest.ts` (Lapin) și `tools/lib.mjs` (CI).
+
+| Câmp | Obligatoriu | Ce e |
+|---|---|---|
+| `schema` | da | `1` |
+| `id` | da | litere mici, cifre, `.` și `-`, max. 64; numele folderului; un domeniu inversat sau numele GitHub întâi (`ro.ciuntucbimstudio.mobilier-living`) |
+| `name`, `summary` | da | max. 80 / 200 de caractere |
+| `description` | nu | text |
+| `screenshots` | nu | **etapa 1**: cel mult 6 capturi pentru pagina din magazin: fișiere din folderul extensiei (`screenshot.webp`, `screenshot-2.png`…, ≤ 2 MB) sau adrese https; Lapin nu le arată |
+| `version` | da | semver; crește la fiecare schimbare (verificat de CI față de `main`) |
+| `author` | da | `{name, github?, url?, email?, forum?}`; `github` e contul care are voie să schimbe extensia prin GitHub; `forum` numele de pe forum.lapinbim.com (pus de magazin, etapa 1) |
+| `license` | da | expresie SPDX (`MIT`, `CC-BY-4.0`, `Apache-2.0 OR MIT`); arătată, „permisivă” sau „citește-i condițiile” |
+| `lapin` | da | intervalul de versiuni: `>=0.1.860`, `>=0.1.860 <0.3.0`, `^0.1.900`, `~1.2.0`, `0.1.x`, `*`, `||` |
+| `kind` | da | `furniture`, `template`, `types`, `profiles`, `hatches`, `titleBlock`, `priceList`, `script` |
+| `tags`, `languages` | nu | max. 12 etichete; coduri ISO 639-1 |
+| `permissions` | nu | doar cod: `model.read`, `model.write`, `files.read`, `files.write`, `network`, `process`; un pachet de conținut nu cere nimic |
+| `requires` | nu | module în plus față de al felului (un script: `scripting`) |
+| `contents` | da | `{file, items?}`: numele fișierului (extensia felului) și ce conține, arătat înainte de instalare |
+| `package` | da | `{url (https: release-ul autorului sau adresa magazinului, store.lapinbim.com/packages/…), sha256, size (≤ 64 MB), mirror?, download?, signature?}`; ultimele trei puse la publicare: copia de pe lapinbim.com, adresa care numără descărcarea (store.lapinbim.com/api/download/<id>/<versiune>) și semnătura cheii magazinului (etapa 1) |
+| `homepage`, `forum` | nu | https |
+| `indicative` | la prețuri | `true` obligatoriu pentru o listă de prețuri (prețurile și normele sunt ale autorului, orientative) |
+
+Fișierele pachetelor: `.lapinlib` (`lapin-furniture-library` v1, decizia 476), `.lapin` (formatul 3, zip), `.lapintypes` (`lapin-type-pack` v1, §9.1), `.lapinprofiles` (`lapin-profiles` v1), `.pat` (formatul AutoCAD), cartușul (`lapin.titleBlock` v1, Cartușe → Exportă), `.lapinprices` (**nou**: `{format: "lapin-price-list", version: 1, name, currency, indicative: true, rows}`, rândurile ca în biblioteca de prețuri), `.py` (cu antetul `# lapin: name=…, version=…`).
+
+### 3.1 Felurile bibliotecilor (decizia 263, etapa 4b)
+
+Felurile noi, câte un fișier fiecare, cu aceeași schemă de manifest: `symbols` (`.lapinsymbols`, `lapin-symbols` v1), `lineTypes` (`.lin`, formatul AutoCAD), `standards` (`.lapinstandards`, `lapin-standards` v1), `rules` (`.lapinrules`, `lapin-rules` v1; **mereu indicative**: manifestul spune `"indicative": true`, ca la listele de prețuri), `barShapes` (`.lapinbarshapes`, `lapin-bar-shapes` v1, cere modulul `rebar`), `parameters` (`.lapinparams`, `lapin-parameters` v1), `mapping` (`.lapinmapping`: `{app: "lapin", kind: "table" | "layers"}`) și `families` (`.lapinfamily`, `lapin-family` v1, cere modulul `studio`). Regulile sunt în trei locuri identice: `ui/src/platform/extensions/manifest.ts` + `packs.ts`, `lapin-extensions/tools/lib.mjs` + `schema/manifest.schema.json`. Fiecare fișier e verificat fără motorul (format, versiune, câmpurile obligatorii); motorul îl verifică încă o dată când îl aduce în proiect. Instalarea nu atinge proiectul deschis (spre deosebire de `types`); butonul „Adaugă în acest proiect” din Instalate și Catalogul („Din biblioteci”) o fac. Dezinstalarea șterge doar ce a păstrat chitanța; ce a luat deja un proiect rămâne.
+
+## 4. Etapele
+
+| Etapa | Ce aduce | Stare |
+|---|---|---|
+| **0. Catalogul pe GitHub** | depozitul `lapin-extensions` (README, schema, manifestele, `validate.mjs`, `build-index.mjs`, `make-examples.mjs`, acțiunea de validare); Fișier → Extensii… (Răsfoiește, Instalate, Instalează, Actualizează, Dezinstalează, adresa catalogului); instalatoarele pe fel; cele trei exemple | **făcută** (decizia 499); de publicat (§8) |
+| **0.1** | tipurile ca fel separat (`types`, un `.lapintypes` adus în proiectul deschis de `types.importFrom`, un pas de undo; Gestionare → Pachete de tipuri…); licențele necomerciale marcate; exportul unei liste de prețuri ca `.lapinprices` | **făcută** (decizia 499, răspunsurile din §9) |
+| **0.2** | capturi de ecran în manifest (făcut în etapa 1: `screenshots`); un exemplu de pachet de tipuri în catalog (`make-examples.mjs`) | exemplul de făcut |
+| **1. store.lapinbim.com** | site-ul static generat din catalog (`lapin-extensions/site/`); serviciul magazinului (`deploy/store/`): conturi prin DiscourseConnect (forum.lapinbim.com), panoul autorului (trimite o extensie sau o versiune nouă: formular + fișier + capturi → pull request în catalog; starea reviziei; descărcările), contorul anonim de descărcări, găzduirea catalogului (lapinbim.com/extensions/); **semnarea** (cheia Ed25519 a magazinului, separată de a updater-ului: indexul și fiecare pachet, verificate în Lapin); proiectele juridice (`lapin-extensions/legal/`); recenziile și notele rămân pentru mai târziu | **construită** (decizia 504, §10); de publicat de utilizator (`deploy/store/README.md`) |
+| **2. Extensii plătite** | ale autorilor, vândute prin vânzătorul lor (§11); felurile 3 (JS) și 4 (C#) | **2a construită** (decizia 660, §12), nepublicată; felurile 3 și 4 de făcut |
+
+## 5. Siguranța și permisiunile
+
+- **Conținutul nu rulează niciodată.** Un pachet de conținut e citit de importatorii existenți ai Lapin, care verifică deja fiecare intrare (motorul verifică mobilierul, șabloanele trec prin `TemplateLibrary`). Niciun HTML, niciun JS, nicio formulă evaluată.
+- **Integritatea**: SHA-256 și mărimea din manifest, verificate în Lapin și în CI; o schimbare a fișierului din release după aprobare face instalarea să eșueze (și CI-ul de pe `main` să pice). În etapa 1, semnătura Lapin peste index.
+- **Scripturile** (felul 2): pe desktop un script poate orice poate utilizatorul (`plan-python-scripting.md` §7); permisiunile din manifest sunt **declarate și arătate**, nu impuse, până la plug-in-urile JS (unde interfața le va impune, cu un `iframe` izolat și doar comenzile cerute). Un script instalat nu rulează la instalare, nici la deschiderea unui proiect; rularea va cere încrederea, ca scripturile proiectului. În browser nu se instalează scripturi.
+- **Oaspeții** unei sesiuni partajate nu pot citi nimic prin gazdă (`extensions.*` sunt ale gazdei).
+- **Revizia**: CI-ul verifică schema, fișierul și versiunea; o extensie existentă e schimbată doar de autorul ei (`author.github` = autorul PR-ului) sau de un maintainer; codul e citit de Claude și aprobat de utilizator înainte de merge.
+- **Retragerea**: o extensie scoasă din index nu mai apare; cele instalate rămân, iar Instalate arată că nu mai e în catalog (mai târziu: o listă de pachete revocate, citită la pornire, care le marchează).
+- **Semnătura** (etapa 1, §10): indexul (`index.json.sig`) și fiecare pachet (`package.signature`) semnate de cheia magazinului; Lapin le verifică și, de la build-ul care are cheia, refuză catalogul Lapin nesemnat; un catalog al utilizatorului poate fi nesemnat, cu un avertisment.
+
+## 6. De făcut juridic
+
+Operatorul catalogului: **Ciuntuc BIM Studio SRL** (CUI RO51725860, J2025031471009, Huși, VS).
+
+1. **Termenii autorilor** (contribuția la catalog): autorul garantează că are drepturile asupra conținutului (mobilier, modele, texturi, imagini, prețuri), că licența aleasă îi aparține; acordă catalogului dreptul de a lista, copia (mirror) și afișa; răspunde pentru conținutul lui; acceptă retragerea la încălcări.
+2. **Termenii utilizatorilor**: extensiile sunt ale autorilor, sub licențele lor, fără garanție din partea Ciuntuc BIM Studio; prețurile și normele sunt orientative; scripturile rulează pe răspunderea utilizatorului.
+3. **Notificare și retragere** (takedown, DSA): o adresă de contact (ionut@ciuntucbimstudio.ro sau o adresă dedicată), procedura (primire, retragere provizorie, răspunsul autorului), termene; un formular pe forum sau un issue template.
+4. **Confidențialitate / GDPR**: etapa 0 nu colectează date (indexul și pachetele sunt fișiere statice; jurnalele serverului nginx — de stabilit cât se păstrează); etapa 1: conturi prin SSO-ul forumului, statistici de descărcare (anonime), recenzii — o politică de confidențialitate a magazinului, temeiul (contract/interes legitim), păstrarea, drepturile.
+5. **Etapa 2**: contractul cu merchant-of-record-ul, termenii de vânzare, retragerea din contract pentru conținut digital, facturarea (MoR-ul e vânzătorul către cumpărător), contractul de distribuție cu autorii (comisionul).
+6. **Mărcile**: „Lapin” și „Lapin Extensions” — de verificat înregistrarea mărcii (OSIM / EUIPO) înainte de etapa 1.
+
+## 7. Exemplele (în `lapin-extensions`)
+
+| id | fel | licență | ce e |
+|---|---|---|---|
+| `ro.ciuntucbimstudio.mobilier-living` | furniture | CC-BY-4.0 | șase tipuri de living făcute cu configuratorul (comodă, comodă TV, bibliotecă, canapea, fotoliu, măsuță) |
+| `ro.ciuntucbimstudio.sablon-romania` | template | CC0-1.0 | niveluri Fundații / Parter / Etaj 1 / Mansardă și parametrii proiectului ceruți de documentația de autorizare (regim de înălțime, suprafață teren, POT, CUT, categoria și clasa de importanță) |
+| `ro.ciuntucbimstudio.pereti-perimetrali` | script | MIT | patru pereți în jurul unui dreptunghi, un pas de undo, pe API-ul `lapinbim` planificat; se instalează, rulează când există consola |
+
+Fișierele lor se fac cu `node tools/make-examples.mjs --lapin <lapin-pro>` (un motor Lapin pornit de script), în `dist/`, cu `SHA256SUMS.txt`; manifestele primesc mărimea și SHA-256-ul.
+
+## 8. Ce rămâne de făcut pentru publicare
+
+1. Crearea depozitului public `Ciuntuc-BIM-Studio/lapin-extensions` pe GitHub și împingerea folderului local (fără `dist/`).
+2. Câte un release pe exemplu (`mobilier-living-v1.0.0`, `sablon-romania-v1.0.0`, `pereti-perimetrali-v1.0.0`) cu fișierul din `dist/<id>/`, exact cel al cărui SHA-256 e în manifest (`SHA256SUMS.txt`).
+3. Publicarea indexului pe lapinbim.com: `node tools/build-index.mjs --mirror https://lapinbim.com/extensions/files/`, apoi `index.json` și copiile fișierelor (verificate cu SHA-256) în `/extensions/` (un vhost pe Hetzner, lângă forum, §9.5; antetul `Access-Control-Allow-Origin` pentru ediția web; găzduirea se face separat). Automat la un push pe `main`, mai târziu.
+4. Un subiect pe forum pentru catalog și câte unul pe exemplu (`forum` în manifeste).
+
+## 9. Întrebările, cu răspunsurile utilizatorului (12.11.2026: toate recomandările)
+
+1. **Licențe: orice expresie SPDX e acceptată**, și `LicenseRef-…` proprietare. Cele permisive sunt marcate „permisivă”, celelalte „citește-i condițiile” (ca până acum).
+2. **Necomercialele sunt acceptate și marcate clar „Necomercială”** (Non-commercial), în lista din Răsfoiește și în detalii. Detectarea (`isNonCommercial`, aceeași în `manifest.ts` și în `tools/lib.mjs` din catalog): orice identificator SPDX cu `-NC` (CC-BY-NC-*, CC-BY-NC-SA-*, CC-BY-NC-ND-*, cu variantele lor naționale), plus `PolyForm-Noncommercial-1.0.0`, `NCGL-UK-2.0` și un `LicenseRef-…` care spune non-commercial. Expresia e evaluată: `MIT OR CC-BY-NC-4.0` se poate lua sub MIT, deci nu e marcată; `CC-BY-NC-4.0 AND MIT` e. `validate.mjs` scrie la fiecare extensie „permissive”, „read its terms” sau „non-commercial”.
+3. **Tipurile sunt un fel separat, `types`, cu fișierul `.lapintypes`** (făcut, §9.1). Comanda motorului `types.importFrom` le aduce în proiectul deschis; Gestionare → Pachete de tipuri… le exportă și le importă.
+4. **`.lapinprices` se exportă și din Liste de prețuri…**: butonul de export al fiecărei liste din biblioteca calculatorului scrie fișierul pe care îl citește instalatorul (`writePriceList`), mereu cu `indicative: true`.
+5. **Indexul stă pe Hetzner**, lângă forum: un vhost nginx care servește `/extensions/index.json` și `/extensions/files/<id>/<versiune>/<fișier>` sub lapinbim.com (Cloudflare rămâne doar DNS-ul și proxy-ul), cu `Access-Control-Allow-Origin: *` pentru ediția web și `Cache-Control` scurt pe index (5 min), lung pe fișiere (sunt imuabile: o versiune nouă e alt drum). Publicarea: `build-index.mjs --mirror https://lapinbim.com/extensions/files/`, apoi index-ul și copiile verificate cu SHA-256, prin rsync, din CI-ul catalogului la un push pe `main` (o cheie de deploy doar pentru acel folder). **Găzduirea se face separat**; nimic pe server în această etapă.
+6. **Fiecare pachet e copiat pe lapinbim.com** (mirror), pentru toate extensiile: ediția web citește copiile (`package.mirror`), desktopul release-ul autorului și, dacă acela nu răspunde, copia (de făcut la etapa 1). `build-index.mjs --mirror` există deja; copia se face doar după ce SHA-256-ul ei e cel din manifest. Autorii acceptă copierea prin termenii autorilor (§6.1).
+7. **O cheie de semnare nouă pentru etapa 1, separată de cea a updater-ului**: Ed25519, ținută ca a updater-ului (fișier în afara depozitului, parola în keychain, niciodată în chat), cu semnătura indexului (`index.json.sig`) și a fiecărui pachet în index; Lapin are cheia publică încorporată și o poate roti (o listă de chei valabile). Updater-ul și catalogul nu-și împart cheia: o cheie a catalogului scăpată nu poate semna o actualizare a aplicației.
+8. **Pragul de 64 MB rămâne**, pentru orice fel.
+9. **Statisticile de descărcare vin în etapa 1**: un contor anonim pe API-ul magazinului (pe extensie și versiune, fără IP păstrat), arătat în panoul autorului; în etapa 0 nimic, iar jurnalele nginx nu se folosesc pentru statistici.
+
+### 9.1 Pachetele de tipuri (`.lapintypes`, felul `types`)
+
+**Formatul ales: JSON, nu un `.lapin` mic** — se citește și se verifică fără motor (CI-ul catalogului, Node pur), se vede ce conține, iar un tip adus nu poartă nimic din restul unui proiect (niveluri, vederi, setări).
+
+```
+{ format: "lapin-type-pack", version: 1, name?,
+  types:     [{ref, class, name, predefinedType?, attrs, material?}],
+  resources: [{ref, class, name, predefinedType?, attrs}] }
+```
+
+- `ref` e id-ul entității în proiectul din care a ieșit; orice text din `attrs` egal cu un `ref` arată spre acel element (un set de straturi spre materialele lui, un tip de grindă spre copia profilului). `material` e `ref`-ul a ce îi dă tipului IfcRelAssociatesMaterial (setul lui de straturi sau un material).
+- **Exportul** (`types.export {ids, name?}` → `{text, file}`): doar tipuri (clasa descrisă ca `type` de modulul ei: pereți, plăci, uși, ferestre, stâlpi, grinzi, scări, pereți cortină, tavane, plinte…), cu tot ce le trebuie: seturile de straturi, materialele numite prin id sau prin nume sub o cheie care spune material (rama unei uși), copiile de profile și orice altă resursă din `attrs`; niciodată structura spațială sau elemente așezate. Atributele scrise de proiect pentru sine (`added`, `imported`) rămân afară.
+- **Importul** (`types.importFrom {text, refs?}`, **un pas de undo**): tipurile alese (fără `refs`: toate) și doar ce le trebuie lor. Un material e al proiectului când are unul cu același nume (fără să-l schimbe), altfel e creat cum îl are pachetul (culoarea, aspectul, hașurile); o resursă identică cu una a proiectului (clasa, numele, atributele) e aceea (o copie de profil din aceeași bibliotecă), altfel e creată; **un tip identic** (clasa, numele, atributele, straturile) **e refolosit**, unul cu același nume dar diferit e adăugat lângă el ca „Nume (2)” (al proiectului nu se schimbă niciodată), oricare altul e creat. Id-urile sunt mereu noi. Un pachet greșit (alt format, o versiune mai nouă, o clasă care nu e tip în această ediție, structura spațială printre resurse) e refuzat întreg.
+- `types.readPack {text}` spune ce tipuri are și care au deja un nume în proiect; `types.list` dă tipurile proiectului pentru export.
+- **Instalatorul** (`typesInstaller`, înregistrat de core): pachetul e verificat (`readTypePack`), păstrat pe calculator (IndexedDB `lapin-type-packs`) și tipurile lui aduse în proiectul deschis; Instalate → Adaugă-i tipurile în acest proiect le aduce în altul. Dezinstalarea uită pachetul; tipurile deja în proiecte rămân.
+- **Gestionare → Pachete de tipuri…**: tipurile proiectului bifate și exportate (Exportă tipuri…), un `.lapintypes` citit, tipurile lui alese și adăugate (Importă tipuri…).
+
+## 10. Etapa 1: ce s-a construit (decizia 504, 12.11.2026)
+
+Aprobată de utilizator la 12.11.2026. Codul și testele sunt făcute; nimic nu e publicat pe server, setările forumului nu sunt schimbate, nicio cheie sau token nu e făcut (pașii, în `deploy/store/README.md`).
+
+- **Site-ul magazinului** (`lapin-extensions/site/build.mjs`, Node fără dependențe; `npm run site`): lista (căutare, filtre pe fel, merge și fără JavaScript), câte o pagină pe extensie la `/extension/<id>/` (descriere, capturi, versiunile din istoricul git al manifestului, licența marcată permisivă / citește-i condițiile / necomercială, versiunile Lapin, mărimea, SHA-256, autorul, pagina, subiectul pe forum, cum se instalează, descărcările numărate de magazin, „Semnat”), paginile autorilor, Publică, proiectele juridice; aspectul Lapin (tokenurile din `theme.css`, hârtie și grafit, după sistem sau ales); textele în `site/strings.mjs`, engleza întâi, gata pentru alte limbi (`--lang`). Tot textul din manifeste e escapat.
+- **Legătura „Deschide în Lapin”**: nu e făcută. `lapin://` ar cere pluginul `tauri-plugin-deep-link` (și `single-instance` pe Windows și Linux), o dependență Rust nouă și înregistrarea schemei în pachetele fiecărei platforme: nu e ieftin acum. Pagina spune „În Lapin: Fișier → Extensii…, caută „<nume>”, apoi Instalează” și are un buton care copiază id-ul. De făcut cu un build desktop, separat.
+- **Serviciul magazinului** (`deploy/store/`, modelul `deploy/feedback`: Node 22 fără dependențe, fișiere JSON cu blocare și scriere atomică, nu SQLite, containerul `lapin-store` pe `127.0.0.1:3465`): servește paginile, catalogul (`lapinbim.com/extensions/*` rutat aici de tunel) și fișierele încărcate de autori; conectarea prin **DiscourseConnect** (secretul comun din `store.env` pe server; se păstrează id-ul, numele și numele afișat de pe forum, niciodată e-mailul; sesiuni doar în memorie, 14 zile); **panoul autorului** (`/dashboard/`): o extensie nouă sau o versiune nouă (câmpurile manifestului, fișierul verificat cu `checkPackage` ca în CI și în Lapin, cel mult 6 capturi, termenii autorilor acceptați) → **un pull request** în `Ciuntuc-BIM-Studio/lapin-extensions` (ramură, manifest, capturi; tokenul GitHub din `store.env`), starea lui (deschis / verificările / acceptat / refuzat), retragerea, descărcările. **Fișierele stau pe lapinbim.com** (`store.lapinbim.com/packages/<id>/<v>/<fișier>` e `package.url`, servit doar ca descărcare), nu în release-uri GitHub: autorul nu are nevoie de cont GitHub, iar fișierul e exact cel verificat. Un id e al primului autor al cărui pull request e acceptat; doar el (sau un maintainer) îi trimite versiunile. **Descărcările**: `/api/download/<id>/<v>` numără (pe extensie, versiune, lună; nimic despre cine) și trimite la copie; Lapin încearcă întâi adresa asta, apoi fișierul autorului, apoi copia (§9.6, făcut). **Limite** pe vizitator și pe autor; curățenie zilnică (trimiterile refuzate sau retrase, șterse după 90 de zile). CLI: `list`, `stats`, `owner`, `forget` (ștergerea datelor cuiva, GDPR). Teste: `pnpm test:store` (forumul și GitHub simulați).
+- **Semnarea**: cheia Ed25519 a magazinului, separată de a updater-ului, făcută o dată de `node scripts/store-key.mjs` (fișierul criptat `~/.lapin/store-key.pem`, parola în keychain `lapin-store-key`; încă nefăcută). `lapin-extensions/tools/publish.mjs` (pe Mac; cheia nu ajunge pe server) construiește indexul cu `mirror` și `download`, copiază pachetele după ce le verifică SHA-256-ul, semnează fiecare pachet (`package.signature`, peste `lapin-extension-package`, `1`, id, versiune, SHA-256 și mărime, câte unul pe rând) și indexul (`index.json.sig`), generează site-ul și, cu `--upload`, le trimite prin rsync. În Lapin (`ui/src/platform/extensions/signature.ts`, `keys.ts`): verificarea Ed25519 prin WebCrypto, sau prin verificatorul propriu (RFC 8032, BigInt) unde WebCrypto nu are Ed25519; cheile publice în `STORE_KEYS` (o listă: rotire); **cât timp lista e goală, semnarea nu e activă** și catalogul Lapin se citește ca în etapa 0; după ce cheia e în listă, catalogul Lapin nesemnat sau cu semnătura greșită nu e citit, iar pachetele lui nesemnate nu se instalează. Un catalog ales de utilizator poate fi nesemnat (Răsfoiește spune „Acest catalog nu e semnat de Lapin Extensions…”), niciodată cu o semnătură greșită. Ordinea: întâi indexul semnat publicat, apoi build-ul cu cheia.
+- **Juridic** (`lapin-extensions/legal/`, engleza de referință + copii în română în `legal/ro/`, **PROIECTE, de revizuit de un avocat**): termenii de utilizare, termenii autorilor (licența dată catalogului: listare, copii, semnare; garanțiile autorului; retragerea), nota de confidențialitate (GDPR: Ciuntuc BIM Studio SRL, CUI RO51725860, J2025031471009, Huși, hello@lapinbim.com; identitatea de pe forum, trimiterile, descărcările anonime, datele tehnice doar în memorie; Cloudflare, Hetzner, GitHub; drepturile, ANSPDCP), notificare și acțiune (DSA: punct de contact, conținutul notificării, retragerea provizorie, expunerea de motive, contestarea).
+- **Ce trebuie făcut pentru publicare** (`deploy/store/README.md`): tokenul GitHub fin (doar `lapin-extensions`: Contents, Pull requests, Checks); pe forum `enable discourse connect provider` și `discourse connect provider secrets` = `store.lapinbim.com|<secret>`; pe server `store.env`, serviciul din compose, `deploy/store/deploy.sh`; în Cloudflare două rute ale tunelului (`store.lapinbim.com` și `lapinbim.com` cu calea `^/extensions/`, spre `127.0.0.1:3465`); `publish.mjs --unsigned --upload`; apoi, când hotărăște utilizatorul, cheia și build-ul cu ea.
+
+## 11. Etapa 2: hotărârea utilizatorului (12.11.2026)
+
+- **2a, aprobată:** extensiile plătite ale altor autori sunt **vândute de autorii lor, prin propriul vânzător** (Lemon Squeezy, Gumroad, Paddle…), care face TVA-ul și facturile; magazinul doar trimite la pagina de cumpărare a autorului, iar Lapin verifică cheia de licență prin furnizorul autorului. **Comision 0 %.** Câmpul de manifest propus (**implementat în etapa 2a, §12**, cu `terms` în plus): **`purchase`**, nu `licence`, ca să nu se confunde cu `license` (licența SPDX, care rămâne obligatorie și spune condițiile de folosire):
+
+  ```
+  purchase: { provider: "lemonsqueezy" | "gumroad" | "paddle" | …,
+              productId: "<id-ul produsului la furnizor>",
+              checkoutUrl: "https://…",     // pagina de cumpărare a autorului
+              price?: "29 EUR" }            // doar afișat, orientativ; prețul real e al vânzătorului
+  ```
+
+  Un pachet plătit nu are copie publică: `package.url` e adresa de descărcare a vânzătorului sau una a magazinului care cere cheia; Lapin cere cheia de licență la instalare și o verifică prin API-ul public de validare al furnizorului (Lemon Squeezy `/v1/licenses/validate`, Gumroad `/v2/licenses/verify`), pe desktop prin motor; cheia rămâne pe calculator. De stabilit la implementare: furnizorii acceptați, ce se întâmplă fără internet, revocarea.
+- **2b, schimbată:** modulele premium Lapin (mep-pro, urban, rail, planning-pro) **nu** se vând ca extensii în magazin. Devin o **platformă premium „ca un SaaS, dar locală + server”** (aplicația desktop plus un server), planificată separat în `docs/plan-premium-platform.md` (**de scris**, în afara acestei etape).
+- Felurile 3 (plug-in-uri JS) și 4 (module C# semnate, pentru parteneri) rămân pentru mai târziu.
+
+## 12. Etapa 2a: extensiile plătite, vândute de autorii lor (decizia 660, 17.11.2026)
+
+Hotărârile utilizatorului (17.11.2026, toate recomandările):
+
+1. **Ce se poate vinde acum:** conținutul și scripturile Python (felurile care există azi). Plug-in-urile JS (felul 3) și modulele C# semnate (felul 4) rămân pentru o etapă cu sandbox și permisiuni impuse; o listă explicită (`PAID_KINDS`) spune ce fel poate fi plătit, ca un fel nou să nu devină vandabil fără să hotărască cineva.
+2. **Furnizorii:** propus Lemon Squeezy și Gumroad; **rămâne doar Gumroad** (hotărârea utilizatorului din 17.11.2026, §12.9), cu API public de verificare a cheii, fără cont API al nostru. Verificat pe 17.11.2026 în documentația lui:
+   - **Lemon Squeezy, scos:** a închis înscrierile pe 16.11.2026 și nu mai procesează plăți de la 31.03.2027 (https://www.lemonsqueezy.com/blog/saying-goodbye-to-lemon-squeezy); vânzătorii lui sunt trimiși la Stripe Managed Payments, care, spune chiar ghidul de migrare (https://docs.lemonsqueezy.com/migration), „nu livrează fișiere, chei de licență sau legături de descărcare”.
+   - Gumroad: `POST https://api.gumroad.com/v2/licenses/verify`, formular `product_id`, `license_key`, `increment_uses_count=false` (implicit e `true`: fiecare verificare ar număra o folosire); răspuns `{success, uses, purchase: {product_id, refunded, disputed, dispute_won, chargebacked, subscription_ended_at, subscription_cancelled_at, subscription_failed_at, …}}`; o cheie dezactivată răspunde 404 `{success: false, message: "This license key has been disabled."}`, una necunoscută 404 cu alt mesaj.
+3. **De unde vine pachetul plătit:** îl ține magazinul, **fără nicio copie publică**, și îl dă doar după o cheie bună, verificată la furnizor **de serverul magazinului**. Semnătura noastră rămâne pe pachet; autorul nu are nevoie de găzduire.
+4. **Fără internet:** o verificare reușită e ținută minte pe calculator; Lapin verifică din nou la actualizări; după instalare nimic nu e blocat fără internet.
+5. **Revocarea** (rambursare, cheie dezactivată): nicio actualizare și o notă în Lapin; nimic instalat nu e scos.
+6. **Revizia:** același pull request ca la cele gratuite (manifest + capturi / un exemplu); termenii autorilor primesc un paragraf despre vânzare: autorul e vânzătorul, el face rambursările, magazinul doar listează.
+7. **Juridic:** termenii din `lapin-extensions/legal/` (engleza de referință, copiile în `legal/ro/`) completați pentru extensiile plătite; pe pagina extensiei „Sold by <autor> through <furnizor>” cu legătura la termenii vânzătorului; rămân marcați „PROIECT, de revizuit de un avocat”.
+
+### 12.1 Câmpul `purchase` din manifest
+
+```
+purchase: { provider:    "gumroad",                       // singurul acceptat azi (§12.9)
+            productId:   "<id-ul produsului la furnizor>",   // Gumroad: product_id (fila Content a produsului)
+            checkoutUrl: "https://…",                         // pagina de cumpărare a autorului (Buy)
+            terms:       "https://…",                         // termenii de vânzare și rambursare ai vânzătorului
+            price?:      "29 EUR" }                           // doar afișat, „orientativ”; prețul real e al vânzătorului
+```
+
+Regulile (aceleași în `lapin-extensions/tools/lib.mjs` + `schema/manifest.schema.json`, în copia magazinului `deploy/store/server/catalogue-lib.mjs` și în `ui/src/platform/extensions/manifest.ts`):
+
+- `provider` din lista furnizorilor acceptați (`PROVIDERS`); `productId` 1–100 caractere `[A-Za-z0-9_=+/.-]`; `checkoutUrl` și `terms` https; `price` text de cel mult 40 de caractere.
+- `kind` din `PAID_KINDS` (azi: toate felurile de conținut și `script`).
+- **`package.url` e adresa magazinului care cere cheia**: `https://<magazin>/api/licensed/<id>/<versiune>`, cu id-ul și versiunea manifestului; `package.mirror` și `package.download` lipsesc (nicio copie publică, niciun contor care ar trimite la o copie). `sha256`, `size` și `signature` rămân: Lapin verifică pachetul primit exact ca pe unul gratuit.
+- `license` rămâne SPDX și obligatorie (de obicei un `LicenseRef-<Autor>-EULA`, cu textul la `purchase.terms` sau `homepage`).
+
+### 12.2 Unde stă pachetul plătit și cum îl dă autorul
+
+- Pe server: **`/data/paid/<id>/<versiune>/<fișier>`**, în afara oricărei căi servite (`/packages/…` e pentru cele gratuite în revizie, `/extensions/files/…` pentru copii). Doar `POST /api/licensed/…` îl citește, după cheie, și doar dacă mărimea și SHA-256-ul lui sunt ale indexului publicat.
+- **Calea simplă (magazinul):** în panoul autorului, „Sold through your own shop” cu furnizorul, id-ul produsului, adresa de cumpărare, termenii și prețul afișat; fișierul încărcat e verificat (`checkPackage`) și pus direct în `/data/paid/…`, nu în `/data/packages/…`. Pull request-ul conține doar manifestul și capturile.
+- **Calea GitHub:** autorul deschide pull request-ul cu manifestul și trimite fișierul **privat** maintainer-ului (un e-mail la hello@lapinbim.com sau o legătură privată de descărcare); maintainer-ul îl pune în `lapin-extensions/private/<id>/<versiune>/<fișier>` (folder **ignorat de git**, deci niciodată în depozitul public), `node tools/validate.mjs --only <id>` îl verifică de acolo, iar `node tools/publish.mjs --upload` îl trimite în `store-data/paid/` (rsync fără ștergere), după ce i-a verificat mărimea și SHA-256-ul.
+- **CI-ul public** nu poate descărca un pachet plătit: verifică manifestul și scrie „paid: the package is checked privately”. Un pull request plătit e acceptat doar după ce pachetul a fost verificat de magazin la încărcare sau de maintainer din `private/`.
+- `publish.mjs`: un pachet plătit nu e copiat în `extensions/files/` și nu primește `mirror` / `download`; e semnat ca oricare (semnătura e peste id, versiune, SHA-256 și mărime, deci nu cere fișierul).
+
+### 12.3 Serviciul magazinului (`deploy/store/server`)
+
+| Adresă | Ce face |
+|---|---|
+| `POST /api/licence/check` `{id, key}` | verifică cheia la furnizorul extensiei → `{status: active | revoked | invalid | unavailable, message?}` |
+| `POST /api/licensed/<id>/<versiune>` `{key}` | cheia verificată; `active` → fișierul (`application/octet-stream`, `no-store`); altfel 403 (`invalid`, `revoked`), 503 (`unavailable`), 404 (fără extensie plătită / fișier încă nepus), 429 |
+| `OPTIONS` pe ambele | CORS pentru ediția din browser (`POST`, `content-type`) |
+
+- **Cheia stă în corpul cererii (POST)**, niciodată în adresă: adresele ajung în jurnalele nginx și Cloudflare.
+- **Furnizorii** (`providers.mjs`): câte o funcție pe furnizor, `fetch` cu `AbortSignal.timeout(10 s)`; rezultatul e `active` (cheie bună, pentru acest produs), `revoked` (cheie a produsului, dar rambursată, dezactivată, expirată, contestată, abonament încheiat), `invalid` (nu e o cheie a acestui produs), `unavailable` (furnizorul nu răspunde, 429, 5xx). Gumroad: `success` + `product_id` + nici `refunded`, `chargebacked`, `disputed` fără `dispute_won`, `subscription_ended_at` trecut, `subscription_failed_at` → `active`; altfel `revoked`; 404 „disabled” → `revoked`; alt 404 → `invalid`.
+- **Ce păstrează magazinul: nimic despre chei.** Nicio cheie, niciun hash de cheie, nicio adresă IP nu e scrisă pe disc sau în jurnal. Jurnalul are un rând pe verificare: ora, id-ul extensiei, furnizorul și rezultatul (`licence <id> gumroad: active`). Limitele de rată folosesc, ca până acum, un hash sărat al adresei date de Cloudflare, **doar în memorie**, cel mult o oră.
+- **Limite:** 20 de verificări pe oră pe vizitator, 60 pe minut în total (o limită a noastră, ca furnizorul să nu fie bătut); peste ele 429 / `unavailable`. Corpul cererii ≤ 4 KB; cheia 1–200 de caractere tipăribile.
+- **Panoul autorului:** câmpurile `purchase` (opționale), fișierul plătit pus în `/data/paid/`; `cli.mjs paid` listează fișierele plătite ținute.
+
+### 12.4 În Lapin
+
+- **Răsfoiește:** eticheta „Paid” și prețul „(indicative)” în listă și în detalii; în detalii „Sold by <autor> through <furnizor>”, **Buy** (deschide `checkoutUrl` în browserul sistemului: `support.open` → `extensionPage` pe desktop, o filă nouă în browser) și **Seller's terms**; la Instalează, câmpul **Licence key** (cheia primită de la vânzător). Instalarea: cheia → `POST /api/licensed/…` (pe desktop prin motor, `extensions.post`, fiindcă webview-ul nu ajunge la alte site-uri; în browser `fetch` cu CORS) → mărimea, SHA-256-ul și semnătura verificate ca la orice pachet → instalatorul felului.
+- **Cheia rămâne pe calculator:** `lapin.extensions.licences` (`{<id>: {key, provider, status, checkedAt}}`), cu celelalte setări `lapin.*`: în browser în stocarea paginii, pe desktop și în `settings.json` din folderul Lapin al utilizatorului. Nu intră în proiecte, în rapoarte, în exporturi. Dezinstalarea o păstrează (o reinstalare nu o mai cere); **Forget licence key** o șterge.
+- **Fără internet:** instalat înseamnă instalat; nimic nu verifică cheia la folosire sau la pornire.
+- **Verificarea din nou:** la citirea catalogului, pentru fiecare extensie plătită instalată cu o versiune nouă în catalog, sau verificată acum mai bine de 7 zile, `POST /api/licence/check`. `unavailable` / fără rețea: rămâne starea de dinainte. `revoked` / `invalid`: starea devine `revoked`.
+- **Revocarea:** o extensie plătită `revoked` nu mai primește Update; Instalate și detaliile spun „Its licence is no longer valid (refunded or disabled by its seller): it gets no more updates. What is installed stays.” și oferă **Enter another key**.
+- Textele noi, în toate limbile din `ui/src/i18n`.
+
+### 12.5 Juridic (`lapin-extensions/legal/`, PROIECTE)
+
+- **Termenii autorilor:** un paragraf „Selling an extension”: autorul e vânzătorul (prin furnizorul lui, care e merchant of record), stabilește prețul, facturează, face TVA-ul și rambursările, răspunde cumpărătorului; magazinul doar listează, ține și semnează pachetul și îl dă cumpărătorilor cu cheie bună; 0 % comision; licența dată magazinului pentru pachetele plătite e doar de păstrare, verificare, semnare și livrare către cumpărători, nu de copie publică; autorul ține `purchase` adevărat (o cheie revocată la rambursare).
+- **Termenii de utilizare:** „Paid extensions”: contractul de cumpărare e între cumpărător și autor (prin furnizor), Ciuntuc BIM Studio nu e parte; rambursările la vânzător; cheia rămâne pe calculator; ce e instalat rămâne și după revocare, fără actualizări.
+- **Confidențialitatea:** la o verificare, cheia trece prin magazin spre furnizor și nu e păstrată; ce se scrie în jurnal; furnizorul (azi Gumroad) ca destinatar, fiecare cu politica lui.
+- **Pagina extensiei:** „Paid”, prețul „indicative”, **Buy** (spre `checkoutUrl`), „Sold by <autor> through <furnizor>” cu legătura la `purchase.terms`; fără butonul de descărcare.
+
+### 12.6 Exemplul de test
+
+`lapin-extensions/examples/paid/<id>/manifest.json`: un manifest plătit marcat „EXAMPLE — not published”, **în afara `extensions/`**, deci nici indexul, nici site-ul, nici publicarea nu-l văd. Testele îl citesc direct; pentru o încercare de la cap la coadă, maintainer-ul îl copiază într-un catalog local (`extensions/` al unei copii de lucru, niciodată pe `main`), cu un produs de test al furnizorului (`deploy/store/README.md` → „Paid extensions”).
+
+### 12.7 Testele
+
+- `lapin-extensions`: `tools/lib.test.mjs` (regulile `purchase`), `site/build.test.mjs` (Paid, Buy, Sold by, fără descărcare), `tools/catalogue.test.mjs` (fără `mirror` / `download` pentru cele plătite).
+- Magazinul: `deploy/store/server/server.test.mjs` cu furnizorii simulați (cheie bună, a altui produs, rambursată, dezactivată, furnizor căzut, timeout), fișierul dat doar după cheie bună și doar dacă e al indexului, nicio cheie și nicio adresă în jurnal, limitele, CORS.
+- Motorul: `ExtensionFetchTests` (`extensions.post`: doar https sau acest calculator, starea și corpul întoarse, oaspeții refuzați).
+- Interfața (vitest): `manifest.test.ts`, `install.test.ts`, `licence.test.ts` (cheia ținută, verificarea din nou, revocarea, fără actualizări).
+
+### 12.8 Ce rămâne
+
+- **Activări / locuri:** nu numărăm calculatoarele pe cheie (Gumroad `uses`); o cheie dată mai departe merge până o dezactivează autorul. De făcut dacă autorii o cer.
+- **Paddle, Stripe Managed Payments** și alți vânzători fără API de licențe: cheile emise de magazin, §12.10.
+- Felurile 3 și 4, cu sandbox-ul și permisiunile impuse.
+- O listă publică de revocări ale magazinului (o extensie scoasă) — §5.
+- Pașii de publicare: `deploy/store/README.md` → „Paid extensions”.
+
+### 12.9 Întrebarea, cu răspunsul utilizatorului (17.11.2026)
+
+1. **Lemon Squeezy se închide la 31.03.2027:** îl păstrăm sau îl scoatem? **Răspuns: scos acum.** A închis înscrierile pe 16.11.2026 și nu mai procesează plăți de la 31.03.2027; Stripe Managed Payments, unde își trimite vânzătorii, nu dă chei de licență. **Gumroad e singurul furnizor** deocamdată: `PROVIDERS` / `PROVIDER_URLS` au doar `gumroad` (catalogul, magazinul, Lapin), un manifest cu `lemonsqueezy` e refuzat, textele juridice și ghidul numesc doar Gumroad.
+
+### 12.10 O etapă ulterioară (nefăcută): chei de licență emise de magazin
+
+Pentru vânzătorii fără API de licențe (Stripe Managed Payments, Paddle): **vânzătorul autorului anunță magazinul printr-un webhook la fiecare vânzare** (semnat cu secretul webhook-ului, verificat de magazin), iar **magazinul generează cheia** și o trimite cumpărătorului (sau vânzătorul o arată pe chitanță); la rambursare, alt webhook o revocă. Verificarea din Lapin rămâne aceeași (`/api/licence/check`, `/api/licensed/…`), doar că răspunde magazinul, nu furnizorul.
+
+- **Magazinul devine păstrătorul cheilor**, deci și al unor date personale: cheia legată de o cumpărare (id-ul comenzii, probabil e-mailul cumpărătorului, ca să-i fie retrimisă); ar cere: chei păstrate doar ca hash (Argon2/scrypt) plus o căutare după un prefix, nu în clar; temeiul (contractul, art. 6 alin. (1) lit. b), durata (cât e listată extensia plus termenul de prescripție), dreptul la ștergere (cu revocarea cheii), un acord de prelucrare cu fiecare autor (magazinul ar fi persoană împuternicită a vânzătorului), nota de confidențialitate și termenii autorilor schimbați, secretele webhook-urilor ale fiecărui autor în `store.env` sau criptate pe disc, copii de siguranță.
+- **Nu e construită acum**; de hotărât când un autor o cere.

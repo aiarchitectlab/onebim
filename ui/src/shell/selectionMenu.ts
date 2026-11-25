@@ -1,0 +1,203 @@
+/**
+ * What a right-click on a plan, a drawing or the 3D view offers for the selection: group it, or let a group go, open
+ * it, take members out (a tester's report, #98: an imported DXF's lines put together to move them as one); and copy
+ * it to other storeys, or move it to another (their dialogs); offset an outline's every edge (Offset outline…, decision 609).
+ */
+
+import { notify, useUi } from '../app/store';
+import { execute, useSession } from '../engine/session';
+import { copyable } from '../modules/core/CopyToStoreysDialog';
+import { drawableElement } from '../modules/core/shopDrawing';
+import { editSelectedGroup, groupSelection, removeFromGroup, ungroupSelection } from '../modules/core/groupTools';
+import { GROUP, groupOf, membersOf } from '../platform/groups';
+import { allTools, typeEditorOf } from '../platform/modules';
+import { openTypeDialog } from './typeToEdit';
+import { hasModule } from '../platform/brand';
+import { typeOf } from '../engine/model';
+import { hiddenHere, useShownHere } from '../viewport/cad/shown';
+import { describeSelection, previousSelections, reselect } from './selectionHistory';
+import { criteriaOf, defaultKeys, similarIds, type SimilarKey } from './similar';
+import { hideSelection, isolateSelection, resetTemporary, temporaryOn, useTemporary } from '../viewport/temporary';
+import { useScope } from '../platform/scope';
+import type { MenuItem } from './ContextMenu';
+import type { NodeDto, RelationDto } from '../engine/protocol';
+import { bindingText } from '../app/commands';
+import { offsetMenuItems } from '../viewport/outlineOffset';
+import { SCALE_IMAGE_TOOL, scalableTrace, startScaleImage } from '../modules/drafting/scaleImage';
+
+/** Group, Ungroup, Edit group, Remove from group: those that apply to the selection. */
+export function groupItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  if (!selected.length) return [];
+  const nodes = useSession.getState().nodes;
+  const groups = selected.filter((id) => nodes.get(id)?.type === GROUP);
+  const items: MenuItem[] = [];
+  // A lone group is grouped already; anything else (elements, several groups merged) can be.
+  if (!(groups.length === 1 && selected.length === 1)) items.push({ label: 'Create group', onSelect: () => void groupSelection() });
+  if (groups.length) {
+    items.push({ label: 'Ungroup', onSelect: () => void ungroupSelection() });
+    if (groups.length === 1) items.push({ label: 'Edit group', onSelect: editSelectedGroup });
+  }
+  if (useScope.getState().scope && selected.some((id) => groupOf(id))) items.push({ label: 'Remove from group', onSelect: () => void removeFromGroup() });
+  return items;
+}
+
+/** Whether an element is in the view in front: not hidden by it, and in a plan on its storey (when the view cannot tell). */
+function inFrontView(n: { id: string; storeyId: string | null }): boolean {
+  const ui = useUi.getState();
+  if (hiddenHere(n.id)) return false;
+  if (!useShownHere.getState().hides && ui.view === 'plan' && ui.storeyId) return n.storeyId === ui.storeyId;
+  return true;
+}
+
+function chooseAll(ids: string[]): void {
+  if (!ids.length) return;
+  useUi.setState({ selected: ids, selection: ids[ids.length - 1] ?? null });
+}
+
+/** What Select similar matches the selection by, when it can: all of one class, each editable (else null). */
+function similarBasis(): { model: { nodes: Map<string, NodeDto>; relations: Map<string, RelationDto> }; ids: string[] } | null {
+  const { selected } = useUi.getState();
+  const { nodes, relations } = useSession.getState();
+  const ids = selected.filter((id) => nodes.has(id));
+  if (!ids.length || ids.some((id) => !nodes.get(id)?.editable)) return null;
+  if (ids.some((id) => nodes.get(id)!.type !== nodes.get(ids[0])!.type)) return null;
+  return { model: { nodes, relations }, ids };
+}
+
+/**
+ * Select similar in this view (forum topics 73 and 250; its keys, Ctrl+Shift+A by default): the elements of the selection's
+ * class and type the view in front shows. Said when the selection has nothing to match.
+ */
+export function selectSimilarHere(): void {
+  const b = similarBasis();
+  if (!b) { notify('Select an element first: Select similar takes the others of its class and type.'); return; }
+  chooseAll(similarIds(b.model, b.ids, defaultKeys(b.model, b.ids), inFrontView));
+}
+
+/** Select similar (the same class and type) in this view or in the whole project, and "Select all with the same…" a thing the selection is told by (forum topic 73); its class alone among them (forum topic 250). */
+export function similarItems(): MenuItem[] {
+  const b = similarBasis();
+  if (!b) return [];
+  const { model, ids } = b;
+  const keys = defaultKeys(model, ids);
+  const keysText = bindingText('app.selectSimilar');
+  const items: MenuItem[] = [
+    { label: 'Select similar in this view', shortcut: keysText || undefined, onSelect: () => chooseAll(similarIds(model, ids, keys, inFrontView)) },
+    { label: 'Select similar in the whole project', onSelect: () => chooseAll(similarIds(model, ids, keys)) },
+  ];
+  // What the clicked element is told apart by: one entry for each, matched in the project (one element selected); first its
+  // class whatever the type (all the walls), in this view.
+  const cls = model.nodes.get(ids[0])!.type;
+  const sub: MenuItem[] = [{ label: 'Same class, in this view', hint: cls, raw: false, onSelect: () => chooseAll(similarIds(model, ids, [], inFrontView)) }];
+  if (ids.length === 1) {
+    sub.push(...criteriaOf(model, ids[0]).map((c) => ({
+      label: c.label, hint: c.value, raw: false,
+      onSelect: () => chooseAll(similarIds(model, ids, [c.key as SimilarKey])),
+    })));
+  }
+  items.push({ label: 'Select all with the same…', submenu: sub, onSelect: () => undefined });
+  return items;
+}
+
+/**
+ * "Edit sketch" on a floor, a floor opening or a ceiling (forum topic 97, stage 3): its outline opened as a sketch, when the
+ * product has Studio's Edit sketch.
+ */
+const isTrench = (n: { props: Record<string, unknown> }) => n.props.predefinedType === 'TRENCH';
+
+export function editSketchItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  if (selected.length !== 1) return [];
+  const n = useSession.getState().nodes.get(selected[0]);
+  const outline = !!n && !n.props.reference && Array.isArray(n.props.contour) && (n.type === 'IfcSlab' || n.type === 'LapinCeiling' || (n.type === 'IfcOpeningElement' && !n.props.stairId)
+    || (n.type === 'IfcSpace' && n.props.auto === false) || (n.type === 'IfcEarthworksCut' && !isTrench(n)));
+  // A stair (users asked for Revit's stair by sketch, 19.11.2026): its sketch on a board of its own, when the product has Studio.
+  const stair = !!n && n.type === 'IfcStair' && !n.props.reference && hasModule('studio');
+  const tool = outline ? allTools().find((t) => t.id === 'studio.editSketch') : stair ? allTools().find((t) => t.id === 'architecture.editStairSketch') : undefined;
+  return tool?.run ? [{ label: 'Edit sketch', onSelect: () => tool.run!() }] : [];
+}
+
+/** Make a layered wall from solids (forum topic 101): offered for two or more solids or references, none a Lapin wall, when architecture is there. */
+export function wallFromSolidsItems(): MenuItem[] {
+  const nodes = useSession.getState().nodes;
+  const ids = [...new Set(useUi.getState().selected.flatMap((id) => (nodes.get(id)?.type === GROUP ? membersOf(id) : [id])))];
+  if (ids.length < 2 || !ids.every((id) => { const n = nodes.get(id); return !!n?.storeyId && (n.type !== 'IfcWall' || !!n.props.reference); })) return [];
+  const tool = allTools().find((t) => t.id === 'architecture.wallFromSolids');
+  return tool?.run ? [{ label: 'Make a layered wall…', onSelect: () => tool.run!() }] : [];
+}
+
+/** Scale to a known distance… on a selected image or an imported PDF's group (forum 143), when the product has the tool. */
+export function scaleImageItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  const { nodes, relations } = useSession.getState();
+  if (selected.length !== 1 || !nodes.get(selected[0])?.editable || !scalableTrace(selected[0], nodes, relations)) return [];
+  return allTools().some((t) => t.id === SCALE_IMAGE_TOOL) ? [{ label: 'Scale to a known distance…', onSelect: () => startScaleImage(selected[0]) }] : [];
+}
+
+/**
+ * Edit type: the types dialog of the selected element's type, opened on that type (forum topic 176, decision 735): a module's own
+ * editor for the class (`editType`), else the dialog of the tool placing it (the same one Edit types… opens), the type made the
+ * current one.
+ */
+export function editTypeItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  if (selected.length !== 1) return [];
+  const state = useSession.getState();
+  const type = typeOf({ nodes: state.nodes, relations: state.relations }, selected[0]);
+  if (!type) return [];
+  const own = typeEditorOf(type.type);
+  if (own) return [{ label: 'Edit type…', onSelect: () => own(type.id) }];
+  const tool = allTools().find((t) => t.typed?.cls === type.type && t.typed.dialog);
+  if (!tool?.typed?.dialog) return [];
+  const dialog = tool.typed.dialog;
+  return [{ label: 'Edit type…', onSelect: () => { tool.typed!.set(type.id); openTypeDialog(dialog, type.id); } }];
+}
+
+/** Previous selections: the last ten, the newest first, each one a click to select it again. */
+export function historyItems(): MenuItem[] {
+  const nodes = useSession.getState().nodes;
+  const past = previousSelections();
+  if (!past.length) return [];
+  const sub: MenuItem[] = past.map((ids) => ({ label: describeSelection(ids, (id) => nodes.get(id)?.name), raw: true, onSelect: () => reselect(ids) }));
+  return [{ label: 'Previous selections', submenu: sub, onSelect: () => undefined }];
+}
+
+/** Explode a selected parametric roof into editable 3D solids (forum topic 160), when Studio is available. */
+export function explodeRoofItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  if (selected.length !== 1) return [];
+  const n = useSession.getState().nodes.get(selected[0]);
+  if (!n || !n.editable || n.type !== 'IfcRoof') return [];
+  if (!allTools().some((t) => t.id === 'studio.fromElement')) return [];
+  return [{
+    label: 'Explode',
+    onSelect: () => void execute('architecture.explodeRoof', { id: n.id }).then((r) => {
+      const ids = (r as { ids?: string[] } | null)?.ids ?? [];
+      if (ids.length) {
+        useUi.setState({ selected: ids, selection: ids[0] ?? null });
+        notify('Roof exploded into editable 3D solids.');
+      }
+    }),
+  }];
+}
+
+export function selectionItems(): MenuItem[] {
+  const { selected } = useUi.getState();
+  const storeys: MenuItem[] = copyable(selected, useSession.getState().nodes).length ? [
+    { label: 'Copy to storeys…', onSelect: () => useUi.setState({ dialog: 'copyToStoreys' }) },
+    { label: 'Move to storey…', onSelect: () => useUi.setState({ dialog: 'moveToStorey' }) },
+  ] : [];
+  const shop: MenuItem[] = drawableElement(selected, useSession.getState().nodes) ? [{ label: 'Make drawing…', onSelect: () => useUi.setState({ dialog: 'shopDrawing' }) }] : [];
+  return [...offsetMenuItems(), ...scaleImageItems(), ...groupItems(), ...storeys, ...shop, ...wallFromSolidsItems(), ...explodeRoofItems(), ...similarItems(), ...editTypeItems(), ...editSketchItems(), ...historyItems()];
+}
+
+/** The 3D view's temporary Hide and Isolate (HH, HI) for the selection, and Show all (HR) while something is hidden. */
+export function temporaryItems(): MenuItem[] {
+  const items: MenuItem[] = [];
+  if (useUi.getState().selected.length) {
+    items.push({ label: 'Hide', shortcut: 'HH', onSelect: hideSelection }, { label: 'Isolate', shortcut: 'HI', onSelect: isolateSelection });
+  }
+  if (temporaryOn(useTemporary.getState())) items.push({ label: 'Show all', shortcut: 'HR', onSelect: resetTemporary });
+  return items;
+}

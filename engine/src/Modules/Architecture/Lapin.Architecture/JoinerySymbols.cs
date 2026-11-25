@@ -1,0 +1,447 @@
+using Lapin.Platform;
+using Lapin.Geometry;
+
+namespace Lapin.Architecture;
+
+/// <summary>A stroke of a joinery drawing: its points, closed or not, its weight (cut, outline, thin), dashed or not.</summary>
+public sealed record JStroke(IReadOnlyList<Vec2> Pts, string Weight, bool Closed = false, bool Dashed = false);
+
+/// <summary>
+/// The drawings of a joinery type, from its spec (the old Lapin's symbols,
+/// one engine for plans, elevations, sections and the schedule's cards), in
+/// the type's frame: a plan is (x along the wall, y across, +y the exterior),
+/// an elevation (x, z) seen from the interior unless asked otherwise, a
+/// section (y, z) cut at <c>cutX</c>.
+/// <list type="bullet">
+/// <item>Plan: the body sliced at the cut height (frame, mullions and sashes
+/// cut, glass thin), the window boards seen below it, each door leaf open at
+/// 90° to the interior with its swing arc (a double-acting leaf's other swing
+/// dashed; a sliding leaf beside the opening with an arrow; a folding one in two).</item>
+/// <item>Elevation: frame and panel outlines and the opening symbols, dashed
+/// where the panel opens away from the viewer; sliding an arrow. Two
+/// conventions: "handle" (default, the window makers' sketches: the apex at
+/// the handle, a fixed pane crossed) and "hinge" (DIN 1356: the lines meet at
+/// the hinges, fixed panes plain). With hardware: hinges and handles.</item>
+/// <item>Section: the body sliced at <c>cutX</c>, cut parts heavy, glass thin.</item>
+/// </list>
+/// </summary>
+public static class JoinerySymbols
+{
+    static JStroke Rect(double x0, double y0, double x1, double y1, string w, bool dashed = false) =>
+        new([new(x0, y0), new(x1, y0), new(x1, y1), new(x0, y1)], w, true, dashed);
+    static JStroke Line(Vec2 a, Vec2 b, string w, bool dashed = false) => new([a, b], w, false, dashed);
+
+    static JStroke Arc(Vec2 c, double r, double from, double to, string w, bool dashed = false)
+    {
+        return new(Chords.Arc(c, r, from, to - from, 8), w, false, dashed);
+    }
+
+    static List<JStroke> Arrow(Vec2 a, Vec2 b, string w)
+    {
+        var len = Math.Max((b - a).Length, 1e-9);
+        var (ux, uy) = ((b.X - a.X) / len, (b.Y - a.Y) / len);
+        var head = Math.Min(0.08, len / 3);
+        return [Line(a, b, w), new([new(b.X - ux * head - uy * head / 2, b.Y - uy * head + ux * head / 2), b, new(b.X - ux * head + uy * head / 2, b.Y - uy * head - ux * head / 2)], w)];
+    }
+
+    static bool HingeLeft(string op) => op.EndsWith("-left");
+
+    // ─── Plan ──────────────────────────────────────────────────────────────
+
+    static List<JStroke> DoorLeafPlan(JinerySpecView s, JoineryPanel p, CellRect r, int level = PlanDetail.Fine)
+    {
+        var f = s.Spec.Frame;
+        var fl = s.Spec.Frameless;
+        // Frameless glass (tester's question 7): the leaf is the glass, hinged at its interior face.
+        var t = fl?.Glass ?? s.Spec.Sash.LeafThickness;
+        var yIn = fl != null ? f.Offset - fl.Glass / 2 : f.Offset - f.Depth / 2;
+        var w = r.X1 - r.X0;
+        var left = HingeLeft(p.Operation);
+        var op = p.Operation;
+        if (fl != null && op.StartsWith("door-sliding"))
+        {
+            // The glass in front of the panes, past them, and the way it slides.
+            var (q, ys, dir) = (Frameless.PaneRect(s.Spec, p), Frameless.Plane(s.Spec, p), left ? -1 : 1);
+            return [Rect(q.X0, ys - t / 2, q.X1, ys + t / 2, "cut"),
+                .. Arrow(new((q.X0 + q.X1) / 2 - dir * w / 4, ys - t - 0.08), new((q.X0 + q.X1) / 2 + dir * w / 4, ys - t - 0.08), "thin")];
+        }
+        if (Joinery.LiftSlides(op))
+        {
+            // A lift-and-slide (HS) or tilt-and-slide (PSK) leaf (forum topic 34): on its inner track in the frame, cut, and the way
+            // it runs over the fixed pane beside it.
+            var (ty0, ty1) = (f.Offset - f.Depth / 2, f.Offset - f.Depth / 2 + Math.Min(s.Spec.Sash.Depth, f.Depth / 2));
+            var dir = left ? -1 : 1;
+            return [Rect(r.X0, ty0, r.X1, ty1, "cut"),
+                .. Arrow(new((r.X0 + r.X1) / 2 - dir * w / 4, ty0 - 0.08), new((r.X0 + r.X1) / 2 + dir * w / 4, ty0 - 0.08), "thin")];
+        }
+        if (op.StartsWith("door-sliding"))
+        {
+            // It slides along the interior face, towards its side.
+            var dir = left ? -1 : 1;
+            return [Rect(r.X0, yIn - t - 0.01, r.X1, yIn - 0.01, "cut"),
+                .. Arrow(new((r.X0 + r.X1) / 2 - dir * w / 4, yIn - t - 0.08), new((r.X0 + r.X1) / 2 + dir * w / 4, yIn - t - 0.08), "thin")];
+        }
+        if (op.StartsWith("folding"))
+        {
+            // Two halves folded towards the hinge side.
+            var (hx, sg, half) = (left ? r.X0 : r.X1, left ? 1 : -1, w / 2);
+            var fold = new Vec2(hx + sg * half * Math.Cos(Math.PI / 3), yIn - half * Math.Sin(Math.PI / 3));
+            return [Line(new(hx, yIn), fold, "outline"), Line(fold, new(hx + sg * 2 * half * Math.Cos(Math.PI / 3), yIn), "outline")];
+        }
+        if (fl != null && Frameless.OnSpring(s.Spec, p))
+        {
+            // On a floor spring (topic #28): the leaf open at 90° across its pivot, its short end past it, the long side's swing
+            // about the pivot; a double-acting leaf's other swing dashed.
+            var pv = new Vec2(Frameless.PivotX(s.Spec, p), f.Offset);
+            var reach = w - fl.Pivot;
+            var sw = new List<JStroke>
+            {
+                level <= PlanDetail.Coarse ? Line(new(pv.X, pv.Y + fl.Pivot), new(pv.X, pv.Y - reach), "cut") : Rect(pv.X - t / 2, pv.Y - reach, pv.X + t / 2, pv.Y + fl.Pivot, "cut"),
+                left ? Arc(pv, reach, -Math.PI / 2, 0, "thin") : Arc(pv, reach, Math.PI, 1.5 * Math.PI, "thin"),
+            };
+            if (op.StartsWith("double-acting")) sw.Add(left ? Arc(pv, reach, 0, Math.PI / 2, "thin", true) : Arc(pv, reach, Math.PI / 2, Math.PI, "thin", true));
+            return sw;
+        }
+        var hinge = new Vec2(left ? r.X0 : r.X1, yIn);
+        var sgn = left ? 1 : -1;
+        var o = new List<JStroke>
+        {
+            // The leaf open at 90° to the interior: a rectangle from the hinge, cut by the plan (heavy, as the old Lapin drew it);
+            // at LOD 100 a line, the swing alone (decision 405).
+            level <= PlanDetail.Coarse ? Line(hinge, new(hinge.X, hinge.Y - w), "cut") : Rect(hinge.X, hinge.Y - w, hinge.X + sgn * t, hinge.Y, "cut"),
+            left ? Arc(hinge, w, -Math.PI / 2, 0, "thin") : Arc(hinge, w, Math.PI, 1.5 * Math.PI, "thin"),
+        };
+        if (op.StartsWith("double-acting"))
+        {
+            var h2 = new Vec2(hinge.X, fl != null ? f.Offset + fl.Glass / 2 : f.Offset + f.Depth / 2);
+            o.Add(left ? Arc(h2, w, 0, Math.PI / 2, "thin", true) : Arc(h2, w, Math.PI / 2, Math.PI, "thin", true));
+        }
+        return o;
+    }
+
+    sealed record JinerySpecView(JoinerySpec Spec);
+
+    /// <summary>
+    /// A window sash's swing in plan (forum topic 34): the sash open at 90° to the interior and its arc, dashed or solid, as a
+    /// French window or a balcony door's sash is drawn so its sweep into the room shows.
+    /// </summary>
+    static List<JStroke> WindowSwingPlan(JoinerySpec s, JoineryPanel p, CellRect r, bool dashed)
+    {
+        var yIn = s.Frame.Offset - s.Sash.Depth / 2;
+        var w = r.X1 - r.X0;
+        var left = HingeLeft(p.Operation);
+        var hinge = new Vec2(left ? r.X0 : r.X1, yIn);
+        return [Line(hinge, new(hinge.X, yIn - w), "thin", dashed), left ? Arc(hinge, w, -Math.PI / 2, 0, "thin", dashed) : Arc(hinge, w, Math.PI, 1.5 * Math.PI, "thin", dashed)];
+    }
+
+    /// <summary>
+    /// Whether a plan draws a sash's swing, and dashed (forum topic 34): <paramref name="mode"/> "none", "dashed" or "solid" for every
+    /// side-hung sash, "auto" dashed for those reaching the floor (their bottom <see cref="Joinery.ReachesFloor"/> or less over it,
+    /// <paramref name="sill"/> the element's bottom over the floor).
+    /// </summary>
+    public static (bool Draw, bool Dashed) SashSwing(string mode, double sill, CellRect r, string op)
+    {
+        if (!Joinery.SashSwingsInPlan(op)) return (false, false);
+        return mode switch
+        {
+            "dashed" => (true, true),
+            "solid" => (true, false),
+            "auto" => (sill + r.Z0 <= Joinery.ReachesFloor + 1e-9, true),
+            _ => (false, false),
+        };
+    }
+
+    /// <summary>
+    /// The plan at <paramref name="cutZ"/> over the bottom (default: half the height), at a level (decision 405, a view's
+    /// LOD as <see cref="PlanDetail.SymbolsOf"/> gives it): fine, every frame, sash and glass cut and the board; medium (LOD
+    /// 200), the frame and a line for the glass, no sashes or board; coarse (LOD 100), the opening and its swing: a line
+    /// across it on the frame's plane, a door's leaf as a line with its arc.
+    /// </summary>
+    public static List<JStroke> Plan(JoinerySpec s, double? cutZ = null, string windowSwing = "none", int level = PlanDetail.Fine, double? sill = null, string openMode = "auto")
+    {
+        var z = cutZ ?? s.Height / 2;
+        var boxes = Joinery.Boxes(s, open: openMode == "open");
+        var o = new List<JStroke>();
+        if (level <= PlanDetail.Coarse)
+        {
+            var frame = boxes.Where(b => b.Role == "frame" && b.Min.Z <= z && b.Max.Z >= z).ToList();
+            var (fx0, fx1) = frame.Count > 0 ? (frame.Min(b => b.Min.X), frame.Max(b => b.Max.X)) : (-s.Width / 2, s.Width / 2);
+            if (openMode == "closed" || !Joinery.Normalised(s).Any(p => Joinery.IsDoorLeaf(p.Operation))) o.Add(Line(new(fx0, s.Frame.Offset), new(fx1, s.Frame.Offset), "thin"));
+        }
+        else
+            foreach (var b in boxes.Where(b => b.Min.Z <= z && b.Max.Z >= z))
+            {
+                if (b.Role is "handle" or "hardware" or "muntin" || (openMode != "closed" && (b.Role == "leaf" || b.Leaf))) continue;
+                if (level <= PlanDetail.Medium && b.Role is "sash" or "board") continue;
+                // A jamb through a library profile (decision 417): its real outline.
+                if (b.Member is { Upright: true } jamb)
+                {
+                    foreach (var loop in jamb.Outline.Holes.Prepend(jamb.Outline.Outer)) o.Add(new([.. loop.Select(q => { var (a, y) = jamb.On(b, q); return new Vec2(a, y); })], "cut", true));
+                    continue;
+                }
+                // An outline (an arch, a round frame) is cut where the plane crosses it; the glass a line at medium.
+                foreach (var (x0, x1) in JoineryShapes.Spans(b, z))
+                    o.Add(level <= PlanDetail.Medium && b.Role == "glass" ? Line(new(x0, (b.Min.Y + b.Max.Y) / 2), new(x1, (b.Min.Y + b.Max.Y) / 2), "thin")
+                        : Rect(x0, b.Min.Y, x1, b.Max.Y, b.Role == "glass" ? "thin" : "cut"));
+            }
+        if (level >= PlanDetail.Fine)
+            foreach (var b in boxes.Where(b => b.Role == "board" && b.Max.Z < z)) o.Add(Rect(b.Min.X, b.Min.Y, b.Max.X, b.Max.Y, "outline"));
+        // A floor spring's cover plate, seen on the floor (topic #28).
+        if (level >= PlanDetail.Medium)
+            foreach (var b in boxes.Where(b => b.Underfloor && Math.Abs(b.Max.Z) < 1e-9)) o.Add(Rect(b.Min.X, b.Min.Y, b.Max.X, b.Max.Y, "thin"));
+        // A garage door (topic #48, decision 523): its curtain at the opening, and its tracks, box or open panel dashed overhead.
+        if (GarageDoors.Of(s)) { o.AddRange(GarageDoors.Plan(s, z, level)); return o; }
+        var view = new JinerySpecView(s);
+        if (openMode != "closed")
+        {
+            var swingMode = openMode == "open" && windowSwing == "none" ? "solid" : windowSwing;
+            foreach (var p in Joinery.Normalised(s))
+            {
+                var r = Joinery.PanelRect(s, p);
+                if (r.Z0 > z || r.Z1 < z) continue;
+                if (Joinery.IsDoorLeaf(p.Operation)) o.AddRange(DoorLeafPlan(view, p, r, level));
+                else if (SashSwing(swingMode, sill ?? s.SillHeight, r, p.Operation) is (true, var dashed)) o.AddRange(WindowSwingPlan(s, p, r, dashed));
+            }
+        }
+        return o;
+    }
+
+    // ─── Elevation ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// One panel's opening symbol in its rectangle (seen from the interior); <paramref name="top"/>, a pane following an arched
+    /// head (report #112): its top at x, so the lines meet the arch where the rectangle's top corners would stand.
+    /// </summary>
+    public static List<JStroke> OpeningMarks(string op, CellRect r, bool dashed, string convention = "handle", Func<double, double>? top = null)
+    {
+        var (xm, zm) = ((r.X0 + r.X1) / 2, (r.Z0 + r.Z1) / 2);
+        // A point on the pane's top edge lands on the arch.
+        Vec2 P(double x, double y) => top != null && Math.Abs(y - r.Z1) < 1e-9 ? new(x, top(x)) : new(x, y);
+        var toHandle = convention == "handle";
+        JStroke ApexSide(bool atLeft) => atLeft
+            ? new([P(r.X1, r.Z1), P(r.X0, zm), P(r.X1, r.Z0)], "thin", false, dashed)
+            : new([P(r.X0, r.Z1), P(r.X1, zm), P(r.X0, r.Z0)], "thin", false, dashed);
+        var apexDown = new JStroke([P(r.X0, r.Z1), P(xm, r.Z0), P(r.X1, r.Z1)], "thin", false, dashed);
+        var apexUp = new JStroke([P(r.X0, r.Z0), P(xm, r.Z1), P(r.X1, r.Z0)], "thin", false, dashed);
+        // Hinged on the left: the apex at the hinges (DIN), or across at the handle.
+        JStroke TriangleSide(bool hingeAtLeft) => ApexSide(toHandle ? !hingeAtLeft : hingeAtLeft);
+        var bottom = toHandle ? apexUp : apexDown;
+        var topHung = toHandle ? apexDown : apexUp;
+        var (w, h) = (r.X1 - r.X0, r.Z1 - r.Z0);
+        return op switch
+        {
+            "fixed" => toHandle ? [new([P(r.X0, r.Z0), P(r.X1, r.Z1)], "thin"), new([P(r.X0, r.Z1), P(r.X1, r.Z0)], "thin")] : [],
+            "side-left" or "swing-left" or "double-acting-left" => [TriangleSide(true)],
+            "side-right" or "swing-right" or "double-acting-right" => [TriangleSide(false)],
+            "tilt-turn-left" => [TriangleSide(true), bottom],
+            "tilt-turn-right" => [TriangleSide(false), bottom],
+            "bottom-hung" => [bottom],
+            "top-hung" => [topHung],
+            "pivot-vertical" => [new([P(xm, r.Z0 - 0.02), new(xm, (top?.Invoke(xm) ?? r.Z1) + 0.02)], "thin", false, true), new([P(r.X0, r.Z1), P(xm, zm), P(r.X0, r.Z0)], "thin", false, dashed), new([P(r.X1, r.Z1), P(xm, zm), P(r.X1, r.Z0)], "thin", false, dashed)],
+            "pivot-horizontal" => [new([P(r.X0 - 0.02, zm), P(r.X1 + 0.02, zm)], "thin", false, true), new([P(r.X0, r.Z0), P(xm, zm), P(r.X1, r.Z0)], "thin", false, dashed), new([P(r.X0, r.Z1), P(xm, zm), P(r.X1, r.Z1)], "thin", false, dashed)],
+            "sliding-left" or "door-sliding-left" => Arrow(P(xm + w / 4, zm), P(xm - w / 4, zm), "thin"),
+            "sliding-right" or "door-sliding-right" => Arrow(P(xm - w / 4, zm), P(xm + w / 4, zm), "thin"),
+            "sliding-vertical" => Arrow(P(xm, zm - h / 4), P(xm, zm + h / 4), "thin"),
+            // Lift-and-slide (forum topic 34): the leaf lifts, then runs; tilt-and-slide: it tilts in at the top (the bottom-hung
+            // triangle), then runs.
+            "lift-slide-left" => [.. Arrow(P(xm + w / 4, zm), P(xm - w / 4, zm), "thin"), .. Arrow(P(xm + w / 4, zm - h / 8), P(xm + w / 4, zm), "thin")],
+            "lift-slide-right" => [.. Arrow(P(xm - w / 4, zm), P(xm + w / 4, zm), "thin"), .. Arrow(P(xm - w / 4, zm - h / 8), P(xm - w / 4, zm), "thin")],
+            "tilt-slide-left" => [.. Arrow(P(xm + w / 4, zm), P(xm - w / 4, zm), "thin"), bottom],
+            "tilt-slide-right" => [.. Arrow(P(xm - w / 4, zm), P(xm + w / 4, zm), "thin"), bottom],
+            "folding-left" => toHandle ? OpeningMarks("folding-right", r, dashed, "hinge", top) : [new([P(r.X1, r.Z1), P(xm, zm), P(r.X1, r.Z0)], "thin", false, dashed), new([P(xm, r.Z1), P(r.X0, zm), P(xm, r.Z0)], "thin", false, dashed)],
+            "folding-right" => toHandle ? OpeningMarks("folding-left", r, dashed, "hinge", top) : [new([P(r.X0, r.Z1), P(xm, zm), P(r.X0, r.Z0)], "thin", false, dashed), new([P(xm, r.Z1), P(r.X1, zm), P(xm, r.Z0)], "thin", false, dashed)],
+            _ => [],
+        };
+    }
+
+    static List<JStroke> Hardware(JoinerySpec s, JoineryPanel p, CellRect r, JoineryPair? pair = null)
+    {
+        var op = p.Operation;
+        var o = new List<JStroke>();
+        const double hw = 0.016, hl = 0.09;
+        var leaf = Joinery.IsDoorLeaf(op);
+        if (Joinery.SwingsInPlan(op))
+        {
+            var x = HingeLeft(op) ? r.X0 : r.X1 - hw;
+            double[] zs = leaf ? [r.Z0 + 0.25, (r.Z0 + r.Z1) / 2 + 0.2, r.Z1 - 0.25] : [r.Z0 + 0.12, r.Z1 - 0.12 - hl];
+            foreach (var z in zs) o.Add(Rect(x, z, x + hw, z + hl, "outline"));
+        }
+        if (op == "bottom-hung" || op.StartsWith("tilt-turn")) foreach (var x in new[] { r.X0 + 0.1, r.X1 - 0.1 - hl }) o.Add(Rect(x, r.Z0, x + hl, r.Z0 + hw, "outline"));
+        if (op == "top-hung") foreach (var x in new[] { r.X0 + 0.1, r.X1 - 0.1 - hl }) o.Add(Rect(x, r.Z1 - hw, x + hl, r.Z1, "outline"));
+        // The handle: a lever on the side opposite the hinges.
+        var sw = s.Sash.Width / 2;
+        var style = Joinery.HandleStyle(s, op);
+        void HandleAt(double x, double z, double dir)
+        {
+            switch (style)
+            {
+                case "none": return;
+                case "knob": o.Add(Arc(new(x, z), 0.03, 0, 2 * Math.PI, "outline")); o.Add(Arc(new(x, z), 0.012, 0, 2 * Math.PI, "thin")); return;
+                case "pull": { var len = leaf ? 0.6 : 0.25; o.Add(Rect(x - 0.0125, z - len / 2, x + 0.0125, z + len / 2, "outline")); return; }
+                case "window": o.Add(Rect(x - 0.016, z - 0.04, x + 0.016, z + 0.04, "outline")); o.Add(Rect(x - 0.011, z - 0.12, x + 0.011, z + 0.01, "outline")); return;
+                default: o.Add(Arc(new(x, z), 0.026, 0, 2 * Math.PI, "outline")); o.Add(Rect(Math.Min(x, x + dir * 0.13), z - 0.01, Math.Max(x, x + dir * 0.13), z + 0.01, "outline")); return;
+            }
+        }
+        // The passive leaf of a pair with a meeting setting (decision 466): no handle, its flush bolts at the top and bottom by the meeting edge.
+        if (pair != null && s.Meeting != null && pair.Passive == p)
+        {
+            if (s.Meeting.Bolts)
+            {
+                var left = pair.Left == p;
+                var edge = left ? r.X1 - 0.032 : r.X0 + 0.012;
+                foreach (var z in new[] { r.Z0 + 0.03, r.Z1 - 0.23 }) o.Add(Rect(edge, z, edge + 0.02, z + 0.2, "outline"));
+            }
+            return o;
+        }
+        var zh = leaf ? Math.Min(r.Z0 + 1.05, r.Z1 - 0.2) : (r.Z0 + r.Z1) / 2;
+        var slides = op.StartsWith("sliding") || op.StartsWith("door-sliding");
+        // A lift-and-slide leaf's long lever on the stile it is pulled by (forum topic 34).
+        if (Joinery.LiftSlides(op)) { HandleAt(op.EndsWith("-left") ? r.X1 - sw : r.X0 + sw, zh, 1); return o; }
+        if (op.EndsWith("-left") && !slides) HandleAt(r.X1 - sw, zh, -1);
+        else if (op.EndsWith("-right") && !slides) HandleAt(r.X0 + sw, zh, 1);
+        else if (op == "bottom-hung") HandleAt((r.X0 + r.X1) / 2, r.Z1 - sw, 1);
+        else if (op == "top-hung") HandleAt((r.X0 + r.X1) / 2, r.Z0 + sw, 1);
+        return o;
+    }
+
+    /// <summary>The outline's strokes and what only a shaped type has: the head's inner curve and transom, a round window's ring, the bars of either, the glazing bars.</summary>
+    static IEnumerable<JStroke> ShapeLines(JoinerySpec s)
+    {
+        yield return new(JoineryShapes.Outline(s, 0, 0), "outline", true);
+        var fw = s.Frame.Width;
+        if (JoineryShapes.Ringed(s)) yield return new(JoineryShapes.Outline(s, fw), "outline", true);
+        // Without the transom the panes draw their own outlines under the arch (report #112).
+        else if (JoineryShapes.Headed(s) && !JoineryShapes.ArchedPanes(s))
+        {
+            var zs = JoineryShapes.Spring(s);
+            var t = Math.Max(s.Frame.Transom, 0.02);
+            List<Vec2> fan = [new(s.Width / 2 - fw, zs), .. JoineryShapes.Head(s, fw).Where(p => p.Y > zs + 1e-6), new(-s.Width / 2 + fw, zs)];
+            yield return new(fan, "outline", true);
+            yield return Line(new(-s.Width / 2 + fw, zs - t), new(s.Width / 2 - fw, zs - t), "outline");
+        }
+        foreach (var b in Joinery.Boxes(s).Where(b => b.Profile != null && b.Holes == null && b.Role is "frame" or "muntin" && (b.Max.X - b.Min.X < s.Width * 0.9 || b.Role == "muntin")))
+            yield return new(b.Profile!, "thin", true);
+    }
+
+    public static List<JStroke> Elevation(JoinerySpec s, bool exterior = false, string convention = "handle", bool hardware = false)
+    {
+        var shaped = JoineryShapes.Shaped(s) || s.Muntins is { Pattern: not "none" };
+        var o = shaped ? ShapeLines(s).ToList() : [Rect(-s.Width / 2, 0, s.Width / 2, s.Height, "outline")];
+        if (JoineryShapes.Ringed(s)) return exterior ? o.Select(x => x with { Pts = x.Pts.Select(q => new Vec2(-q.X, q.Y)).ToList() }).ToList() : o;
+        var pairs = Joinery.Meetings(s);
+        foreach (var p in Joinery.Normalised(s))
+        {
+            var r = Joinery.PanelRect(s, p);
+            // A pane following an arched head (report #112) is drawn by its outline, each inset of it too.
+            JStroke Loop(double inset, string w) => JoineryShapes.PaneOutline(s, r, inset) is { } loop ? new(loop, w, true) : Rect(r.X0 + inset, r.Z0 + inset, r.X1 - inset, r.Z1 - inset, w);
+            o.Add(Loop(0, "outline"));
+            var sash = s.Frameless == null && p.Operation != "fixed" && (!Joinery.IsDoorLeaf(p.Operation) || Joinery.InfillOf(p) == "glass" || Joinery.LiftSlides(p.Operation));
+            var sw = sash ? s.Sash.Width : 0;
+            if (sash) o.Add(Loop(sw, "thin"));
+            // An opaque panel in a window's pane or a fixed side panel (decision 370): its moulding, a rectangle inside.
+            if (Joinery.InfillOf(p) == "solid" && !Joinery.IsDoorLeaf(p.Operation))
+            {
+                var g = Math.Min(0.06, Math.Min(r.X1 - r.X0 - 2 * sw, r.Z1 - r.Z0 - 2 * sw) / 6);
+                o.Add(Loop(sw + g, "thin"));
+            }
+            if (GarageDoors.Is(p.Operation)) { o.AddRange(GarageDoors.Elevation(s, exterior)); continue; }
+            o.AddRange(OpeningMarks(p.Operation, r, exterior, convention, JoineryShapes.PaneTop(s, r)));
+            if (hardware && s.Frameless == null) o.AddRange(Hardware(s, p, r, pairs.FirstOrDefault(m => m.Left == p || m.Right == p)));
+        }
+        // An astragal on the active leaf's room face (decision 466): seen from inside, the strip over the joint.
+        if (!exterior && s.Meeting is { } meet)
+            foreach (var pair in pairs.Where(m => m.Kind == "astragal"))
+            {
+                var r = Joinery.PanelRect(s, pair.Right);
+                o.Add(Rect(r.X0 - meet.WidthOf / 2, r.Z0, r.X0 + meet.WidthOf / 2, r.Z1, "thin"));
+            }
+        // Frameless glass (tester's question 7): no frame, so the opening's outline is the wall's; the fittings, track and handles are what shows.
+        if (s.Frameless != null)
+        {
+            // A floor spring under the floor dashed, its pivot's axis dashed up the leaf (topic #28).
+            foreach (var b in Joinery.Boxes(s).Where(b => b.Role is "hardware" || (hardware && b.Role is "handle")))
+                o.Add(b.Underfloor ? Rect(b.Min.X, b.Min.Z, b.Max.X, b.Max.Z, "thin", true) : Rect(b.Min.X, b.Min.Z, b.Max.X, b.Max.Z, "outline"));
+            foreach (var p in Joinery.Normalised(s).Where(p => Frameless.OnSpring(s, p)))
+            {
+                var x = Frameless.PivotX(s, p);
+                o.Add(Line(new(x, 0), new(x, s.Height), "thin", true));
+            }
+        }
+        if (s.Kind == "window" && s.Board.Exterior > 0 && exterior) o.Add(Rect(-s.Width / 2 - 0.03, -0.04, s.Width / 2 + 0.03, 0, "outline"));
+        // A door's window part over a parapet panel (forum topic 34): its sill board outside.
+        if (s.IsDoor && exterior)
+            foreach (var b in Joinery.Boxes(s).Where(b => b.Role == "board" && b.Min.Y > s.Frame.Offset)) o.Add(Rect(b.Min.X, b.Min.Z, b.Max.X, b.Max.Z, "outline"));
+        return exterior ? o.Select(x => x with { Pts = x.Pts.Select(q => new Vec2(-q.X, q.Y)).ToList() }).ToList() : o;
+    }
+
+    // ─── Dressings ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// The dressings (shutters, grille, window box, canopy) in one of the configurator's drawings, for a wall
+    /// <paramref name="thickness"/> thick: "elevation" (from inside: only what is on the interior face), "exterior"
+    /// (from outside, mirrored like its elevation), "plan" (their outlines, cut where they cross the cut), "section" (cut at <paramref name="cutX"/>).
+    /// </summary>
+    public static List<JStroke> Dressings(JoinerySpec s, double thickness, string view, double cutX = 0)
+    {
+        var o = new List<JStroke>();
+        var faces = WindowDressings.Of(s, thickness);
+        if (view == "plan")
+        {
+            foreach (var (kind, x0, x1, y0, y1) in Openings.DressingPlan(s, thickness, Openings.PlanCut - s.SillHeight))
+                o.Add(Rect(x0, y0, x1, y1, kind == "heavy" ? "cut" : "thin", kind == "overhead"));
+            return o;
+        }
+        foreach (var piece in WindowDressings.Pieces(s, faces))
+        {
+            foreach (var b in piece.Boxes)
+            {
+                if (view == "section") { foreach (var (z0, z1) in JoineryShapes.Spans(b, cutX, vertical: true)) o.Add(Rect(b.Min.Y, z0, b.Max.Y, z1, "cut")); continue; }
+                // From inside, only what stands on the interior face shows (the rest is behind the glass or the wall).
+                if (view == "elevation" && b.Max.Y > faces.In + 1e-6) continue;
+                if (b.Profile is { } outline)
+                {
+                    foreach (var loop in (b.Holes ?? []).Prepend(outline))
+                        o.Add(new(view == "exterior" ? loop.Select(q => new Vec2(-q.X, q.Y)).ToList() : loop.ToList(), "thin", true));
+                    continue;
+                }
+                o.Add(view == "exterior" ? Rect(-b.Max.X, b.Min.Z, -b.Min.X, b.Max.Z, "thin") : Rect(b.Min.X, b.Min.Z, b.Max.X, b.Max.Z, "thin"));
+            }
+            if (piece.Swept is { } sw)
+            {
+                if (view == "section" && sw.X0 <= cutX && sw.X1 >= cutX) o.Add(new(sw.Profile.Select(q => new Vec2(q.Y, q.Z)).ToList(), "cut", true));
+                else if (view == "exterior") o.Add(Rect(-sw.X1, sw.Profile.Min(q => q.Z), -sw.X0, sw.Profile.Max(q => q.Z), "outline"));
+            }
+        }
+        return o;
+    }
+
+    // ─── Section ───────────────────────────────────────────────────────────
+
+    /// <summary>Where the section is cut by default: through the middle of the first column's panel.</summary>
+    public static double SectionCut(JoinerySpec s)
+    {
+        var first = Joinery.Normalised(s).FirstOrDefault(p => p.Col == 0);
+        return first != null ? (Joinery.PanelRect(s, first).X0 + Joinery.PanelRect(s, first).X1) / 2 : 0;
+    }
+
+    public static List<JStroke> Section(JoinerySpec s, double? cutX = null)
+    {
+        var x = cutX ?? SectionCut(s);
+        // Cut where the plane crosses; the handles beside it seen (report #48), in front of the panel they turn.
+        var boxes = Joinery.Boxes(s);
+        var o = boxes.Where(b => b.Role is not ("handle" or "hardware" or "muntin") && b.Min.X <= x && b.Max.X >= x)
+            .SelectMany(b => b.Member is { Upright: false } m
+                // A head or sill through a library profile (decision 417): its real outline.
+                ? m.Outline.Holes.Prepend(m.Outline.Outer).Select(loop => new JStroke([.. loop.Select(q => { var (z, y) = m.On(b, q); return new Vec2(y, z); })], "cut", true))
+                : JoineryShapes.Spans(b, x, vertical: true).Select(z => Rect(b.Min.Y, z.A, b.Max.Y, z.B, b.Role == "glass" ? "thin" : "cut"))).ToList();
+        foreach (var b in boxes.Where(b => b.Role is "handle" or "hardware"))
+            o.Add(Rect(b.Min.Y, b.Min.Z, b.Max.Y, b.Max.Z, "outline"));
+        return o;
+    }
+
+    public static (Vec2 Min, Vec2 Max) Bounds(IEnumerable<JStroke> strokes)
+    {
+        var pts = strokes.SelectMany(s => s.Pts).ToList();
+        return (new Vec2(pts.Min(p => p.X), pts.Min(p => p.Y)), new Vec2(pts.Max(p => p.X), pts.Max(p => p.Y)));
+    }
+}

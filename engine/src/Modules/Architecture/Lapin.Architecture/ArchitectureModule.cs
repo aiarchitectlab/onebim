@@ -1,0 +1,1918 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Architecture.Roofs;
+using Lapin.Platform;
+
+namespace Lapin.Architecture;
+
+/// <summary>Architecture: layered walls and their types.</summary>
+public sealed class ArchitectureModule : ILapinModule, IViewAnnotations
+{
+    public string Id => "architecture";
+    public string Name => "Architecture";
+
+    static JoinerySpec? JsonSpec(JsonNode? n) => JoinerySpec.From(n);
+
+    /// <summary>A type's grid for the pane editor: its inner rectangle, each column's and row's extent (X along, Z up).</summary>
+    static JsonObject GridJson(JoinerySpec s)
+    {
+        var (cols, rows) = Joinery.Grid(s);
+        var inner = Joinery.InnerRect(s);
+        static JsonArray Pairs(List<(double A, double B)> l) => new(l.Select(x => (JsonNode)new JsonArray(x.A, x.B)).ToArray());
+        static JsonArray Numbers(IEnumerable<double> l) => new(l.Select(x => (JsonNode)x).ToArray());
+        // Each boundary's own mullion and transom (decision 466), and where two leaves meet with none: which boundary, the active and passive columns, how.
+        var pairs = Joinery.Meetings(s);
+        return new JsonObject
+        {
+            ["inner"] = new JsonArray(inner.X0, inner.X1, inner.Z0, inner.Z1), ["cols"] = Pairs(cols), ["rows"] = Pairs(rows),
+            ["mullions"] = Numbers(Joinery.MullionWidths(s)), ["transoms"] = Numbers(Joinery.TransomWidths(s)),
+            ["meetings"] = new JsonArray(Enumerable.Range(0, Math.Max(0, cols.Count - 1)).Select(i => (JsonNode)pairs.Any(p => p.Boundary == i)).ToArray()),
+            ["pairs"] = new JsonArray(pairs.Select(p => (JsonNode)new JsonObject { ["boundary"] = p.Boundary, ["active"] = p.Active.Col, ["passive"] = p.Passive.Col, ["kind"] = p.Kind }).ToArray()),
+        };
+    }
+
+    /// <summary>A drawing's strokes as the interface draws them: points, weight (cut, outline, thin), closed, dashed.</summary>
+    static JsonObject Strokes(IEnumerable<JStroke> strokes) => new()
+    {
+        ["strokes"] = new JsonArray(strokes.Select(st => (JsonNode)new JsonObject
+        {
+            ["pts"] = new JsonArray(st.Pts.Select(p => (JsonNode)new JsonArray(p.X, p.Y)).ToArray()),
+            ["weight"] = st.Weight, ["closed"] = st.Closed, ["dashed"] = st.Dashed,
+        }).ToArray()),
+    };
+
+    /// <summary>
+    /// On an elevation, the opening symbols of the doors and windows whose
+    /// exterior faces the eye (docs/simboluri-tamplarie.md): dashed, as seen
+    /// from outside; over the frames the drawing already has; none for one
+    /// something stands in front of, or hidden by the view. The view's
+    /// <c>openingSymbols</c> turns them off.
+    /// </summary>
+    public IEnumerable<ViewMark> Marks(ViewContext c) =>
+        (c.Kind == "plan" ? FloorSlopes.Marks(c).Concat(OpeningMarkers.Marks(c)).Concat(Rooms.Marks(c)).Concat(Stairs.StairMarks.Marks(c)).Concat(Stairs.RampMarks.Marks(c)).Concat(Balconies.BalconyModule.Marks(c)).Concat(ColorSchemes.Legends(c)) : ElevationSymbols(c).Concat(ColorSchemes.Legends(c)))
+            .Concat(c.Kind == "3d" ? [] : Drainage.Marks(c));
+
+    IEnumerable<ViewMark> ElevationSymbols(ViewContext c)
+    {
+        if (c.Kind != "elevation" || c.View.Str("openingSymbols") == "hide") yield break;
+        var m = c.Model;
+        var (convention, _) = Joinery.SymbolSettings(m);
+        var hiddenElements = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        foreach (var fill in m.OfClass(IfcClass.Door).Concat(m.OfClass(IfcClass.Window)))
+        {
+            if (hiddenElements.Contains(fill.Id) || graphics.Hides(fill)) continue;
+            Openings.WallFrame f;
+            Openings.Placed p;
+            JoinerySpec spec;
+            HashSet<string> own;
+            // A curtain wall's door (report #133): in its cell's frame, as its body is drawn.
+            if (CurtainCells.SeatOf(m, fill) is { } seat)
+            {
+                if (seat.Problem != null || seat.Spec == null || hiddenElements.Contains(seat.Wall.Id)) continue;
+                (f, p, spec, own) = (seat.Frame, seat.Placed, seat.Spec, [fill.Id, seat.Wall.Id]);
+            }
+            else
+            {
+                if (Openings.OpeningOf(m, fill.Id) is not { } opening || Openings.WallOf(m, opening.Id) is not { } wall || Openings.SpecOf(m, fill.Id) is not { } ws) continue;
+                if (hiddenElements.Contains(wall.Id)) continue;
+                p = Openings.Place(m, opening);
+                f = Openings.FrameOf(m, wall, p.Along);
+                (spec, own) = (ws, [fill.Id, wall.Id, opening.Id]);
+            }
+            var sx = fill.Bool("flipHand") ? -1 : 1;
+            var sy = fill.Bool("flipSide") ? -1 : 1;
+            // The exterior is the wall's right (its left when the side is flipped): the symbol shows where that faces the eye.
+            var outward = f.Left * -sy;
+            if (Vec3.Dot(new Vec3(outward.X, outward.Y, 0), c.Frame.Dir) > -0.5) continue;
+            var yExt = sy > 0 ? f.YMin : f.YMax;
+            Vec3 W(double x, double z) => f.At(p.Along + sx * x, yExt, p.FillSill + z);
+            // Beyond the elevation's reach, or before its marker's line when that clips it (decision 460): no symbol.
+            if (!ElevationMarkers.Sees(c, W(0, spec.Height / 2)) || c.Occluded(W(0, spec.Height / 2), own)) continue;
+            var mark = new ViewMark(fill.Id);
+            // A round window is one fixed light: no opening symbol.
+            foreach (var panel in JoineryShapes.Ringed(spec) ? [] : Joinery.Normalised(spec))
+            {
+                var r = Joinery.PanelRect(spec, panel);
+                foreach (var st in JoinerySymbols.OpeningMarks(panel.Operation, r, true, convention, JoineryShapes.PaneTop(spec, r)))
+                    mark.Polyline(st.Pts.Select(q => c.Map(W(q.X, q.Y))).ToList(), st.Closed, "JOINERY", 0.18, dash: st.Dashed ? [2, 1.5] : null);
+            }
+            if (mark.Lines.Count > 0) yield return mark;
+        }
+    }
+
+    public void Register(IModuleRegistry r)
+    {
+        // The opening symbols on elevations.
+        r.Service<IViewAnnotations>(this);
+        // Unfolded roof covering plans (2D flat sheet layouts) and their element view role.
+        r.Service<IViewAnnotations>(new RoofUnfoldMarks());
+        r.Service<IElementViewRoles>(new RoofViewRoles());
+        // The Wall types dialog's preview: the type in a sample wall with a T joined to it (decision 529).
+        r.Service<ITypePreview>(new WallTypePreview());
+        // A wall's kept reference line, told to the interface (decision 685).
+        r.Service<INodeProps>(new WallReference.Props());
+        // The walls' and floors' layers past their edges cutting columns, beams and footings too (forum topic 89, stage 4).
+        r.Service<ILayerExtentCuts>(new LayerExtents.Cuts());
+        // Drafted linework made walls, floors, rooms and railings (docs/plan-user-extensibility.md §7.4).
+        LineworkConverters.Register(r);
+        JoineryOutlineBoard.Register(r);
+        r.Service<IInstanceMembers>(new RoomInstanceMembers());
+
+        // Door and window markers on a plan: one for each door and window of its storey not yet tagged there ({viewId, doorType?, windowType?}: tag types of the drafting standards).
+        r.Command("tagOpenings", "Tag doors and windows", (ctx, a) =>
+        {
+            var view = ctx.Model.Get((string?)a["viewId"] ?? "") is { Class: Views.Class } v && v.Str("kind") == "plan" ? v
+                : throw new CommandException("Doors and windows are tagged on a plan view of their storey.");
+            return new JsonObject { ["tagged"] = OpeningMarkers.TagAll(ctx, view, (string?)a["doorType"], (string?)a["windowType"]) };
+        });
+        r.Class(new(IfcClass.Wall, "Wall",
+        [
+            // Its own height, shown while it is unconnected; a wall with a top (WallTop) shows its height worked out in its Wall section.
+            new("height", "Height", "length", Min: 0.01, ShowIf: FieldDescriptor.When(WallTop.Key, "")),
+            new("baseOffset", "Base offset", "length"),
+            // Its own finished floor over its base (forum topic 192), over its type's; what sills over the finished floor are measured from.
+            new(OpeningSills.FinishedFloorKey, "Finished floor above base", "length", Min: 0, Max: 1),
+            // Its top's offset: a length (IFC writes it so), set in the Wall section with the top (architecture.setWallTop), never here.
+            new(WallTop.OffsetKey, "Top offset", "length", ShowIf: FieldDescriptor.When(WallTop.OffsetKey, "\u0001never")),
+            new(PathCurve.Key, "Arc rise", "length"),
+            new("cutPriority", "Cut priority", "number", Min: 0, Max: 100),
+            new("roofTop", "Top under a roof", "choice", Choices: RoofTop.Modes),
+            // Its bands' hatch, over its materials' alignment (decision 369): along its axis, or from the view's origin.
+            new("hatchAlign", "Hatch alignment", "choice", Choices: Lapin.Drawing.HatchAlign.ElementChoices),
+            // A free end cut at an angle (a wall recognised from a file that cuts it so): shown on a wall that has one.
+            new(Joins.StartAngle, "Start cut angle", "angle", Min: -Joins.MaxEndAngle, Max: Joins.MaxEndAngle, ShowIf: FieldDescriptor.When(Joins.StartAngle, "!")),
+            new(Joins.EndAngle, "End cut angle", "angle", Min: -Joins.MaxEndAngle, Max: Joins.MaxEndAngle, ShowIf: FieldDescriptor.When(Joins.EndAngle, "!")),
+        ], "#b5654a"));
+        r.Class(new(IfcClass.WallType, "Wall type", [new("mark", "Mark", "text"), new(OpeningSills.FinishedFloorKey, "Finished floor above base", "length", Min: 0, Max: 1)], "#b5654a", Kind: "type"));
+        r.Class(new(IfcClass.OpeningElement, "Opening", [new("width", "Width", "length", Min: 0.01), new("height", "Height", "length", Min: 0.01)], Kind: "element"));
+        r.Class(new(IfcClass.Door, "Door", [], "#c8a27a"));
+        r.Class(new(IfcClass.Window, "Window", [], "#9cc8e8"));
+        r.Class(new(IfcClass.DoorType, "Door type", [], "#c8a27a", Kind: "type"));
+        r.Class(new(IfcClass.WindowType, "Window type", [], "#9cc8e8", Kind: "type"));
+        r.Service<IVoidShapes>(new VoidShapes());
+        r.Service<IIfcElementSets>(new JoineryDataSets());
+        r.Service<IIfcElementSets>(new FloorSpringSets());
+        // A roof's own build-up for its R and U-value (issue #67): its custom layers; a framed roof's rafter zone under them is not counted.
+        Thermal.AddLayers(IfcClass.Roof, (m, roof) =>
+        {
+            var layers = Roofs.Roof.LayersOf(roof);
+            if (layers.Count == 0) return null;
+            var framed = Roofs.Roof.Resolve(roof, m)?.Framed ?? false;
+            IReadOnlyList<string> notes = framed ? ["The rafter zone under the layers (timber and what fills it) is not counted."] : [];
+            return ("roof", layers.Select(l => new ThermalLayerInput(l.DisplayName, l.Material.Length > 0 ? Materials.Find(m, l.Material)?.Id : null, l.Thickness)).ToList(), "element", notes);
+        });
+        r.Service<Lapin.Platform.Coordination.IOpeningVoids>(new ArchitectureVoids());
+        // The openings' boxes a dimension across one reads its height from (report #92, decision 338).
+        r.Service<IWallOpenings>(new ArchitectureWallOpenings());
+        // Openings made from the clash report round an MEP element (decision 293).
+        r.Service<Lapin.Platform.Coordination.IOpeningMaker>(new OpeningMaker());
+        r.Service<IJoineryIfc>(new JoineryIfc());
+        r.Service<IIfcRecognizer>(new ForeignElements());
+        r.Service<ITypeAssigner>(new TypeAssigner());
+        r.Service<Lapin.Platform.Analysis.IAnalyticalElements>(new ArchitectureAnalytical());
+        // A roof window's and dormer's frame on its slope, for their grips (decision 280).
+        r.Service<INodeProps>(new RoofOpeningFrames());
+        r.Service<IStoreyLevels>(new Levels());
+        r.Service<IStoreyCopy>(new StoreyCopies());
+        r.Service<IElementFaces>(new ArchitectureFaces());
+        r.Service<IElementPlacement>(new Roofs.RoofPlacement());
+        r.Service<IElementPlacement>(new WallPlacement());
+        r.Service<IHostedPlacement>(new HostedOpenings());
+        r.Service<IHostedPlacement>(new Roofs.DownpipeHosting());
+        r.Service<IDeletion>(new Roofs.RoofDeletion());
+        // A storey deleted that walls' tops go to: they stand unconnected at the height they had (WallTop).
+        r.Service<IDeletion>(new WallTopDeletion());
+        // Links between elements kept through copies and deletions (audit 15.11.2026): a room's finish, a stair's opening and space, a downpipe's roof.
+        var finishLinks = new RoomFinishLinks();
+        r.Service<ITransformFollowers>(finishLinks);
+        r.Service<IDeletionFollowers>(finishLinks);
+        // A wall's top attached to an element deleted lets go of it, never widening to every roof (docs/plan-attach-to.md, A0).
+        r.Service<IDeletionFollowers>(new AttachedLinks());
+        // A wall's top through element.attachTo / detach / attachments (docs/plan-attach-to.md, A1), over roofTop, roofIds and top.
+        r.Service<IAttachable>(new WallAttach());
+        // A height typed on a wall with a top (the inspector's element.update): a height of its own, the wall unconnected.
+        r.Service<IElementUpdate>(new WallTopDeletion());
+        r.Geometry(IfcClass.Door, (fill, model, _) => Openings.FillGeometry(fill, model));
+        r.Geometry(IfcClass.Window, (fill, model, _) => Openings.FillGeometry(fill, model));
+        r.Geometry(IfcClass.OpeningElement, (opening, model, services) => Openings.BareGeometry(opening, model, services));
+        // A plan cut at its own height draws the doors', windows' and sunshades' symbols at it (audit 22.11.2026).
+        r.Service<IPlanAtCut>(new JoineryPlanAtCut());
+        r.Quantities(IfcClass.Door, (fill, _, model) => FillQuantities(fill, model, "Qto_DoorBaseQuantities"));
+        r.Quantities(IfcClass.Window, (fill, _, model) => FillQuantities(fill, model, "Qto_WindowBaseQuantities"));
+        r.Catalog("joinery", new JsonObject
+        {
+            ["windowOperations"] = new JsonArray(Joinery.WindowOperations.Select(x => (JsonNode)x).ToArray()),
+            ["doorOperations"] = new JsonArray(Joinery.DoorOperations.Select(x => (JsonNode)x).ToArray()),
+            // The profile systems a type starts from, and what may fill a pane (decision 370).
+            ["profileSystems"] = new JsonObject(Joinery.ProfileSystems.Select(kv => new KeyValuePair<string, JsonNode?>(kv.Key, new JsonObject
+            {
+                ["frame"] = JsonSerializer.SerializeToNode(kv.Value.Frame, ArchitectureJson.Default.JoineryFrame),
+                ["sash"] = JsonSerializer.SerializeToNode(kv.Value.Sash, ArchitectureJson.Default.JoinerySash),
+                ["profile"] = JsonSerializer.SerializeToNode(kv.Value.Profile, ArchitectureJson.Default.JoineryProfile),
+            }))),
+            ["infills"] = new JsonArray(Joinery.Infills.Select(x => (JsonNode)x).ToArray()),
+            ["defaultDoor"] = JoinerySpecs.Door.ToJson(),
+            ["defaultWindow"] = JoinerySpecs.Window.ToJson(),
+            // Door presets (decision 466): a double door, no mullion between its leaves, a rebated meeting, the right leaf active.
+            ["doorPresets"] = new JsonObject
+            {
+                ["double"] = JoinerySpecs.DoubleDoor.ToJson(), ["floor-spring"] = JoinerySpecs.FloorSpringDoor.ToJson(),
+                // Garage doors (topic #48, decision 530), indicative sizes.
+                ["garage-sectional"] = JoinerySpecs.SectionalGarageDoor.ToJson(), ["garage-roller"] = JoinerySpecs.RollerGarageDoor.ToJson(),
+                ["garage-up-and-over"] = JoinerySpecs.UpAndOverGarageDoor.ToJson(), ["garage-side-sliding"] = JoinerySpecs.SideSlidingGarageDoor.ToJson(),
+                ["garage-side-hinged"] = JoinerySpecs.SideHingedGarageDoors.ToJson(),
+                // Doors and windows together (forum topic 34): a balcony door with its window, sidelights and a transom, an HS portal,
+                // and a French window (a window: its sashes reach the floor).
+                ["balcony-door-window"] = JoinerySpecs.BalconyDoorWindow.ToJson(), ["door-sidelights"] = JoinerySpecs.DoorWithSidelights.ToJson(),
+                ["lift-slide"] = JoinerySpecs.LiftSlidePortal.ToJson(), ["french-window"] = JoinerySpecs.FrenchWindow.ToJson(),
+            },
+            // Garage doors: their operations, finishes, tracks, and the common sizes (indicative: Australia's and Europe's).
+            ["garage"] = new JsonObject
+            {
+                ["operations"] = new JsonArray(GarageDoors.Operations.Select(x => (JsonNode)x).ToArray()),
+                ["finishes"] = new JsonArray(GarageDoors.Finishes.Select(x => (JsonNode)x).ToArray()),
+                ["tracks"] = new JsonArray(GarageDoors.Tracks.Select(x => (JsonNode)x).ToArray()),
+                ["sizes"] = new JsonArray(GarageDoors.Sizes.Select(z => (JsonNode)new JsonObject { ["region"] = z.Region, ["width"] = z.Width, ["height"] = z.Height }).ToArray()),
+                ["indicative"] = true,
+            },
+            // The floor springs a frameless leaf may hang on (topic #28; indicative): the heaviest and widest leaf, the closing force.
+            ["floorSprings"] = new JsonArray(Frameless.Springs.Select(m => (JsonNode)new JsonObject
+            {
+                ["id"] = m.Id, ["maxMass"] = m.MaxMass, ["maxWidth"] = m.MaxWidth, ["strength"] = m.Strength, ["length"] = m.Length, ["width"] = m.Width, ["depth"] = m.Depth,
+            }).ToArray()),
+            ["meetingKinds"] = new JsonArray(JoineryMeeting.Kinds.Select(x => (JsonNode)x).ToArray()),
+            ["defaultMeeting"] = new JsonObject { ["kind"] = "rebated", ["active"] = "right", ["width"] = JoineryMeeting.DefaultRebate, ["thickness"] = JoineryMeeting.DefaultAstragalThickness, ["bolts"] = true, ["astragalWidth"] = JoineryMeeting.DefaultAstragalWidth },
+            ["shapes"] = new JsonArray(JoineryShapes.Kinds.Select(x => (JsonNode)x).ToArray()),
+            ["headBars"] = new JsonArray(JoineryShapes.HeadBars.Select(x => (JsonNode)x).ToArray()),
+            ["muntins"] = new JsonArray(JoineryShapes.MuntinPatterns.Select(x => (JsonNode)x).ToArray()),
+        });
+
+        // The configurator's preview: the body as boxes (front elevation in X–Z), and why the spec cannot be built.
+        r.Query("joineryPreview", (q, a) =>
+        {
+            var spec = JsonSpec(a["spec"]);
+            if (spec == null) return new JsonObject { ["problem"] = "The configuration is unreadable." };
+            // A door when it has a door leaf, a window when its sashes open and no leaf does (forum topic 34): drawn as what it is.
+            spec = spec with { Kind = Joinery.KindOf(spec) };
+            var (convention, hardware) = Joinery.SymbolSettings(q.Model);
+            var problem = Joinery.Problem(spec);
+            // The drawings show the dressings on a wall this thick (the type's own walls vary: 300 mm unless asked).
+            var wall = Math.Clamp(Json.Number(a["wall"]) ?? 0.3, 0.05, 2);
+            // A bay, bow or box window (report #60): its pieces seen from inside, its own plan, elevations and section.
+            var bay = BayWindows.Projecting(spec);
+            var boxes = problem != null ? [] : bay ? BayWindows.PreviewBoxes(spec, wall) : Joinery.Boxes(spec);
+            return new JsonObject
+            {
+                ["problem"] = problem,
+                ["boxes"] = new JsonArray(boxes.Select(b => (JsonNode)new JsonObject
+                {
+                    ["role"] = b.Role, ["x0"] = b.Min.X, ["x1"] = b.Max.X, ["y0"] = b.Min.Y, ["y1"] = b.Max.Y, ["z0"] = b.Min.Z, ["z1"] = b.Max.Z,
+                    // An outline (an arch, a round frame, a slanting bar) as X, Z pairs, with its holes.
+                    ["profile"] = b.Profile == null ? null : new JsonArray(b.Profile.SelectMany(q => new JsonNode?[] { q.X, q.Y }).ToArray()),
+                    ["holes"] = b.Holes == null ? null : new JsonArray(b.Holes.Select(h => (JsonNode)new JsonArray(h.SelectMany(q => new JsonNode?[] { q.X, q.Y }).ToArray())).ToArray()),
+                }).ToArray()),
+                ["panels"] = new JsonArray(Joinery.Normalised(spec).Select(p =>
+                {
+                    var r = Joinery.PanelRect(spec, p);
+                    return (JsonNode)new JsonObject
+                    {
+                        ["operation"] = p.Operation, ["x0"] = r.X0, ["x1"] = r.X1, ["z0"] = r.Z0, ["z1"] = r.Z1,
+                        ["col"] = p.Col, ["row"] = p.Row, ["colSpan"] = p.ColSpan, ["rowSpan"] = p.RowSpan, ["infill"] = Joinery.InfillOf(p),
+                    };
+                }).ToArray()),
+                // The grid (decision 370): the columns' and rows' extents, mullions and transoms between them, for the pane editor.
+                ["grid"] = problem != null || bay ? null : GridJson(spec),
+                ["ifcType"] = spec.IsDoor ? Joinery.DoorOperation(spec).Type : Joinery.WindowPartitioning(spec).Type,
+                ["kind"] = spec.Kind,
+                // The glass's build-up as read (forum topic 34): its panes and total, in millimetres.
+                ["glazing"] = GlazingBuildUp.Parse(spec.Sash.Glazing) is { } gz ? new JsonObject
+                {
+                    ["thickness"] = Math.Round(gz.Thickness * 1000, 2), ["panes"] = gz.Panes.Count, ["laminated"] = gz.Laminated,
+                } : null,
+                // The drawings (the symbol engine's): the elevation from inside and from outside, the plan, the section.
+                ["drawings"] = problem != null ? null : bay ? new JsonObject
+                {
+                    ["elevation"] = Strokes(BayWindows.Elevation(spec, wall, false, convention, hardware)),
+                    ["exterior"] = Strokes(BayWindows.Elevation(spec, wall, true, convention, hardware)),
+                    ["plan"] = Strokes(BayWindows.PlanStrokes(spec, wall)),
+                    ["section"] = Strokes(BayWindows.Section(spec, wall)),
+                } : new JsonObject
+                {
+                    ["elevation"] = Strokes([.. JoinerySymbols.Elevation(spec, false, convention, hardware), .. JoinerySymbols.Dressings(spec, wall, "elevation")]),
+                    ["exterior"] = Strokes([.. JoinerySymbols.Elevation(spec, true, convention, hardware), .. JoinerySymbols.Dressings(spec, wall, "exterior")]),
+                    ["plan"] = Strokes([.. JoinerySymbols.Plan(spec, windowSwing: Joinery.WindowSwing(q.Model)), .. JoinerySymbols.Dressings(spec, wall, "plan")]),
+                    ["section"] = Strokes([.. JoinerySymbols.Section(spec), .. JoinerySymbols.Dressings(spec, wall, "section", JoinerySymbols.SectionCut(spec))]),
+                },
+                ["symbols"] = new JsonObject { ["convention"] = convention, ["hardware"] = hardware, ["windowSwing"] = Joinery.WindowSwing(q.Model) },
+                // A garage door's room and panels as the engine works them out (topic #48), for the configurator's read-out.
+                ["garage"] = problem != null || !GarageDoors.Of(spec) ? null : new JsonObject
+                {
+                    ["panels"] = GarageDoors.SectionCount(spec), ["headroom"] = GarageDoors.HeadroomOf(spec), ["backroom"] = GarageDoors.BackroomOf(spec), ["sideroom"] = GarageDoors.SideroomOf(spec),
+                },
+            };
+        });
+
+        // The configurator's 3D preview (report #108): the draft in a piece of wall of the project's first wall type, as meshes.
+        r.Query("joineryPreview3d", (q, a) => JsonSpec(a["spec"]) is { } spec
+            ? JoineryPreview3D.Of(spec, q.Model, q.Services)
+            : new JsonObject { ["problem"] = "The configuration is unreadable." });
+
+        // Bay, bow and box windows (report #60): the built-in styles, and the project's own (bayStyles on the project), saved from the configurator.
+        r.Catalog("bayStyles", BayWindows.Catalog());
+        r.Command("saveBayStyle", "Save bay window style", (ctx, a) =>
+        {
+            var spec = JoinerySpec.From(a["spec"]) ?? throw new CommandException("The window's configuration is missing or unreadable.");
+            if (!BayWindows.Projecting(spec)) throw new CommandException("Only a bay, bow or box window is saved as a bay style.");
+            if (Joinery.Problem(spec) is { } problem) throw new CommandException(problem);
+            return new JsonObject { ["styleId"] = ProjectStyles.Save(ctx, "bayStyles", (string?)a["name"] ?? "", (string?)a["styleId"], spec.ToJson(), "bay window") };
+        });
+        r.Command("renameBayStyle", "Rename bay window style", (ctx, a) => { ProjectStyles.Rename(ctx, "bayStyles", (string?)a["styleId"] ?? "", (string?)a["name"] ?? "", "bay window"); return null; });
+        r.Command("deleteBayStyle", "Delete bay window style", (ctx, a) => { ProjectStyles.Delete(ctx, "bayStyles", (string?)a["styleId"] ?? "", "bay window"); return null; });
+
+        // How the opening symbols are drawn, for the project: the convention (handle: the makers' way; hinge: DIN 1356), the hardware.
+        r.Command("joinerySymbols", "Opening symbols", (ctx, a) =>
+        {
+            var project = Spatial.Project(ctx.Model) ?? throw new CommandException("The model has no project.");
+            var attrs = project.CloneAttrs();
+            var o = attrs["joinerySymbols"] as JsonObject ?? [];
+            if ((string?)a["convention"] is { } c) o["convention"] = Joinery.Conventions.Contains(c) ? c : throw new CommandException("The convention is handle or hinge.");
+            if (a["hardware"] is JsonValue hv && hv.TryGetValue<bool>(out var h)) o["hardware"] = h;
+            // Window sashes' swings in plan (forum topic 34): auto, none, dashed, solid.
+            if ((string?)a["windowSwing"] is { } ws) o["windowSwing"] = Joinery.WindowSwings.Contains(ws) ? ws : throw new CommandException("The window swing is auto, none, dashed or solid.");
+            attrs["joinerySymbols"] = o;
+            ctx.Replace(project.With(attrs: attrs));
+            return null;
+        });
+
+        // Floors.
+        r.Class(new(IfcClass.Slab, "Floor", [new("offset", "Top offset", "length"), new("cutPriority", "Cut priority", "number", Min: 0, Max: 100)], "#a8a8a8"));
+        // Cut priorities (the old Lapin's): a slab (60) over a wall (50) cuts its head.
+        r.Cutter(IfcClass.Wall, 50, (wall, model) => Walls.Envelope(wall, model));
+        r.Cutter(IfcClass.Slab, 60, (slab, model) => Slabs.Envelope(slab, model));
+        r.Class(new(IfcClass.SlabType, "Floor type", [], "#a8a8a8", Kind: "type"));
+        r.Geometry(IfcClass.Slab, (slab, model, services) => Slabs.Geometry(slab, model, services));
+        r.Quantities(IfcClass.Slab, Slabs.Quantities);
+
+        LintelProducts.Register(r);
+        CurtainWalls.Register(r);
+        // Sunshades (report #56): canopies, fins, louvres, egg-crates, screens, awnings, pergolas, external blinds.
+        Sunshades.Register(r);
+        // A window's sills as parts of their own for schedules and tags (forum topic 178, decision 736).
+        WindowSills.Register(r);
+        Stairs.StairsModule.Register(r);
+        Stairs.UnderStairs.Register(r);
+        Ceilings.Register(r);
+        Skirtings.Register(r);
+        WallSweeps.Register(r);
+        // A wall's part in split, trim and extend (PathEdits), and floors and ceilings split or trimmed by a line (audit 2026-11-15, §6).
+        r.Service<IPathPieces>(new WallPieces());
+        // Finishes on faces, sunshades and balconies on the part of a wall or floor they fall on (audit §15).
+        r.Service<ISplitFollower>(new HostedParts());
+        OutlineEdits.Register(r);
+        RoomFinishes.Register(r);
+        FinishZones.Register(r);
+        RoomOpenings.Register(r);
+        TypeExchange.Register(r);
+
+        // A floor type; beamBlock (report #134): its beam-and-block rules (null: a layered floor), set in the same step.
+        r.Command("createSlabType", "New floor type", (ctx, a) =>
+        {
+            var type = Slabs.CreateType(ctx, (string?)a["name"], LayerSets.Parse(a["layers"], "A floor type"));
+            if (a["beamBlock"] is JsonObject bb) BeamBlock.Set(ctx, type, BeamBlockSpec.From(bb));
+            return new JsonObject { ["id"] = type.Id };
+        });
+
+        r.Command("updateSlabType", "Change floor type", (ctx, a) =>
+        {
+            var type = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.SlabType);
+            Slabs.UpdateType(ctx, type, (string?)a["name"], a["layers"] is null ? null : LayerSets.Parse(a["layers"], "A floor type"));
+            if (a.ContainsKey("beamBlock")) BeamBlock.Set(ctx, ctx.Model.Get(type.Id)!, a["beamBlock"] is JsonObject bb ? BeamBlockSpec.From(bb) : null);
+            return null;
+        });
+
+        // A beam-and-block floor type (report #134): {id (a floor type), spec (null: a layered floor again)}.
+        r.Command("setBeamBlock", "Beam and block floor", (ctx, a) =>
+        {
+            var type = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.SlabType);
+            BeamBlock.Set(ctx, type, a["spec"] is JsonObject o ? BeamBlockSpec.From(o) : null);
+            return null;
+        });
+
+        // A beam-and-block floor's own span direction: {ids, angle (degrees, the joists' way) | edge (an index of its outline: the joists across it) | neither: the type's}.
+        r.Command("setFloorSpan", "Span direction", (ctx, a) =>
+        {
+            foreach (var id in Ids(a))
+            {
+                var slab = Spatial.Require(ctx.Model, id, IfcClass.Slab);
+                var attrs = slab.CloneAttrs();
+                if (Json.Number(a["edge"]) is { } e)
+                {
+                    var c = Slabs.Corners(slab);
+                    var i = (int)e;
+                    if (i < 0 || i >= c.Count) throw new CommandException("The floor has no such edge.");
+                    var d = c[(i + 1) % c.Count] - c[i];
+                    // The joists bear on the edge: they run across it.
+                    var deg = Math.Atan2(d.X, -d.Y) * 180 / Math.PI;
+                    attrs[BeamBlock.SpanKey] = Math.Round(((deg % 180) + 180) % 180, 6);
+                }
+                else if (Json.Number(a["angle"]) is { } angle) attrs[BeamBlock.SpanKey] = Math.Round(((angle % 180) + 180) % 180, 6);
+                else attrs.Remove(BeamBlock.SpanKey);
+                ctx.Replace(slab.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // The user's catalogue of beam-and-block systems from a CSV: {csv} → {names} (each a floor type).
+        r.Command("importBeamBlockTypes", "Import beam and block types", (ctx, a) =>
+            new JsonObject { ["names"] = new JsonArray([.. BeamBlock.ImportCsv(ctx, (string?)a["csv"] ?? "").Select(n => (JsonNode)n)]) });
+
+        // The configurator's preview, from the floor's own layout: {spec}.
+        r.Query("beamBlockPreview", (q, a) => BeamBlock.Preview(BeamBlockSpec.From(a["spec"])));
+        // The indicative presets and the catalogue's CSV template.
+        r.Query("beamBlockPresets", (q, a) => new JsonObject
+        {
+            ["presets"] = new JsonArray([.. BeamBlockSpec.Presets.Select(p => (JsonNode)p.ToJson())]),
+            ["csvTemplate"] = BeamBlock.CsvTemplate(),
+        });
+
+        r.Command("addSlab", "Floor", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var type = (string?)a["typeId"] is { } typeId ? Spatial.Require(ctx.Model, typeId, IfcClass.SlabType) : null;
+            // Inside the walls round a point (forum topic 97): the region they close there, as a room finds it.
+            IReadOnlyList<Vec2> pts;
+            double[]? arcs = null;
+            if (a["points"] == null && a["x1"] == null && Json.Number(a["x"]) != null)
+            {
+                var (region, problem) = RoomBounds.At(ctx.Model, ctx.Services, storeyId, Args.Point(a, "x", "y"));
+                pts = region?.Outer ?? throw new CommandException(problem ?? "No walls close round that point: draw the floor's outline.");
+            }
+            else (pts, arcs) = Slabs.OutlineArg(a["arcs"], Points(a));
+            var slab = Slabs.Add(ctx, storeyId, pts, Json.Number(a["offset"]) ?? 0, type, arcs);
+            // Its elliptical edges (audit S4, {ellipses: [{c, m, ratio, ccw} | null…]}) and its holes ({holes: [[[x, y]…]…], holeArcs?}).
+            if (a[OutlineHoles.Key] != null || a[EllipseEdge.Key] != null)
+            {
+                var withHoles = slab.CloneAttrs();
+                Slabs.SetEllipses(withHoles, a, null);
+                OutlineHoles.Apply(withHoles, a);
+                ctx.Replace(slab.With(attrs: withHoles));
+            }
+            return new JsonObject { ["id"] = slab.Id };
+        });
+
+        // An outline's corner rounded (a fillet tangent to its two straight edges) or cut straight across, or an edge bent into an
+        // arc or made straight (forum topic 97): a floor, a floor opening or a ceiling. {id, index (the corner; the edge from it),
+        // radius | distance | rise (m off the chord at its middle, left of the edge's way positive; 0 straight)}.
+        r.Command("roundCorner", "Fillet corner", (ctx, a) =>
+        {
+            var (e, corners, rises) = OutlineOf(ctx, a);
+            var (c, r2) = ArcOutline.Fillet(corners, rises, Index(a, corners.Count), Json.Number(a["radius"]) ?? throw new CommandException("What radius? A length in metres."));
+            ReplaceOutline(ctx, e, corners, c, r2, OutlineHoles.Index(a, e));
+            return null;
+        });
+        r.Command("chamferCorner", "Chamfer corner", (ctx, a) =>
+        {
+            var (e, corners, rises) = OutlineOf(ctx, a);
+            var (c, r2) = ArcOutline.Chamfer(corners, rises, Index(a, corners.Count), Json.Number(a["distance"]) ?? throw new CommandException("What distance? A length in metres."));
+            ReplaceOutline(ctx, e, corners, c, r2, OutlineHoles.Index(a, e));
+            return null;
+        });
+        r.Command("setEdgeArc", "Edge arc", (ctx, a) =>
+        {
+            var (e, corners, rises) = OutlineOf(ctx, a);
+            var i = Index(a, corners.Count);
+            var next = rises?.ToArray() ?? new double[corners.Count];
+            next[i] = Json.Number(a["rise"]) ?? 0;
+            ReplaceOutline(ctx, e, corners, corners, next, OutlineHoles.Index(a, e));
+            return null;
+        });
+
+        // The outline the walls close round a point (audit S4, the outline tools' "Inside walls"): {storeyId?, x, y} → {points}, the
+        // region a room would find there, up to the walls' faces; refused, saying why, when nothing closes round it.
+        r.Query("outlineInside", (q, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(q.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var (region, problem) = RoomBounds.At(q.Model, q.Services, storeyId, Args.Point(a, "x", "y"));
+            if (region == null) throw new CommandException(problem ?? "No walls close round that point.");
+            return new JsonObject { ["points"] = Slabs.ContourJson(region.Outer) };
+        });
+
+        // The building's outline on a storey (forum topic 158, the Floor tool's "Trace building"): {storeyId?, at?: [x, y]} →
+        // {points, arcs?, walls, area}: the exterior face of the core of the walls enclosing the building (BuildingTrace); refused,
+        // naming the gap, when they do not close. The preview and the floor come from the same code.
+        r.Query("buildingOutline", (q, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(q.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var traced = Traced(q.Model, q.Services, storeyId, a["at"]);
+            var o = new JsonObject { ["points"] = Slabs.ContourJson(traced.Corners), ["walls"] = new JsonArray(traced.Walls.Select(id => (JsonNode)id).ToArray()), ["area"] = traced.Area };
+            if (traced.Rises != null) o["arcs"] = new JsonArray(traced.Rises.Select(x => (JsonNode)x).ToArray());
+            return o;
+        });
+        // A floor on that outline: {storeyId?, at?, typeId?, offset?} → {id}; one undo step, as a floor drawn.
+        r.Command("addFloorFromBuilding", "Floor", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var type = (string?)a["typeId"] is { } typeId ? Spatial.Require(ctx.Model, typeId, IfcClass.SlabType) : null;
+            var traced = Traced(ctx.Model, ctx.Services, storeyId, a["at"]);
+            var slab = Slabs.Add(ctx, storeyId, traced.Corners, Json.Number(a["offset"]) ?? 0, type, traced.Rises);
+            return new JsonObject { ["id"] = slab.Id };
+        });
+
+        // A hole in a floor's or a ceiling's own outline (audit S4): {id? (the floor or ceiling; else the floor, then the ceiling, of
+        // the storey that holds the loop), storeyId?, points, arcs?} → {id}; {id, hole} takes one away. One undo step each.
+        r.Command("addOutlineHole", "Hole in outline", (ctx, a) =>
+        {
+            var pts = Points(a);
+            var e = (string?)a["id"] is { } id ? ctx.Model.Get(id) ?? throw new CommandException("The element is not in the project.")
+                : ctx.Model.OfClass(IfcClass.Slab).Concat(ctx.Model.OfClass(Ceilings.Class))
+                    .FirstOrDefault(x => ((string?)a["storeyId"] == null || Spatial.StoreyOf(ctx.Model, x.Id)?.Id == (string?)a["storeyId"]) && !StoredBodies.Has(x) && OutlineHoles.Holds(x, pts))
+                  ?? throw new CommandException("Draw the hole inside a floor or a ceiling.");
+            if (!(e.Class == IfcClass.Slab || e.Class == Ceilings.Class)) throw new CommandException("Only a floor or a ceiling has holes of its own here.");
+            if (StoredBodies.Has(e) || e.Attrs["reference"] != null) throw new CommandException("An element kept as it came from its file is not edited by its outline.");
+            ctx.Replace(e.With(attrs: OutlineHoles.Added(e, a)));
+            return new JsonObject { ["id"] = e.Id };
+        });
+        r.Command("removeOutlineHole", "Remove hole", (ctx, a) =>
+        {
+            var e = ctx.Model.Get((string?)a["id"] ?? "") ?? throw new CommandException("The element is not in the project.");
+            var k = OutlineHoles.Index(a, e) ?? throw new CommandException("Which hole? Its index, from 0.");
+            ctx.Replace(e.With(attrs: OutlineHoles.Removed(e, k)));
+            return null;
+        });
+
+        r.Command("updateSlab", "Change floor", (ctx, a) =>
+        {
+            var slab = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Slab);
+            var attrs = slab.CloneAttrs();
+            if (a["points"] != null || a["x1"] != null)
+            {
+                var (contour, arcs) = Slabs.OutlineArg(a["arcs"], Points(a), slab);
+                Slabs.SetOutline(attrs, contour, arcs);
+                Slabs.SetEllipses(attrs, a, slab);
+                RemapExtents(slab, attrs, contour);
+                // Its edge slopes and corners' heights on the edges it keeps (docs/plan-floor-slopes.md).
+                if (attrs[FloorSlopes.Key] is JsonObject surface) TopSurface.RemapEdges(surface, Slabs.Corners(slab), contour);
+            }
+            // Its holes given, or kept and checked against the outline as it now is (audit S4).
+            if (a[OutlineHoles.Key] != null || a["points"] != null || a["x1"] != null) OutlineHoles.Apply(attrs, a);
+            if (Json.Number(a["offset"]) is { } offset) attrs["offset"] = offset;
+            ctx.Replace(slab.With(attrs: attrs));
+            return null;
+        });
+
+        // A layer's extent past an edge of its wall or floor, or short of it (forum topic 89, docs/plan-layer-extents.md):
+        // {id | ids, layer (its index in the layer set), edge (a wall's start, end, bottom or top; a floor's outline, or edge with
+        // index, its contour's edge from corner index to the next), offset (m; positive past the edge, negative short of it; 0 takes
+        // the extent away), cuts? (whether the piece past the edge cuts the walls and floors it meets; kept when not given: false,
+        // true, or "order": only the elements its own outranks by the cut order, stage 4), inherit? (true: the element's own extent
+        // there taken away, so its type's applies)}. A wall type or a floor type takes the extents its elements start with (a floor
+        // type all round only); an element's own offset of 0 where its type has one keeps that layer at the edge.
+        r.Command("setLayerExtent", "Layer extent", (ctx, a) =>
+        {
+            var ids = (string?)a["id"] is { } one ? [one] : Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Which wall or floor?");
+            var layer = Json.Number(a["layer"]) is { } l && l >= 0 && l == Math.Floor(l) ? (int)l : throw new CommandException("Which layer? Its index in the layer set, from 0.");
+            var edge = (string?)a["edge"] ?? throw new CommandException("Which edge?");
+            var inherit = a["inherit"] is JsonValue iv && iv.TryGetValue<bool>(out var ib) && ib;
+            var offset = Json.Number(a["offset"]) ?? (inherit ? 0 : throw new CommandException("How far? An offset in metres: past the edge positive, short of it negative."));
+            if (!double.IsFinite(offset) || Math.Abs(offset) > LayerExtents.MaxOffset) throw new CommandException($"A layer reaches at most {LayerExtents.MaxOffset * 1000:0} mm past or short of its edge.");
+            int? index = Json.Number(a["index"]) is { } ix ? (int)ix : null;
+            foreach (var id in ids)
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("The element is not in the project.");
+                LayerExtentCheck(ctx.Model, e, layer, edge, ref index);
+                var list = LayerExtents.Of(e);
+                var place = new LayerExtents.Extent(layer, edge, index, 0, false);
+                var fromType = LayerExtents.TypeOf(ctx.Model, e) is { } type ? LayerExtents.Of(type).FirstOrDefault(x => LayerExtents.SamePlace(x, place)) : null;
+                var was = list.FirstOrDefault(x => LayerExtents.SamePlace(x, place)) ?? fromType;
+                var cuts = LayerExtents.CutsArg(a["cuts"]) ?? was?.Cuts ?? false;
+                var order = a["cuts"] is JsonValue ov ? ov.TryGetValue<string>(out var os) && os == LayerExtents.ByOrder : was?.ByOrder ?? false;
+                var next = inherit ? [.. list.Where(x => !LayerExtents.SamePlace(x, place))]
+                    : LayerExtents.With(list, new LayerExtents.Extent(layer, edge, index, offset, cuts, cuts && order), keepZero: fromType != null);
+                LayerExtentFits(ctx.Model, e, next, layer);
+                var attrs = e.CloneAttrs();
+                if (LayerExtents.ToJson(next) is { } json) attrs[LayerExtents.Key] = json; else attrs.Remove(LayerExtents.Key);
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // A wall's or floor's layers' edges as built now, for the grips of "Edit layers" in plans and sections (forum topic 89,
+        // stage 2): {id} → {layers: [{layer, name, footprint, z0, z1}], grips: [{layer, name, edge, index?, line, dir, offset, own}]}.
+        r.Query("layerEdges", (q, a) => q.Model.Get((string?)a["id"] ?? "") is { } e && !StoredBodies.Has(e) && e.Attrs["reference"] == null ? LayerExtents.Edges(e, q.Model, q.Services) : null);
+
+        // Every layer extent of the walls and floors named taken away: {id | ids}.
+        r.Command("clearLayerExtents", "Clear layer extents", (ctx, a) =>
+        {
+            var ids = (string?)a["id"] is { } one ? [one] : Ids(a).ToList();
+            foreach (var id in ids)
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("The element is not in the project.");
+                if (e.Attrs[LayerExtents.Key] == null) continue;
+                var attrs = e.CloneAttrs();
+                attrs.Remove(LayerExtents.Key);
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // An opening through a floor (a stairwell, a shaft): its outline in plan.
+        r.Command("addSlabOpening", "Floor opening", (ctx, a) =>
+        {
+            var pts = Points(a);
+            // No floor named: the one on the storey whose outline holds the opening's middle.
+            var mid = new Vec2(pts.Average(p => p.X), pts.Average(p => p.Y));
+            var slab = (string?)a["slabId"] is { } sid ? Spatial.Require(ctx.Model, sid, IfcClass.Slab)
+                : ctx.Model.OfClass(IfcClass.Slab).FirstOrDefault(s => ((string?)a["storeyId"] == null || Spatial.StoreyOf(ctx.Model, s.Id)?.Id == (string?)a["storeyId"]) && Polygon2.Contains(Slabs.Contour(s), mid))
+                  ?? throw new CommandException("Draw the opening inside a floor.");
+            var opening = Slabs.AddOpening(ctx, slab, pts, Slabs.OutlineArg(a["arcs"], pts, null, "An opening").Rises);
+            if (a[EllipseEdge.Key] != null)
+            {
+                var oa = opening.CloneAttrs();
+                Slabs.SetEllipses(oa, a, null);
+                ctx.Replace(opening.With(attrs: oa));
+            }
+            return new JsonObject { ["id"] = opening.Id };
+        });
+
+        r.Command("updateSlabOpening", "Change floor opening", (ctx, a) =>
+        {
+            var o = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.OpeningElement);
+            if (o.Attrs["contour"] == null) throw new CommandException("Not a floor opening.");
+            var attrs = o.CloneAttrs();
+            var (contour, arcs) = Slabs.OutlineArg(a["arcs"], Points(a), o, "An opening");
+            Slabs.SetOutline(attrs, contour, arcs);
+            Slabs.SetEllipses(attrs, a, o);
+            ctx.Replace(o.With(attrs: attrs));
+            return null;
+        });
+
+        r.Command("setSlabType", "Change type", (ctx, a) =>
+        {
+            var type = Spatial.Require(ctx.Model, (string?)a["typeId"], IfcClass.SlabType);
+            foreach (var id in Ids(a)) Slabs.SetType(ctx, Spatial.Require(ctx.Model, id, IfcClass.Slab), type);
+            return null;
+        });
+
+        // Floor slopes and falls (docs/plan-floor-slopes.md, forum topic 157): points, lines, drains, edge slopes, regions, a room's.
+        FloorSlopes.Register(r);
+
+        // ------------------------------------------------------------ schedules
+        new Schedules.ScheduleEntity().Register(r);
+        r.Service<IScheduleSource>(new RoomSchedule());
+        r.Service<IScheduleSource>(new BeamBlockSchedule());
+        r.Service<IElementBuildUps>(new RoomFinishBuildUps());
+        r.Service<IElementUpdate>(new RoomUpdate());
+        r.Service<IProjectUpgrade>(new RoomNameUpgrade());
+        // Roofs' covering materials (decision 328): following the covering when it changes in the properties, made for old roofs.
+        r.Service<IElementUpdate>(new RoofCoveringUpdate());
+        r.Service<IProjectUpgrade>(new RoofCoveringUpgrade());
+        r.Service<IProjectUpgrade>(new RoofDeckUpgrade());
+        r.Service<IElementBuildUps>(new RoofBuildUps());
+        r.Service<IScheduleSource>(new Roofs.RoofTimberSchedule());
+        Roofs.RoofTimberSchedule.RegisterTemplate(r);
+        // The architecture's fields and collections for documents (docs/plan-documents.md).
+        r.Service<Lapin.Platform.Documents.IDocumentFields>(new DocumentFields());
+
+        // ------------------------------------------------------------ rooms
+        // The scopes formulas and tags read a room by (decision 551): {room.name}, a door's {fromRoom.number}, {toRoom.number}.
+        RoomScopes.Register();
+        // What the tag rules read of a door or a window: its width, height and sill (issue #72).
+        TagRules.AddMeasure(IfcClass.Door, OpeningMarkers.Measure);
+        TagRules.AddMeasure(IfcClass.Window, OpeningMarkers.Measure);
+        // The clear opening and the wall opening (forum topic 204) as fields every tag, label, schedule and formula reads, in mm.
+        OpeningMarkers.RegisterFields();
+        // Room separation lines (forum topic 80): virtual walls rooms are bounded by.
+        RoomDividerElements.Register(r);
+        r.Class(new(Rooms.Class, "Room",
+        [
+            new("number", "Number", "text"),
+            new("function", "Function", "text"),
+            new("department", "Department", "text"),
+            new("finishFloor", "Floor finish", "text"),
+            new("height", "Height", "length", Min: 0.1),
+            new("baseOffset", "Base offset", "length"),
+            new("fillColor", "Own colour", "color"),
+            // Its own colour's opacity (forum #79), 0–100 %; absent: its scheme entry's.
+            new("fillOpacity", "Own opacity %", "number", Min: 0, Max: 100),
+            new("fillHatch", "Own hatch", "text"),
+            new("hatchScale", "Hatch scale", "number", Min: 0.01, Max: 100),
+            new("hatchColor", "Hatch colour", "color"),
+            // Whether plans hatch the room's floor finish (decision 299): absent, yes.
+            new("finishHatch", "Show floor finish hatch", "bool"),
+        ], Rooms.Color));
+        r.Geometry(Rooms.Class, Rooms.Geometry);
+        r.Quantities(Rooms.Class, Rooms.Quantities);
+        ColorSchemes.Register(r);
+
+        // A room: a click inside walls ({storeyId, x, y}; its outline found round the point and kept up with them), or its outline drawn ({storeyId, points} or x1…y2).
+        r.Command("addRoom", "Room", (ctx, a) => new JsonObject { ["id"] = Rooms.Add(ctx, a).Id });
+
+        // A room's outline drawn again (points), found round a new point (x, y), or its stamp moved (stampX, stampY; stamp: null puts it back).
+        r.Command("updateRoom", "Change room", (ctx, a) =>
+        {
+            Rooms.Update(ctx, Spatial.Require(ctx.Model, (string?)a["id"], Rooms.Class), a);
+            return null;
+        });
+
+        // The outlines the rooms placed by a click find now, stored on them (the selected ones, a storey's, or all): what they keep should their walls go.
+        r.Command("updateRooms", "Update rooms", (ctx, a) =>
+        {
+            var ids = Args.Ids(a);
+            var rooms = ids.Count > 0 ? ids.Select(id => Spatial.Require(ctx.Model, id, Rooms.Class))
+                : ctx.Model.OfClass(Rooms.Class).Where(x => (string?)a["storeyId"] is not { } sid || Spatial.StoreyOf(ctx.Model, x.Id)?.Id == sid);
+            var (stored, lost) = Rooms.Store(ctx, rooms);
+            return new JsonObject { ["updated"] = stored, ["lost"] = lost };
+        });
+
+        // ------------------------------------------------------------ roofs
+        r.Class(RoofClass = new(IfcClass.Roof, "Roof",
+        [
+            new("style", "Style", "choice", Choices: [.. RoofCatalog.Styles.Select(s => s.Id)], ReadOnly: true),
+            new("shape", "Shape", "choice", Choices: RoofCatalog.Shapes),
+            new("pitch", "Pitch (eaves)", "angle", Min: 1, Max: 85, ShowIf: FieldDescriptor.When("shape", "!flat")),
+            new("overhang", "Eave overhang", "length", Min: 0, Max: 5),
+            new("gableOverhang", "Gable overhang", "length", Min: 0, Max: 5),
+            new("upperPitch", "Mansard: upper pitch", "angle", Min: 1, Max: 60, ShowIf: Mansard),
+            new("mansardInset", "Mansard: break inset", "length", Min: 0.2, Max: 5, ShowIf: Mansard),
+            new("rise", "Barrel: rise at the crown", "length", Min: 0.05, Max: 30, ShowIf: FieldDescriptor.When("shape", "barrel")),
+            new("ridgeDirection", "Ridge direction (gable, shed)", "choice", Choices: ["auto", "x", "y"]),
+            new("shedFlip", "Shed: flip the slope", "bool", ShowIf: FieldDescriptor.When("shape", "shed")),
+            new("eaveOffset", "Wall plate over the storey's top", "length"),
+            new("covering", "Covering", "choice", Choices: [.. RoofCatalog.Coverings.Select(c => c.Id)]),
+            // The covering's material (decision 328): the covering's own by default, any of the project's.
+            new(RoofCoverings.Key, "Covering material", "material"),
+            // Its own thickness (a foreign roof's, decision 334); empty: the covering's from the catalogue.
+            new("coveringThickness", "Covering thickness", "length", Min: 0.002, Max: 0.5),
+            new("structure", "Structure", "choice", Choices: Roof.Structures, ShowIf: FieldDescriptor.When("shape", "!flat", "!barrel")),
+            // Without framing (flat, barrel, none): the deck under the covering, a part of its own (decision 329).
+            new(RoofCoverings.DeckKey, "Deck material", "material", ShowIf: Unframed),
+            new("deckThickness", "Deck thickness", "length", Min: 0.01, Max: 1, ShowIf: Unframed),
+            new("cutPriority", "Cut priority", "number", Min: 0, Max: 100),
+            new("rafterSection", "Rafters and chords (cm, or mm)", "choice", Choices: Roof.RafterSections, ShowIf: Framed),
+            new("rafterSpacing", "Rafter spacing", "length", Min: 0.3, Max: 2, ShowIf: Framed),
+            new("webSection", "Truss webs", "choice", Choices: Roof.RafterSections, ShowIf: FramedAs("trusses")),
+            new("timberGrade", "Timber grade", "choice", Choices: Roof.TimberGrades, ShowIf: Framed),
+            new("collarHeight", "Collar ties: share of the rise", "number", Min: 0.3, Max: 0.9, ShowIf: FramedAs("collar")),
+            new("collarSection", "Collar tie section", "choice", Choices: Roof.RafterSections, ShowIf: FramedAs("collar")),
+            new("rafterTail", "Rafter tails", "choice", Choices: Roofs.RoofParts.TailTypes, ShowIf: Framed),
+            new("rafterSeat", "Rafter seat on the wall plate", "choice", Choices: ["birdsmouth", "none"], ShowIf: Framed),
+            new("purlins", "Purlins per slope", "number", Min: 0, Max: 3, ShowIf: Framed),
+            new("purlinSection", "Purlin section", "choice", Choices: Roof.BeamSections, ShowIf: FramedAs("rafters")),
+            new("ridgeSection", "Ridge beam section", "choice", Choices: Roof.BeamSections, ShowIf: FramedAs("rafters")),
+            new("plateSection", "Wall plate section", "choice", Choices: Roof.BeamSections, ShowIf: Framed),
+            new("gutterProfile", "Gutters", "choice", Choices: RoofCatalog.GutterProfiles),
+            new("gutterMaterial", "Gutter material", "choice", Choices: RoofCatalog.GutterMaterials),
+            new("snowGuards", "Snow guards", "choice", Choices: ["True", "False"]),
+            // The gutters and downpipes made parametric (decision 235).
+            new("gutterWidth", "Gutter size", "length", Min: 0.06, Max: 0.4),
+            new("gutterOffset", "Gutter out from the eave", "length", Min: -0.1, Max: 0.5),
+            new("gutterDrop", "Gutter below the covering", "length", Min: 0, Max: 0.5),
+            new("gutterFall", "Gutter fall (mm/m)", "number", Min: 0, Max: 20),
+            new("gutterEnds", "Gutter end caps", "choice", Choices: ["True", "False"]),
+            new("downpipes", "Downpipes", "choice", Choices: ["auto", "elements", "none"]),
+        ], "#b0563d"));
+        r.Geometry(IfcClass.Roof, (roof, model, services) => RoofCuts.Geometry(roof, model, services));
+        // A roof cuts walls and Studio solids by its covering, and is cut by slabs, beams, columns and footings.
+        r.Cutter(IfcClass.Roof, 55, RoofCuts.Envelope);
+        r.Quantities(IfcClass.Roof, (roof, geometry, model) => Roof.Quantities(roof, geometry, model));
+        Drainage.Register(r);
+        // A railing of its own along a line in plan (decision 238), in the stair railings' designs.
+        Stairs.Railings.Register(r);
+        // Balconies (a tester's report, #96): styles, the configurator, loggias cut into their wall.
+        Balconies.BalconyModule.Register(r);
+        // Gates with their piers on a line (report #57).
+        Gates.Gates.Register(r);
+        r.Catalog("roofStyles", System.Text.Json.JsonSerializer.SerializeToNode(RoofCatalog.Styles, ArchitectureCatalogJson.Default.IReadOnlyListStyle)!);
+        r.Catalog("roofCoverings", System.Text.Json.JsonSerializer.SerializeToNode(RoofCatalog.Coverings, ArchitectureCatalogJson.Default.IReadOnlyListCovering)!);
+
+        // A roof over the outline drawn (the wall line, at the top of its storey), in a style (default: the catalogue's first).
+        r.Command("addRoof", "Roof", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var (contour, arcs) = Slabs.OutlineArg(a["arcs"], Points(a), null, "A roof");
+            // A project's own style (decision 233) over the catalogue's first, or one of the catalogue's.
+            var own = ProjectRoofStyles.Of(ctx.Model, (string?)a["style"]);
+            var style = own != null ? RoofCatalog.Styles[0] : (string?)a["style"] is { } sid ? RoofCatalog.StyleOf(sid) ?? throw new CommandException($"There is no roof style „{sid}”.") : RoofCatalog.Styles[0];
+            var attrs = Roof.Attrs(style, contour);
+            ArcOutline.Write(attrs, arcs);
+            if (own != null) ProjectRoofStyles.Apply(attrs, own, contour);
+            var roof = new Entity(ctx.NewId(), IfcClass.Roof, $"Roof {Numbering.Next(ctx.Model.OfClass(IfcClass.Roof))}", attrs, "NOTDEFINED");
+            roof = RoofCoverings.Settle(ctx, null, roof);
+            CheckRoof(ctx.Model, roof);
+            ctx.Add(roof);
+            Spatial.Contain(ctx, storeyId, roof.Id);
+            return new JsonObject { ["id"] = roof.Id };
+        });
+
+        // Put a roof in a style: shape, pitch, overhangs, covering, gutters, snow guards; its per-edge overrides go.
+        // A roof window or a dormer where it was clicked on a roof (the roof under the point when none is named); refused when it does not fit.
+        r.Command("addRoofOpening", "Roof opening", (ctx, a) =>
+        {
+            var at = P(a, "x", "y");
+            var roof = (string?)a["roofId"] is { } rid ? Spatial.Require(ctx.Model, rid, IfcClass.Roof)
+                : ctx.Model.OfClass(IfcClass.Roof).FirstOrDefault(x => RoofTop.ShapeOf(x, ctx.Model) is { } sh && RoofOpenings.HostAt(sh, at) != null)
+                  ?? throw new CommandException("Click on a slope of a roof.");
+            var kind = (string?)a["kind"] == RoofOpening.Dormer ? RoofOpening.Dormer : RoofOpening.Window;
+            var o = new JsonObject { ["id"] = ctx.NewId(), ["kind"] = kind, ["x"] = at.X, ["y"] = at.Y };
+            foreach (var k in new[] { "width", "length", "wallHeight", "pitch", "overhang", "thickness" }) if (Json.Number(a[k]) is { } v) o[k] = v;
+            if ((string?)a["dormerShape"] is "shed" or "gable") o["dormerShape"] = (string?)a["dormerShape"];
+            var count = RoofOpenings.Of(roof).Count(x => x.Kind == kind) + 1;
+            o["name"] = ((string?)a["name"])?.Trim() is { Length: > 0 } n ? n : kind == RoofOpening.Window ? $"Roof window {count}" : $"Dormer {count}";
+            WriteRoofOpenings(ctx, roof, [.. (roof.Attrs["openings"] as JsonArray)?.Select(x => x!.DeepClone()) ?? [], o], (string)o["id"]!);
+            return new JsonObject { ["roofId"] = roof.Id, ["id"] = (string)o["id"]! };
+        });
+
+        r.Command("updateRoofOpening", "Change roof opening", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["roofId"], IfcClass.Roof);
+            var list = (roof.Attrs["openings"] as JsonArray)?.Select(x => (JsonObject)x!.DeepClone()).ToList() ?? [];
+            var o = list.FirstOrDefault(x => (string?)x["id"] == (string?)a["id"]) ?? throw new CommandException("The roof has no such opening.");
+            foreach (var k in new[] { "x", "y", "width", "length", "wallHeight", "pitch", "overhang", "thickness" }) if (Json.Number(a[k]) is { } v) o[k] = v;
+            if ((string?)a["dormerShape"] is "shed" or "gable") o["dormerShape"] = (string?)a["dormerShape"];
+            if (((string?)a["name"])?.Trim() is { Length: > 0 } n) o["name"] = n;
+            // Resized by its grips or typed (decision 280): never thinner than a frame.
+            if (Json.Number(o["width"]) is < 0.2 || Json.Number(o["length"]) is < 0.2) throw new CommandException("A roof window or a dormer is at least 200 mm wide and long.");
+            WriteRoofOpenings(ctx, roof, [.. list], (string)o["id"]!);
+            return null;
+        });
+
+        r.Command("removeRoofOpening", "Remove roof opening", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["roofId"], IfcClass.Roof);
+            var list = (roof.Attrs["openings"] as JsonArray)?.Select(x => x!.DeepClone()).Where(x => (string?)x["id"] != (string?)a["id"]).ToList() ?? [];
+            var attrs = roof.CloneAttrs();
+            if (list.Count > 0) attrs["openings"] = new JsonArray([.. list]); else attrs.Remove("openings");
+            ctx.Replace(roof.With(attrs: attrs));
+            return null;
+        });
+
+        r.Command("roofStyle", "Roof style", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Roof);
+            if (RoofCatalog.StyleOf((string?)a["style"]) == null && ProjectRoofStyles.Of(ctx.Model, (string?)a["style"]) == null) throw new CommandException("There is no such roof style.");
+            var next = RoofDraft(ctx.Model, roof, new JsonObject { ["style"] = (string?)a["style"] });
+            CheckRoof(ctx.Model, next);
+            CheckRoofOpenings(ctx.Model, next);
+            RoofCoverings.Ensure(ctx, next);
+            ctx.Replace(next);
+            return null;
+        });
+
+        // The configurator's Apply, one step: the roof's fields and its per-edge rules
+        // ("edges": one entry per edge, null for "as the roof"; null clears them all), its outline. Refused when it would not build.
+        r.Command("updateRoof", "Change roof", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Roof);
+            var next = RoofDraft(ctx.Model, roof, a);
+            CheckRoof(ctx.Model, next);
+            CheckRoofOpenings(ctx.Model, next);
+            RoofCoverings.Ensure(ctx, next);
+            ctx.Replace(next);
+            // Its downpipes stay where they were on the gutters of the edges redrawn.
+            if (a["points"] != null || a["x1"] != null) RoofEdges.Downpipes(ctx, roof, next, RoofEdges.Match(Roof.Contour(roof), Roof.Contour(next)), p => p);
+            return null;
+        });
+
+        // A roof's unfolded 2D covering plan: {id (the roof)} → {id (the drafting view)}.
+        r.Command("unfoldRoofCovering", "Unfolded covering", (ctx, a) =>
+            new JsonObject { ["id"] = RoofUnfold.View(ctx, Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Roof)).Id });
+
+        // Explode a parametric roof into editable 3D solids (one per current GeometryPart), in one undo step.
+        r.Command("explodeRoof", "Explode roof", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Roof);
+            var made = Roof.Explode(ctx, roof);
+            return new JsonObject { ["ids"] = new JsonArray(made.Select(id => (JsonNode)id).ToArray()) };
+        });
+
+        // The project's own roof styles (decision 233): the roof as the draft makes it saved under a name (a new style, or the one
+        // of that name or id saved again, which its roofs take again), the roof taking it; renamed; deleted (its roofs kept as they are).
+        r.Command("saveRoofStyle", "Save roof style", (ctx, a) =>
+        {
+            var roof = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Roof);
+            var draft = RoofDraft(ctx.Model, roof, a);
+            var sid = ProjectRoofStyles.Save(ctx, draft, (string?)a["name"] ?? "", (string?)a["styleId"], next =>
+            {
+                CheckRoof(ctx.Model, next);
+                CheckRoofOpenings(ctx.Model, next);
+                return RoofCoverings.Settle(ctx, ctx.Model.Get(next.Id), next);
+            });
+            return new JsonObject { ["styleId"] = sid };
+        });
+        r.Command("renameRoofStyle", "Rename roof style", (ctx, a) => { ProjectRoofStyles.Rename(ctx, (string?)a["styleId"] ?? "", (string?)a["name"] ?? ""); return null; });
+        r.Command("deleteRoofStyle", "Delete roof style", (ctx, a) => { ProjectRoofStyles.Delete(ctx, (string?)a["styleId"] ?? ""); return null; });
+
+        // The roof configurator's preview: the roof as the draft would make it (a style, fields, edge rules), its plan, a section
+        // through its framing and what it takes; nothing changes in the model.
+        r.Query("roofPreview", (q, a) =>
+        {
+            var roof = Spatial.Require(q.Model, (string?)a["id"], IfcClass.Roof);
+            try { return RoofPreview.Of(RoofDraft(q.Model, roof, a), q.Model); }
+            catch (CommandException e) { return new JsonObject { ["problem"] = e.Message, ["attrs"] = roof.Attrs.DeepClone() }; }
+        });
+
+        r.Command("addDoor", "Door", (ctx, a) => AddFill(ctx, a, "door"));
+        r.Command("addWindow", "Window", (ctx, a) => AddFill(ctx, a, "window"));
+
+        // An opening alone in a wall, nothing filling it (decision 247): {wallId, x, y | along, width?, height?, sill?, shape?, rise?};
+        // its head (decision 253) "rect", "segmental", "elliptical", "round" (a semicircle) or "radiused" (rise: the corner radius).
+        // Of its own outline (audit S4): {wallId, profile: [[along, up]…] (along the wall from its start, up from its base, as an
+        // elevation reads it), arcs?}: its bounds its place and size, the outline cut through the wall.
+        r.Command("addWallOpening", "Opening", (ctx, a) =>
+        {
+            var wall = Spatial.Require(ctx.Model, (string?)a["wallId"], IfcClass.Wall);
+            if (a["profile"] is JsonArray profile)
+            {
+                if (PathCurve.Of(wall).IsArc) throw new CommandException("An opening of its own outline goes in a straight wall.");
+                var pts = Args.StoredPoints(profile);
+                return new JsonObject { ["id"] = Openings.AddOutlined(ctx, wall, pts, ArcOutline.RisesArg(a["arcs"], pts.Count)).Id };
+            }
+            var along = Json.Number(a["along"]) ?? Openings.AlongOf(wall, new Vec2(Json.Number(a["x"]) ?? 0, Json.Number(a["y"]) ?? 0));
+            // sillFrom (forum topic 192): "structural" | "finished", else the project's default.
+            var opening = Openings.AddBare(ctx, wall, along, Json.Number(a["sill"]) ?? 0, Json.Number(a["width"]) ?? Openings.BareWidth, Json.Number(a["height"]) ?? Openings.BareHeight, (string?)a["shape"], Json.Number(a["rise"]),
+                OpeningSills.Parse((string?)a["sillFrom"]) ?? OpeningSills.ProjectDefault(ctx.Model));
+            return new JsonObject { ["id"] = opening.Id };
+        });
+        // Its size, place along the wall, sill and head, its reveal's finish and its lintel (decision 392), for one or several:
+        // {id | ids, width?, height?, along?, sill?, shape?, rise? (null: the kind's own), reveal?, revealThickness?, revealMaterial?, lintel?}.
+        r.Command("updateWallOpening", "Change opening", (ctx, a) => { BareOpenings.Update(ctx, a); return null; });
+        BareOpenings.Register(r);
+
+        r.Command("moveOpening", "Move opening", (ctx, a) =>
+        {
+            // Several at once (a sill for every selected window, #74), one step. sillFrom (forum topic 192): "structural" | "finished",
+            // what sill is measured from; without a sill the element stays where it stands.
+            var ids = Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Nothing to move.");
+            var sillFrom = OpeningSills.Parse((string?)a["sillFrom"]);
+            foreach (var id in ids) Openings.Move(ctx, ctx.Model.Get(id) ?? throw new CommandException("Nothing to move."), Json.Number(a["along"]), Json.Number(a["sill"]), sillFrom);
+            return null;
+        });
+
+        // The project's default for new doors, windows and openings (forum topic 192): {sillFrom: "structural" | "finished"}; the ones
+        // already placed keep theirs.
+        r.Command("setOpeningDefaults", "Door and window defaults", (ctx, a) =>
+        {
+            var project = Spatial.Project(ctx.Model) ?? throw new CommandException("The model has no project.");
+            var attrs = project.CloneAttrs();
+            if (a.ContainsKey("sillFrom"))
+            {
+                if (OpeningSills.Parse((string?)a["sillFrom"]) == OpeningSills.Finished) attrs[OpeningSills.ProjectKey] = OpeningSills.Finished;
+                else attrs.Remove(OpeningSills.ProjectKey);
+            }
+            ctx.Replace(project.With(attrs: attrs));
+            return null;
+        });
+        r.Query("openingDefaults", (q, _) => new JsonObject { ["sillFrom"] = OpeningSills.ProjectDefault(q.Model) });
+
+        // Whether openings cut every wall they pass through or their own wall alone (forum topic 64): {id | ids (openings, or the doors
+        // and windows filling them), on}. Off, an opening must fit its own wall again.
+        r.Command("setCutThrough", "Cut the walls it passes through", (ctx, a) =>
+        {
+            var ids = Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Select a door, a window or an opening.");
+            var on = a["on"] is not JsonValue v || !v.TryGetValue<bool>(out var b) || b;
+            foreach (var id in ids)
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Select a door, a window or an opening.");
+                var opening = e.Class == IfcClass.OpeningElement ? e : Openings.OpeningOf(ctx.Model, id) ?? throw new CommandException($"„{e.Name}” fills no opening.");
+                var wall = Openings.WallOf(ctx.Model, opening.Id) ?? throw new CommandException("The opening is in no wall.");
+                if (ThroughOpenings.On(opening) == on) continue;
+                var attrs = opening.CloneAttrs();
+                if (on) attrs.Remove(ThroughOpenings.Key); else attrs[ThroughOpenings.Key] = false;
+                ctx.Replace(opening.With(attrs: attrs));
+                var p = Openings.Place(ctx.Model, ctx.Model.Get(opening.Id)!);
+                Openings.CheckFits(ctx.Model, wall, p.Along, p.Sill, p.Width, p.Height, opening.Id);
+            }
+            return null;
+        });
+
+        // What a selected door's, window's or opening's temporary dimensions measure to along its wall (decision 511):
+        // {id (the opening, or the door or window filling it) | wallId (one being placed)}.
+        r.Query("openingReferences", (q, a) => OpeningReferences.Of(q, a));
+        // What a wall's temporary dimensions measure to (decision 693): the storey's straight walls, their faces and joins; {storeyId | id}.
+        r.Query("wallLines", (q, a) => WallLines.Of(q, a));
+        r.Service<IDimLineProvider>(new WallDimLines());
+
+        r.Command("flipJoinery", "Flip", (ctx, a) =>
+        {
+            foreach (var id in Ids(a))
+                if (ctx.Model.Get(id) is { Class: IfcClass.Door or IfcClass.Window } fill) Openings.Flip(ctx, fill, (string?)a["axis"] ?? "y");
+            return null;
+        });
+
+        r.Command("createJoineryType", "New door or window type", (ctx, a) =>
+        {
+            var spec = JoinerySpec.From(a["spec"]) ?? throw new CommandException("The type's configuration is missing or unreadable.");
+            // A door when it has a door leaf, a window when its sashes open and no leaf does (forum topic 34).
+            return new JsonObject { ["id"] = Openings.CreateType(ctx, spec with { Kind = Joinery.KindOf(spec) }).Id };
+        });
+
+        r.Command("updateJoineryType", "Change door or window type", (ctx, a) =>
+        {
+            var type = ctx.Model.Get((string?)a["id"] ?? "") is { Class: IfcClass.DoorType or IfcClass.WindowType } t ? t : throw new CommandException("There is no such door or window type.");
+            var spec = JinerySpecOrThrow(a["spec"]);
+            if (Joinery.KindOf(spec) is var kind && (kind == "door") != (type.Class == IfcClass.DoorType))
+                throw new CommandException(kind == "door"
+                    ? "A door leaf makes it a door, and a window type stays a window type: save it as a new type."
+                    : "With window sashes and no door leaf it is a window, and a door type stays a door type: save it as a new type.");
+            Openings.UpdateType(ctx, type, spec with { Kind = kind });
+            return null;
+        });
+
+        // One material for a part of every door, window or curtain wall type at once (report #76: all window frames one dark grey
+        // metal, all glass one blue glass): kind "window", "door", "curtain" or "all"; parts by name (frame, sash, glass, leaf, board,
+        // hardware, and a curtain wall's panel), "" back to the part's colour. One undo step; a material not in the project is made.
+        r.Command("joineryMaterials", "Set door and window materials", (ctx, a) =>
+        {
+            var kind = (string?)a["kind"] ?? "all";
+            if (kind is not ("window" or "door" or "curtain" or "all")) throw new CommandException("Kind is window, door, curtain or all.");
+            var given = new Dictionary<string, string?>();
+            foreach (var part in JoineryMaterials.Parts.Append("panel"))
+                if (a.ContainsKey(part)) given[part] = ((string?)a[part])?.Trim() is { Length: > 0 } n ? n : null;
+            if (given.Count == 0) throw new CommandException("Name a part and its material.");
+            foreach (var name in given.Values.OfType<string>()) Materials.Ensure(ctx, name);
+            var changed = 0;
+            foreach (var type in ctx.Model.Entities.Where(t => t.Class is IfcClass.DoorType or IfcClass.WindowType).ToList())
+            {
+                if (kind is "curtain" || kind == "window" && type.Class != IfcClass.WindowType || kind == "door" && type.Class != IfcClass.DoorType) continue;
+                if (JoinerySpec.From(type.Attrs["spec"]) is not { } spec) continue;
+                var mats = spec.Materials ?? new JoineryMaterials();
+                foreach (var (part, name) in given) if (part != "panel" && (part != "leaf" || spec.IsDoor)) mats = mats.With(part, name);
+                if (mats == spec.Materials) continue;
+                var attrs = type.CloneAttrs();
+                attrs["spec"] = (spec with { Materials = mats }).ToJson();
+                ctx.Replace(type.With(attrs: attrs));
+                changed++;
+            }
+            if (kind is "curtain" or "all")
+                foreach (var type in ctx.Model.OfClass(CurtainWalls.TypeClass).ToList())
+                {
+                    var spec = CurtainWalls.SpecOf(ctx.Model, type);
+                    var next = spec;
+                    if (given.TryGetValue("frame", out var f)) next = next with { FrameMaterial = f };
+                    if (given.TryGetValue("glass", out var g)) next = next with { GlassMaterial = g };
+                    if (given.TryGetValue("panel", out var p)) next = next with { OpaqueMaterial = p };
+                    if (next == spec) continue;
+                    var attrs = type.CloneAttrs();
+                    attrs["spec"] = next.ToJson();
+                    ctx.Replace(type.With(attrs: attrs));
+                    changed++;
+                }
+            return new JsonObject { ["types"] = changed };
+        });
+
+        r.Command("setJoineryType", "Change type", (ctx, a) =>
+        {
+            var type = ctx.Model.Get((string?)a["typeId"] ?? "") is { Class: IfcClass.DoorType or IfcClass.WindowType } t ? t : throw new CommandException("There is no such door or window type.");
+            foreach (var id in Ids(a))
+                if (ctx.Model.Get(id) is { Class: IfcClass.Door or IfcClass.Window } fill) Openings.SetType(ctx, fill, type);
+            return null;
+        });
+
+        // Doors' and windows' own size (forum topic 140, decision 664): {id | ids, width?, height?} (metres) over their type's, or
+        // {reset: true} back to the type's (with width or height: that one kept). One undo step for all; each checked in its wall.
+        r.Command("setJoinerySize", "Door or window size", (ctx, a) =>
+        {
+            var reset = a["reset"] is JsonValue rv && rv.TryGetValue<bool>(out var r0) && r0;
+            var (width, height) = (Json.Number(a["width"]), Json.Number(a["height"]));
+            if (!reset && width == null && height == null) throw new CommandException("Give a width, a height, or reset.");
+            var changed = 0;
+            foreach (var id in Ids(a))
+            {
+                if (ctx.Model.Get(id) is not { Class: IfcClass.Door or IfcClass.Window } fill) continue;
+                Openings.SetSize(ctx, fill, width, height, reset);
+                changed++;
+            }
+            if (changed == 0) throw new CommandException("Select doors or windows.");
+            return null;
+        });
+
+        // The frame's place across the wall for some elements (report #76): from the exterior face, the core or the centre, a distance; {clear: true} back to the type's.
+        r.Command("setJoineryPosition", "Place the frame in the wall", (ctx, a) =>
+        {
+            var position = a["clear"] is JsonValue c && c.TryGetValue<bool>(out var clear) && clear ? null
+                : JoineryPosition.From_(a) ?? throw new CommandException("Say where: from, distance.");
+            var changed = 0;
+            foreach (var id in Ids(a))
+            {
+                if (ctx.Model.Get(id) is not { Class: IfcClass.Door or IfcClass.Window } fill) continue;
+                var attrs = fill.CloneAttrs();
+                if (position == null) attrs.Remove("position"); else attrs["position"] = position.ToJson();
+                ctx.Replace(fill.With(attrs: attrs));
+                changed++;
+            }
+            if (changed == 0) throw new CommandException("Select doors or windows.");
+            return null;
+        });
+
+        // Show doors and windows open or closed in plan and 3D (issue #40): mode "auto" (default), "open", or "closed".
+        r.Command("setJoineryOpen", "Show door or window open or closed", (ctx, a) =>
+        {
+            var mode = (string?)a["mode"] ?? "auto";
+            if (mode is not ("auto" or "open" or "closed")) throw new CommandException("Mode must be auto, open, or closed.");
+            var changed = 0;
+            foreach (var id in Ids(a))
+            {
+                if (ctx.Model.Get(id) is not { Class: IfcClass.Door or IfcClass.Window } fill) continue;
+                var attrs = fill.CloneAttrs();
+                if (mode == "auto") attrs.Remove("openMode"); else attrs["openMode"] = mode;
+                ctx.Replace(fill.With(attrs: attrs));
+                changed++;
+            }
+            if (changed == 0) throw new CommandException("Select doors or windows.");
+            return null;
+        });
+
+        // A door or window type's data, or some elements' own (report #76): free text for U-value, g-value, safety glass, fire rating
+        // and fittings (uValue, gValue, safetyGlass, fireRating, fittings; empty takes one off), and extras [{name, value}]: the
+        // user's parameters in Lapin_Joinery. {typeId} for a type, else the elements (ids).
+        r.Command("setJoineryData", "Door and window data", (ctx, a) =>
+        {
+            var data = a["data"] as JsonObject;
+            var extras = a["extras"] as JsonArray;
+            if (data == null && extras == null) throw new CommandException("Nothing to change.");
+            var targets = (string?)a["typeId"] is { } typeId
+                ? [ctx.Model.Get(typeId) is { Class: IfcClass.DoorType or IfcClass.WindowType } found ? found : throw new CommandException("There is no such door or window type.")]
+                : Ids(a).Select(id => ctx.Model.Get(id)).OfType<Entity>().Where(x => x.Class is IfcClass.Door or IfcClass.Window).ToList();
+            if (targets.Count == 0) throw new CommandException("Select doors or windows, or a type.");
+            foreach (var target in targets) JoineryData.Apply(ctx, target, data, extras);
+            return null;
+        });
+
+        r.Geometry(IfcClass.Wall, (wall, model, services) => Walls.Geometry(wall, model, services));
+        r.PathElement(IfcClass.Wall, Walls.Frame);
+        r.Quantities(IfcClass.Wall, (wall, geometry, model) => Walls.Quantities(wall, geometry, model));
+        r.Catalog("defaultZones", new JsonArray(WallZones.Defaults("Brick").Select(z => (JsonNode)z).ToArray()));
+
+        r.Command("createWallType", "New wall type", (ctx, a) =>
+        {
+            // `params` (issue #32): the type's parameters, checked as element.setParam checks one ([{name, kind, value, pset?, options?, instance?}]),
+            // set in the same step, so every wall drawn with it has them from the start (its instance defaults as copies of its own).
+            var ps = Params.ParseList(a["params"], IfcClass.WallType);
+            var type = WallTypes.Create(ctx, (string?)a["name"], WallTypes.ParseLayers(a["layers"]), (string?)a["mark"], a["zones"], a["lintels"],
+                a["sweeps"] is null ? null : WallSweepTypes.Parse(ctx, null, a["sweeps"]));
+            if (ps.Count > 0)
+            {
+                var attrs = type.CloneAttrs();
+                attrs["params"] = ps;
+                ctx.Replace(type = type.With(attrs: attrs));
+            }
+            // finishedFloor (forum topic 192): its walls' finished floor over their base, metres, for the sills measured from it.
+            if (a["finishedFloor"] is not null)
+            {
+                var attrs = type.CloneAttrs();
+                OpeningSills.SetFinishedFloor(attrs, a["finishedFloor"]);
+                ctx.Replace(type = type.With(attrs: attrs));
+            }
+            return new JsonObject { ["id"] = type.Id };
+        });
+
+        // finishedFloor (forum topic 192): a length, or null to clear it; the openings of its walls measured from the finished floor
+        // move with it, refused when one would no longer fit its wall.
+        r.Command("updateWallType", "Change wall type", (ctx, a) =>
+        {
+            var type = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.WallType);
+            WallTypes.Update(ctx, type, (string?)a["name"], a["layers"] is null ? null : WallTypes.ParseLayers(a["layers"]), a["zones"], a["lintels"],
+                a["sweeps"] is null ? null : WallSweepTypes.Parse(ctx, type, a["sweeps"]));
+            if (a.ContainsKey("finishedFloor"))
+            {
+                var current = ctx.Model.Get(type.Id)!;
+                var attrs = current.CloneAttrs();
+                OpeningSills.SetFinishedFloor(attrs, a["finishedFloor"]);
+                ctx.Replace(current.With(attrs: attrs));
+                OpeningSills.CheckType(ctx.Model, current);
+            }
+            return null;
+        });
+
+        r.Command("addWall", "Wall", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var type = (string?)a["typeId"] is { } typeId ? Spatial.Require(ctx.Model, typeId, IfcClass.WallType) : null;
+            var (p1, p2) = (P(a, "x1", "y1"), P(a, "x2", "y2"));
+            var rise = Args.Rise(a, p1, p2);
+            var unjoined = a["join"] is JsonValue j && j.TryGetValue<bool>(out var join) && !join;
+            // Its top (the forum's topic #45): the one asked, else unconnected at a height given, else its type's, else the storey above.
+            var (top, topOffset, height, asked) = WallTop.ForNew(a, type ?? WallTypes.EnsureDefault(ctx));
+            var wall = Walls.AddUnjoined(ctx, storeyId, p1, p2, height, Json.Number(a["baseOffset"]) ?? 0, type);
+            if (top != null)
+            {
+                var ta = wall.CloneAttrs();
+                try { WallTop.Set(ctx.Model, wall, ta, top, topOffset, null); }
+                // A top asked for that cannot be is refused; one by default leaves the wall its own height.
+                catch (CommandException) when (!asked) { ta = wall.CloneAttrs(); }
+                ctx.Replace(wall = wall.With(attrs: ta));
+            }
+            // A curved wall: the arc through its ends, rising off the chord (or through a third point), before it joins.
+            if (rise != 0) { var attrs = wall.CloneAttrs(); attrs[PathCurve.Key] = rise; ctx.Replace(wall = wall.With(attrs: attrs)); }
+            // Drawn on another line than the core's centre (decision 237; an arc too since #63): the axis set off from it (concentric
+            // on an arc). rememberReference: the wall keeps that line as its reference (forum topic 159, decision 685).
+            if (a["reference"] is { } reference)
+            {
+                var line = WallReference.Parse(reference);
+                var remember = a["rememberReference"] is JsonValue rv && rv.TryGetValue<bool>(out var rb) && rb;
+                if (!line.IsCoreCentre) wall = WallReference.Apply(ctx, wall, line, remember);
+            }
+            // Flipped while drawn (Space on the core's centre, forum topic 238): mirrored across its axis, its exterior to the left,
+            // in the same step as it is made, before it joins.
+            if (a["flip"] is JsonValue fv && fv.TryGetValue<bool>(out var flip) && flip)
+            {
+                Walls.Flip(ctx, wall);
+                wall = ctx.Model.Get(wall.Id) ?? wall;
+            }
+            if (!unjoined) Joins.Auto(ctx, Paths(ctx), wall.Id, Style(a["joinStyle"]) ?? JoinStyle.Mitre);
+            return new JsonObject { ["id"] = wall.Id };
+        });
+
+        // Walls along a drafted shape, joined at its corners: {shape, storeyId, typeId?, height?, baseOffset?, justify, joinStyle?, bottom?, top?} (WallsAlong).
+        r.Command("wallsAlong", "Walls along a shape", (ctx, a) => WallsAlong.Add(ctx, a, Paths(ctx)));
+
+        r.Command("joinWalls", "Join walls", (ctx, a) =>
+        {
+            var w1 = Spatial.Require(ctx.Model, (string?)a["a"], IfcClass.Wall);
+            var w2 = Spatial.Require(ctx.Model, (string?)a["b"], IfcClass.Wall);
+            var priority = (string?)a["priority"] switch { "a" => 'a', "b" => 'b', _ => (char?)null };
+            // extend: the walls carried on to where their axes meet, however far (the Join walls tool, forum topic 249).
+            var extend = a["extend"] is JsonValue xv && xv.TryGetValue<bool>(out var xb) && xb;
+            var join = Joins.Join(ctx, Paths(ctx), w1, w2, Style(a["style"]), priority, extend: extend);
+            return new JsonObject { ["kind"] = join.Kind.ToString(), ["style"] = join.Style == JoinStyle.Mitre ? "mitre" : "butt" };
+        });
+
+        // Two walls' corner rounded by a curved wall or cut by a straight one, the walls trimmed or carried on to it, as CAD's
+        // FILLET and CHAMFER do to lines (WallFillets): {a, b, atA?, atB?, radius | distance, line? (axis, inside, outside), matchFirst?}.
+        // A wall another program modelled as separate solids, one per layer, made one layered wall (forum topic 101, WallsFromSolids):
+        // {ids, gaps (air | absorb), frame, walls: [{core, materials, name}], originals (hide | delete | keep)}; the query shows what it would make.
+        r.Command("wallFromSolids", "Make a layered wall from solids", (ctx, a) => WallsFromSolids.Make(ctx, a, Paths(ctx)));
+        r.Query("wallFromSolids", (q, a) => WallsFromSolids.Preview(q.Model, q.Services, a));
+        // The solids a wall was made of and keeps hidden, shown again: {id (the wall)}.
+        r.Command("showOriginalSolids", "Show the original solids", (ctx, a) => WallsFromSolids.Show(ctx, a));
+        r.Command("filletWalls", "Fillet walls", (ctx, a) => WallFillets.Apply(ctx, a, Paths(ctx), false));
+        r.Command("chamferWalls", "Chamfer walls", (ctx, a) => WallFillets.Apply(ctx, a, Paths(ctx), true));
+        r.Command("trimWall", "Trim wall", (ctx, a) => WallFillets.Trim(ctx, a, Paths(ctx)));
+        r.Command("extendWall", "Extend wall", (ctx, a) => WallFillets.Extend(ctx, a, Paths(ctx)));
+
+        r.Command("restyleJoins", "Join style", (ctx, a) =>
+        {
+            var swap = a["swap"] is JsonValue v && v.TryGetValue<bool>(out var sw) && sw;
+            var style = Style(a["style"]);
+            if (style == null && !swap) throw new CommandException("Say how: a style (butt or mitre), or swap.");
+            var n = Joins.Restyle(ctx, Paths(ctx), Ids(a), style, swap);
+            if (n == 0) throw new CommandException("The selected walls have no corner to restyle.");
+            return new JsonObject { ["corners"] = n };
+        });
+
+        // A wall's top under roofs: attached rises to the slopes' underside (from any storey), detached ignores roofs. The roofs named may be
+        // any body over the wall instead (a Studio solid, a slab, a beam, an element imported from IFC): the wall rises to its underside.
+        r.Command("attachToRoof", "Attach to roof", (ctx, a) =>
+        {
+            var ids = Args.Ids(a);
+            var roofIds = a["roofIds"] is JsonArray rs ? rs.Select(x => (string?)x).OfType<string>().ToList() : [];
+            foreach (var rid in roofIds)
+            {
+                var t = ctx.Model.Get(rid) ?? throw new CommandException($"There is no element {rid}.");
+                if (t.Class == IfcClass.Wall) throw new CommandException("A wall rises to a roof or to a body over it, not to another wall.");
+                if (t.Class != IfcClass.Roof && !StoredBodies.Has(t) && ctx.Services.Get<IGeometryProducers>()?.Geometry(t.Class) == null)
+                    throw new CommandException($"„{t.Name}” has no body a wall could rise to.");
+            }
+            foreach (var id in ids)
+            {
+                var wall = Spatial.Require(ctx.Model, id, IfcClass.Wall);
+                var attrs = wall.CloneAttrs();
+                attrs["roofTop"] = "attach";
+                if (roofIds.Count > 0) attrs["roofIds"] = new JsonArray(roofIds.Select(x => (JsonNode)x).ToArray()); else attrs.Remove("roofIds");
+                attrs.Remove(WallTops.GoneKey);
+                ctx.Replace(wall.With(attrs: attrs));
+            }
+            return null;
+        });
+        r.Command("detachFromRoof", "Detach from roof", (ctx, a) =>
+        {
+            var mode = (string?)a["mode"] ?? "none";
+            if (mode is not ("none" or "auto")) throw new CommandException("A detached wall either ignores roofs (none) or follows its storey's roof (auto).");
+            foreach (var id in Args.Ids(a))
+            {
+                var wall = Spatial.Require(ctx.Model, id, IfcClass.Wall);
+                var attrs = wall.CloneAttrs();
+                attrs["roofTop"] = mode;
+                attrs.Remove("roofIds");
+                attrs.Remove(WallTops.GoneKey);
+                ctx.Replace(wall.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        r.Command("updateWall", "Change wall", (ctx, a) =>
+        {
+            var wall = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.Wall);
+            var start = Walls.Start(wall);
+            var end = Walls.End(wall);
+            if (Json.Number(a["x1"]) is { } x1) start = start with { X = x1 };
+            if (Json.Number(a["y1"]) is { } y1) start = start with { Y = y1 };
+            if (Json.Number(a["x2"]) is { } x2) end = end with { X = x2 };
+            if (Json.Number(a["y2"]) is { } y2) end = end with { Y = y2 };
+            if ((end - start).Length < 1e-3) throw new CommandException("A wall needs two different points: it would have no length.");
+            // A height typed is a height of its own: the wall goes unconnected (its top, WallTop, let go).
+            var height = Json.Number(a["height"]) ?? WallTop.Stored(wall);
+            if (!(height > 0)) throw new CommandException("A wall's height must be positive.");
+            if (Json.Number(a["height"]) != null && WallTop.Of(wall) != null)
+            {
+                var freed = wall.CloneAttrs();
+                freed.Remove(WallTop.Key);
+                freed.Remove(WallTop.OffsetKey);
+                wall = wall.With(attrs: freed);
+            }
+            var thickness = Json.Number(a["thickness"]) ?? wall.NumOrNull("thickness");
+            if (thickness is <= 0) throw new CommandException("A wall's thickness must be positive.");
+            var baseOffset = Json.Number(a["baseOffset"]) ?? wall.Num("baseOffset");
+            var rise = a.ContainsKey(PathCurve.Key) || a["x3"] != null ? Args.Rise(a, start, end) : wall.NumOrNull(PathCurve.Key) ?? 0;
+            // The openings must still fit the wall as it will be, along it and up it.
+            var next = Walls.Attrs(start, end, height, baseOffset, thickness);
+            if (rise != 0) next[PathCurve.Key] = rise;
+            var after = wall.With(attrs: next);
+            // A recognised wall's openings stay where the file put them in plan (decision 546): the wall's and its joined
+            // neighbours' (their joined ends move with it); a drawn wall's go with its start.
+            var places = Openings.PlacesOnRecognised(ctx.Model, Joins.Of(ctx.Model, wall.Id).Select(j => Joins.Other(j, wall.Id)).Prepend(wall.Id));
+            var kept = places.Where(p => p.Wall == wall.Id).ToDictionary(p => p.Opening, p => p.At);
+            foreach (var o in Openings.PlacedOn(ctx.Model, wall.Id))
+            {
+                var along = kept.TryGetValue(o.Opening.Id, out var at) ? Openings.AlongKept(after, at) ?? o.Along : o.Along;
+                Openings.CheckFits(ctx.Model, after, along, o.Sill, o.Width, o.Height, o.Opening.Id);
+            }
+            // Only the wall's own fields change; what other modules wrote on it (its phase, its cut priority) stays.
+            var attrs = wall.CloneAttrs();
+            foreach (var (k, v) in Walls.Attrs(Walls.Start(wall), Walls.End(wall), height, baseOffset, thickness)) attrs[k] = v?.DeepClone();
+            if (rise != 0) attrs[PathCurve.Key] = rise; else attrs.Remove(PathCurve.Key);
+            // Its own finished floor over its base (forum topic 192; null: its type's again): the sills measured from it follow.
+            var floorGiven = a.ContainsKey("finishedFloor");
+            if (floorGiven) OpeningSills.SetFinishedFloor(attrs, a["finishedFloor"]);
+            ctx.Replace(wall.With(attrs: attrs));
+            if (floorGiven) OpeningSills.CheckWall(ctx.Model, ctx.Model.Get(wall.Id)!);
+            var moveJoined = a["moveJoinedEnds"] is not JsonValue mj || !mj.TryGetValue<bool>(out var keep) || keep;
+            if ((start - Walls.Start(wall)).Length > 1e-12 || (end - Walls.End(wall)).Length > 1e-12)
+                Joins.MoveEnds(ctx, Paths(ctx), ctx.Model.Get(wall.Id)!, start, end, moveJoined, a["detachJoinedEnds"] is JsonValue dj && dj.TryGetValue<bool>(out var detach) && detach);
+            Openings.KeepPlaces(ctx, places);
+            return null;
+        });
+
+        // A wall's top (the forum's topic #45): {ids, top?: "above" | a storey's id | null (unconnected), topOffset?, height? (its own, unconnected)};
+        // what is not given stays. Each wall's height then worked out on every ask (WallTop); one disconnected keeps the height it had.
+        r.Command("setWallTop", "Wall top", (ctx, a) =>
+        {
+            var ids = Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Which wall?");
+            foreach (var id in ids)
+            {
+                var wall = Spatial.Require(ctx.Model, id, IfcClass.Wall);
+                var top = a.ContainsKey("top") ? ((string?)a["top"] is { Length: > 0 } t && t != WallTop.Unconnected ? t : null) : WallTop.Of(wall);
+                var offset = a.ContainsKey("topOffset") ? Json.Number(a["topOffset"]) ?? 0 : wall.Num(WallTop.OffsetKey);
+                var attrs = wall.CloneAttrs();
+                WallTop.Set(ctx.Model, wall, attrs, top, offset, Json.Number(a["height"]));
+                var after = wall.With(attrs: attrs);
+                // The openings must still fit the wall as it will stand.
+                foreach (var o in Openings.PlacedOn(ctx.Model, wall.Id)) Openings.CheckFits(ctx.Model, after, o.Along, o.Sill, o.Width, o.Height, o.Opening.Id);
+                ctx.Replace(after);
+            }
+            return null;
+        });
+
+        // A wall type's top for the walls drawn with it: {id, top?: "above" | "unconnected", topOffset?, height? (unconnected walls'; null: 3 m)}.
+        r.Command("setWallTypeTop", "Wall type's top", (ctx, a) =>
+        {
+            WallTop.SetTypeDefaults(ctx, a, Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.WallType));
+            return null;
+        });
+
+        // A wall's top as worked out now: {id} → {top, topOffset, height, base, level, storey (the one it goes to), problem}.
+        r.Query("wallTop", (q, a) =>
+        {
+            var wall = Spatial.Require(q.Model, (string?)a["id"], IfcClass.Wall);
+            var b = WallTop.Base(q.Model, wall);
+            var h = WallTop.Height(q.Model, wall);
+            return new JsonObject
+            {
+                ["top"] = WallTop.Of(wall), ["topOffset"] = wall.Num(WallTop.OffsetKey), ["height"] = Math.Round(h, 6), ["base"] = Math.Round(b, 6), ["level"] = Math.Round(b + h, 6),
+                ["storey"] = WallTop.TargetStorey(q.Model, wall)?.Id, ["problem"] = WallTop.Problem(q.Model, wall),
+            };
+        });
+
+        r.Command("setWallType", "Change type", (ctx, a) =>
+        {
+            var type = Spatial.Require(ctx.Model, (string?)a["typeId"], IfcClass.WallType);
+            foreach (var id in Ids(a))
+            {
+                Walls.SetType(ctx, Spatial.Require(ctx.Model, id, IfcClass.Wall), type);
+                // Another type, another finished floor (forum topic 192): its openings measured from it must still fit.
+                OpeningSills.CheckWall(ctx.Model, ctx.Model.Get(id)!);
+            }
+            return null;
+        });
+
+        // A wall's thickness typed on the wall (report #107): {ids, thickness}; the type with the same build-up and that
+        // thickness (its core resized, its finishes kept), the project's or made from the wall's type (WallThickness).
+        r.Command("setWallThickness", "Change wall thickness", (ctx, a) =>
+        {
+            WallThickness.Set(ctx, Ids(a), Json.Number(a["thickness"]) ?? throw new CommandException("Give the wall's thickness."));
+            return null;
+        });
+
+        // A wall's reference line (forum topic 159, GitHub #63, decision 685): {ids, kind (coreCentre, coreExterior, coreInterior,
+        // exteriorFace, interiorFace, layer, offset), offset? (metres left of the core's centre), layer? (a face, 0 the exterior)}.
+        // The line the walls are snapped, moved and grown by changes; the walls stay where they are. coreCentre: none kept.
+        r.Command("setWallReference", "Reference line", (ctx, a) =>
+        {
+            WallReference.Set(ctx, Ids(a), WallReference.Parse(a["reference"]?.DeepClone() ?? new JsonObject { ["kind"] = a["kind"]?.DeepClone(), ["offset"] = a["offset"]?.DeepClone(), ["layer"] = a["layer"]?.DeepClone() }));
+            return null;
+        });
+
+        r.Command("flipWall", "Flip", (ctx, a) =>
+        {
+            var axis = (string?)a["axis"] ?? "y";
+            foreach (var id in Ids(a)) Walls.Flip(ctx, Spatial.Require(ctx.Model, id, IfcClass.Wall), axis);
+            return null;
+        });
+
+        // A wall by its profile (a tester's wish, #100, decision 372): its own top along its axis, [[u, v], …] with u from its
+        // start and v over its base, a step two points at one u; a gable, a slope, steps, a wall under a stair. Null: flat again.
+        r.Command("setWallProfile", "Wall profile", (ctx, a) =>
+        {
+            var ids = Ids(a);
+            if (!ids.Any()) throw new CommandException("Which wall?");
+            foreach (var id in ids)
+            {
+                var wall = Spatial.Require(ctx.Model, id, IfcClass.Wall);
+                if (PathCurve.Of(wall).IsArc) throw new CommandException("A curved wall keeps a flat top: its profile is for straight walls.");
+                var attrs = wall.CloneAttrs();
+                if (a["top"] is not JsonArray top || top.Count == 0) { attrs.Remove(WallTops.TopProfileKey); ctx.Replace(wall.With(attrs: attrs)); continue; }
+                var length = (Walls.End(wall) - Walls.Start(wall)).Length;
+                var pts = new List<(double U, double V)>();
+                foreach (var q in top)
+                {
+                    if (q is not JsonArray { Count: >= 2 } pa || Json.Number(pa[0]) is not { } u || Json.Number(pa[1]) is not { } v) throw new CommandException("A profile is a list of [u, v] points.");
+                    pts.Add((Math.Clamp(u, 0, length), v));
+                }
+                if (pts.Count < 2) throw new CommandException("A profile needs two points at least.");
+                for (var i = 1; i < pts.Count; i++) if (pts[i].U < pts[i - 1].U - 1e-9) throw new CommandException("A profile runs from the wall's start to its end: its points in order along it.");
+                if (pts.Any(q => q.V < 0.05)) throw new CommandException("A profile stays 50 mm over the wall's base at least.");
+                if (pts.Any(q => q.V > 100)) throw new CommandException("A profile stays under 100 m.");
+                attrs[WallTops.TopProfileKey] = WallTops.ProfileJson(pts);
+                ctx.Replace(wall.With(attrs: attrs));
+            }
+            return null;
+        });
+    }
+
+    /// <summary>A contour: <c>points</c> as [[x, y], …], or the rectangle between (x1, y1) and (x2, y2).</summary>
+    static ClassDescriptor? RoofClass;
+
+    // When a roof's fields apply (decision 333): as Roof.Resolved.Framed reads it, rafters and the deck never both.
+    static readonly IReadOnlyList<IReadOnlyDictionary<string, string[]>> Mansard = FieldDescriptor.When("shape", "mansard");
+    static readonly IReadOnlyList<IReadOnlyDictionary<string, string[]>> Framed = FramedAs();
+    static readonly IReadOnlyList<IReadOnlyDictionary<string, string[]>> Unframed =
+        [new Dictionary<string, string[]> { ["shape"] = ["flat", "barrel"] }, new Dictionary<string, string[]> { ["structure"] = ["none"] }];
+
+    static IReadOnlyList<IReadOnlyDictionary<string, string[]>> FramedAs(string? structure = null) =>
+        [new Dictionary<string, string[]> { ["shape"] = ["!flat", "!barrel"], ["structure"] = structure == null ? ["!none"] : [structure] }];
+
+    /// <summary>
+    /// A roof as a change would make it, one step for the configurator: a <c>style</c> first (its fields replace the roof's, the
+    /// per-edge rules go; the structure stays unless the style brings its own), then the fields (<c>attrs</c>, null clears one),
+    /// the outline (<c>points</c>) and the edge rules (<c>edges</c>: one entry per edge, null for "as the roof"; null clears
+    /// them all). Fields or edges changed by hand leave the roof no longer exactly its style.
+    /// </summary>
+    internal static Entity RoofDraft(IModelView m, Entity roof, JsonObject a)
+    {
+        var attrs = roof.CloneAttrs();
+        if (ProjectRoofStyles.Of(m, (string?)a["style"]) is { } mine) ProjectRoofStyles.Apply(attrs, mine, Roof.Contour(roof));
+        else if ((string?)a["style"] is { Length: > 0 } sid)
+        {
+            var style = RoofCatalog.StyleOf(sid) ?? throw new CommandException($"There is no roof style „{sid}”.");
+            attrs.Remove("edges");
+            attrs.Remove("layers");
+            string[] own = style.Structure != null ? ["eaveOffset", "rafterTail", "rafterSeat"] : ["structure", "rafterSection", "rafterSpacing", "purlins", "purlinSection", "ridgeSection", "plateSection", "collarSection", "eaveOffset", "webSection", "timberGrade", "rafterTail", "rafterSeat"];
+            // The covering's material follows the covering below (one chosen by the user stays).
+            foreach (var (k, v) in Roof.Attrs(style, Roof.Contour(roof))) if (k != RoofCoverings.Key && (!own.Contains(k) || attrs[k] == null)) attrs[k] = v?.DeepClone();
+            if (style.Shape != "mansard") { attrs.Remove("upperPitch"); attrs.Remove("mansardInset"); }
+            if (style.Shape != "barrel") attrs.Remove("rise");
+            if (style.GutterColor.Length == 0) attrs.Remove("gutterColor");
+        }
+        var fields = RoofClass?.Fields ?? [];
+        foreach (var (k, v) in a["attrs"] as JsonObject ?? [])
+        {
+            if (k == "layers")
+            {
+                if (v == null || v is JsonArray { Count: 0 }) { attrs.Remove("layers"); continue; }
+                if (v is not JsonArray arr) throw new CommandException("Roof layers must be a list.");
+                var clean = new JsonArray();
+                foreach (var item in arr)
+                {
+                    if (item is not JsonObject lo) throw new CommandException("Each roof layer must be an object.");
+                    if (Json.Number(lo["thickness"]) is not { } t || !double.IsFinite(t) || t <= 1e-4 || t > 2.0)
+                        throw new CommandException("Each roof layer's thickness must be between 0.1 mm and 2 m.");
+                    var c = new JsonObject { ["material"] = ((string?)lo["material"] ?? "").Trim(), ["thickness"] = t };
+                    if (((string?)lo["role"])?.Trim() is { Length: > 0 } role) c["role"] = role;
+                    if (((string?)lo["name"])?.Trim() is { Length: > 0 } name) c["name"] = name;
+                    clean.Add((JsonNode)c);
+                }
+                attrs["layers"] = clean;
+                continue;
+            }
+            if (k == LayerExtents.Key)
+            {
+                if (v == null || v is JsonArray { Count: 0 }) { attrs.Remove(LayerExtents.Key); continue; }
+                if (v is not JsonArray arr) throw new CommandException("Layer extents must be a list.");
+                var clean = new JsonArray();
+                foreach (var item in arr)
+                {
+                    if (item is not JsonObject xo) throw new CommandException("Each layer extent must be an object.");
+                    if (Json.Number(xo["layer"]) is not { } li || li < 0 || li != Math.Floor(li)) throw new CommandException("Layer extent: invalid layer index.");
+                    if ((string?)xo["edge"] is not (LayerExtents.Outline or LayerExtents.Edge)) throw new CommandException("A roof layer extent's edge must be outline or edge.");
+                    if (Json.Number(xo["offset"]) is not { } off || !double.IsFinite(off) || Math.Abs(off) > LayerExtents.MaxOffset)
+                        throw new CommandException($"A layer reaches at most {LayerExtents.MaxOffset * 1000:0} mm past or short of its edge.");
+                    var c = new JsonObject { ["layer"] = (int)li, ["edge"] = (string)xo["edge"]!, ["offset"] = off };
+                    if ((string)xo["edge"]! == LayerExtents.Edge)
+                    {
+                        if (Json.Number(xo["index"]) is not { } idx || idx < 0 || idx != Math.Floor(idx)) throw new CommandException("Layer extent: invalid edge index.");
+                        c["index"] = (int)idx;
+                    }
+                    if (LayerExtents.CutsArg(xo["cuts"]) == true) c["cuts"] = xo["cuts"]!.DeepClone();
+                    clean.Add((JsonNode)c);
+                }
+                attrs[LayerExtents.Key] = clean;
+                continue;
+            }
+            var f = fields.FirstOrDefault(x => x.Key == k && !x.ReadOnly) ?? (k is "lowEdge" or "gutterColor" ? new FieldDescriptor(k, k, k == "lowEdge" ? "number" : "color") : throw new CommandException($"„{k}” is not a roof field."));
+            if (v == null) attrs.Remove(k); else attrs[k] = Fields.Check(f, v);
+        }
+        if (a["points"] != null || a["x1"] != null)
+        {
+            var (outline, arcs) = Slabs.OutlineArg(a["arcs"], Points(a), roof, "A roof");
+            Slabs.SetOutline(attrs, outline, arcs);
+            // The rules kept by edge go with the edges they were on.
+            if (!a.ContainsKey("edges")) RoofEdges.Renumber(attrs, RoofEdges.Match(Roof.Contour(roof), outline));
+            if (LayerExtents.Of(roof) is { Count: > 0 } ext && (a["attrs"] as JsonObject)?.ContainsKey(LayerExtents.Key) != true)
+            {
+                if (LayerExtents.ToJson(LayerExtents.RemapEdges(ext, Roof.Contour(roof), outline)) is { } kept) attrs[LayerExtents.Key] = kept;
+                else attrs.Remove(LayerExtents.Key);
+            }
+        }
+        else if (a["arcs"] != null)
+        {
+            var (outline, arcs) = Slabs.OutlineArg(a["arcs"], Slabs.Corners(roof.With(attrs: attrs)), roof, "A roof");
+            Slabs.SetOutline(attrs, outline, arcs);
+        }
+        var corners = Slabs.Corners(roof.With(attrs: attrs)).Count;
+        if (a.ContainsKey("edges"))
+        {
+            if (a["edges"] is JsonArray edges)
+            {
+                if (edges.Count > corners) throw new CommandException($"The roof has {corners} edges, not {edges.Count}.");
+                var clean = new JsonArray();
+                foreach (var e in edges)
+                {
+                    if (e is not JsonObject o) { clean.Add(null); continue; }
+                    var c = new JsonObject();
+                    if ((string?)o["kind"] is { } kind) c["kind"] = kind is "eave" or "gable" ? kind : throw new CommandException("An edge is an eave or a gable.");
+                    if (Json.Number(o["pitch"]) is { } p) c["pitch"] = p;
+                    if (Json.Number(o["overhang"]) is { } oh) c["overhang"] = oh;
+                    // An eave edge without its gutter (decision 235).
+                    if (o["gutter"] is JsonValue gv && gv.TryGetValue<bool>(out var gutter) && !gutter) c["gutter"] = false;
+                    clean.Add((JsonNode?)(c.Count > 0 ? c : null));
+                }
+                if (clean.Any(x => x != null)) attrs["edges"] = clean; else attrs.Remove("edges");
+            }
+            else attrs.Remove("edges");
+        }
+        // A roof shaped by hand is no longer exactly its style.
+        if (a.ContainsKey("edges") || (a["attrs"] as JsonObject)?.Count > 0) attrs.Remove("style");
+        RoofCoverings.Follow(roof.Attrs, attrs);
+        return roof.With(attrs: attrs);
+    }
+
+    static void CheckRoof(IModelView m, Entity roof)
+    {
+        if (Roof.Resolve(roof, m) is { } r && Roof.Problem(r) is { } problem) throw new CommandException(problem);
+    }
+
+    static IReadOnlyList<Vec2> Points(JsonObject a) => Args.Points(a);
+
+    /// <summary>A roof's openings written back; the one just set must fit (its reason when it does not).</summary>
+    /// <summary>Refused when a roof window or dormer the roof already holds would not sit on the roof as it would become.</summary>
+    static void CheckRoofOpenings(IModelView m, Entity next)
+    {
+        var openings = RoofOpenings.Of(next).ToList();
+        if (openings.Count == 0) return;
+        if (RoofTop.ShapeOf(next, m) is not { } shape) throw new CommandException("The roof holds roof windows or dormers, which a flat roof cannot take; remove them first.");
+        if (next.Str("shape") == "barrel") throw new CommandException("The roof holds roof windows or dormers, which a barrel roof cannot take yet; remove them first.");
+        var diags = new List<string>();
+        var placed = RoofOpenings.Place(next, shape, m, diags);
+        if (openings.FirstOrDefault(o => placed.All(p => p.Opening.Id != o.Id)) is { } lost)
+            throw new CommandException(diags.FirstOrDefault(d => d.Contains($"„{lost.Name}”")) ?? $"„{lost.Name}” would no longer sit on the roof; move or remove it first.");
+    }
+
+    static void WriteRoofOpenings(ICommandContext ctx, Entity roof, JsonNode[] list, string checkId)
+    {
+        var attrs = roof.CloneAttrs();
+        attrs["openings"] = new JsonArray(list);
+        var next = roof.With(attrs: attrs);
+        if (RoofTop.ShapeOf(next, ctx.Model) is not { } shape) throw new CommandException("A flat roof takes no roof windows or dormers.");
+        var diags = new List<string>();
+        var placed = RoofOpenings.Place(next, shape, ctx.Model, diags);
+        if (placed.All(p => p.Opening.Id != checkId))
+        {
+            var name = RoofOpenings.Of(next).FirstOrDefault(o => o.Id == checkId)?.Name ?? "";
+            throw new CommandException(diags.FirstOrDefault(d => d.Contains($"„{name}”")) ?? "The opening does not fit on the roof.");
+        }
+        ctx.Replace(next);
+    }
+
+    static JoinerySpec JinerySpecOrThrow(JsonNode? n) => JoinerySpec.From(n) ?? throw new CommandException("The type's configuration is missing or unreadable.");
+
+    /// <summary>A door or window in the wall picked: where the click falls along it (or <c>along</c>), of the type given or the project's first.</summary>
+    static JsonNode AddFill(ICommandContext ctx, JsonObject a, string kind)
+    {
+        var wall = Spatial.Require(ctx.Model, (string?)a["wallId"], IfcClass.Wall);
+        var type = (string?)a["typeId"] is { } typeId
+            ? ctx.Model.Get(typeId) is { Class: IfcClass.DoorType or IfcClass.WindowType } t ? t : throw new CommandException("There is no such door or window type.")
+            : Openings.EnsureType(ctx, kind);
+        var along = Json.Number(a["along"]) ?? Openings.AlongOf(wall, new Vec2(Json.Number(a["x"]) ?? 0, Json.Number(a["y"]) ?? 0));
+        // Its own width and height (forum topic 140) over the type's, where given.
+        // Its sill over the structural level or the finished floor (forum topic 192): as asked, else the project's default.
+        var sillFrom = OpeningSills.Parse((string?)a["sillFrom"]) ?? OpeningSills.ProjectDefault(ctx.Model);
+        var fill = Openings.AddFill(ctx, wall, type, along, Json.Number(a["sill"]), Json.Number(a["width"]), Json.Number(a["height"]), sillFrom);
+        // Placed in the hand and to the side the tool chose (Space, the cursor's side of the wall).
+        if (a["flipHand"] is JsonValue hv && hv.TryGetValue<bool>(out var hand) && hand) { Openings.Flip(ctx, fill, "x"); fill = ctx.Model.Get(fill.Id)!; }
+        if (a["flipSide"] is JsonValue sv && sv.TryGetValue<bool>(out var side) && side) Openings.Flip(ctx, fill, "y");
+        return new JsonObject { ["id"] = fill.Id };
+    }
+
+    static IEnumerable<QuantitySet> FillQuantities(Entity fill, IModelView m, string set)
+    {
+        if (Openings.SpecOf(m, fill.Id) is not { } spec) yield break;
+        // A bay, bow or box window's area is its faces' unfolded (report #60): what is glazed and priced.
+        var area = BayWindows.Projecting(spec) ? BayWindows.Developed(spec).Width * spec.Height : spec.Width * spec.Height;
+        yield return new QuantitySet(set,
+        [
+            new("Width", spec.Width, "LENGTH"),
+            new("Height", spec.Height, "LENGTH"),
+            new("Area", area, "AREA"),
+        ]);
+        // The details around it: the reveal's finish, the sills, the surround, the threshold.
+        var details = Openings.DetailQuantities(m, fill).Select(q => new Quantity(q.Name, q.Value, q.Unit)).ToList();
+        if (details.Count > 0) yield return new QuantitySet("Lapin_Details", details);
+        // A garage door's own (topic #48): its curtain's area, its panels, the headroom, backroom and sideroom it needs.
+        if (GarageDoors.Of(spec)) yield return new QuantitySet("Lapin_GarageDoor", [.. GarageDoors.Quantities(spec).Select(q => new Quantity(q.Name, q.Value, q.Unit))]);
+    }
+
+    static IPathElements Paths(ICommandContext ctx) => ctx.Services.Get<IPathElements>()!;
+
+    /// <summary>The building traced on the storey ({at?: [x, y]}: the building round that point), or refused saying why (forum topic 158).</summary>
+    static BuildingTrace.Traced Traced(IModelView m, IServices services, string storeyId, JsonNode? point)
+    {
+        Vec2? at = point is JsonArray xy && xy.Count >= 2 ? new Vec2(Json.Number(xy[0]) ?? 0, Json.Number(xy[1]) ?? 0) : null;
+        var (traced, problem) = BuildingTrace.Of(m, services, storeyId, at);
+        return traced ?? throw new CommandException(problem ?? "The walls do not close round the building.");
+    }
+
+    static JoinStyle? Style(JsonNode? n) => Args.JoinStyle(n);
+
+    static Vec2 P(JsonObject a, string x, string y) => Args.Point(a, x, y);
+
+    static IEnumerable<string> Ids(JsonObject a) => Args.Ids(a);
+
+    /// <summary>Whether a layer extent may be set on the element: a straight wall or a floor of Lapin's own with layers, the layer one with a thickness, the edge one it has.</summary>
+    static void LayerExtentCheck(IModelView m, Entity e, int layer, string edge, ref int? index)
+    {
+        // A type's: the defaults its elements start with (stage 4); a floor type's all round, its elements' outlines being their own.
+        if (e.Class is IfcClass.WallType or IfcClass.SlabType)
+        {
+            var layers = LayerSets.LayersOf(m, e.Id);
+            if (layers.Count == 0) throw new CommandException("The type has no layers.");
+            if (layer >= layers.Count) throw new CommandException($"The type has no layer {layer + 1}.");
+            if (!(layers[layer].Thickness > 1e-9)) throw new CommandException("A layer of no thickness has no body to extend.");
+            if (e.Class == IfcClass.WallType ? !LayerExtents.WallEdges.Contains(edge) : edge != LayerExtents.Outline)
+                throw new CommandException(e.Class == IfcClass.WallType ? "A wall's layer extends at its start, end, bottom or top." : "A floor type's layer extends all round: one edge is a floor's own.");
+            index = null;
+            return;
+        }
+        if (e.Class == IfcClass.Roof)
+        {
+            if (StoredBodies.Has(e) || e.Attrs["reference"] != null) throw new CommandException("A reference keeps its file's body: convert it to a native element first.");
+            var rLayers = Roof.LayersOf(e);
+            if (rLayers.Count == 0) throw new CommandException("The roof has no custom layers.");
+            if (layer >= rLayers.Count) throw new CommandException($"The roof has no layer {layer + 1}.");
+            if (!(rLayers[layer].Thickness > 1e-9)) throw new CommandException("A layer of no thickness has no body to extend.");
+            if (edge == LayerExtents.Outline) { index = null; return; }
+            if (edge != LayerExtents.Edge) throw new CommandException("A roof's layer extends all round its outline or at one edge of it.");
+            var rn = Roof.Contour(e).Count;
+            if (index is not { } ri || ri < 0 || ri >= rn) throw new CommandException($"Which edge? The roof's outline has {rn}, from 0.");
+            return;
+        }
+        if (e.Class is not (IfcClass.Wall or IfcClass.Slab)) throw new CommandException("Layer extents are for walls, floors and roofs and their types.");
+        // A reference keeps the body its file gave it: Lapin does not build its layers, so it has none to extend.
+        if (StoredBodies.Has(e) || e.Attrs["reference"] != null) throw new CommandException("A reference keeps its file's body: convert it to a native element first.");
+        if (LayerSets.BandsOf(m, e.Id) is not { Count: > 0 } bands) throw new CommandException("The element has no layers: give it a type with layers first.");
+        if (!bands.Any(b => b.Index == layer)) throw new CommandException($"The element has no layer {layer + 1}.");
+        var band = bands.First(b => b.Index == layer);
+        if (!(band.To - band.From > 1e-9)) throw new CommandException("A layer of no thickness has no body to extend.");
+        if (e.Class == IfcClass.Wall)
+        {
+            if (!LayerExtents.WallEdges.Contains(edge)) throw new CommandException("A wall's layer extends at its start, end, bottom or top.");
+            index = null;
+            return;
+        }
+        if (edge == LayerExtents.Outline) { index = null; return; }
+        if (edge != LayerExtents.Edge) throw new CommandException("A floor's layer extends all round its outline or at one edge of it.");
+        var n = Slabs.Corners(e).Count;
+        if (index is not { } i || i < 0 || i >= n) throw new CommandException($"Which edge? The floor's outline has {n}, from 0.");
+    }
+
+    /// <summary>The floor's edge extents gone with their edges after its outline changed (forum topic 89); one whose edge is gone goes with it.</summary>
+    static void RemapExtents(Entity slab, JsonObject attrs, IReadOnlyList<Vec2> corners)
+    {
+        if (LayerExtents.Of(slab) is not { Count: > 0 } extents) return;
+        if (LayerExtents.ToJson(LayerExtents.RemapEdges(extents, Slabs.Corners(slab), corners)) is { } kept) attrs[LayerExtents.Key] = kept;
+        else attrs.Remove(LayerExtents.Key);
+    }
+
+    /// <summary>The element an outline edit names: a floor, a floor opening or a ceiling, its corners and its edges' rises.</summary>
+    static (Entity E, IReadOnlyList<Vec2> Corners, double[]? Rises) OutlineOf(ICommandContext ctx, JsonObject a)
+    {
+        var e = ctx.Model.Get((string?)a["id"] ?? "") ?? throw new CommandException("The element is not in the project.");
+        // A drawn room and a drawn balcony too (decision 589): a room found from its walls follows them, a styled balcony its fields.
+        if (!(e.Class is IfcClass.Slab or IfcClass.Roof || e.Class == Ceilings.Class || (e.Class == IfcClass.OpeningElement && e.Attrs["contour"] != null && e.Str("stairId") == null)
+            || (e.Class == Rooms.Class && !e.Bool("auto")) || (e.Class == Balconies.BalconyModule.Class && e.Attrs["contour"] != null)))
+            throw new CommandException("Only a floor, a floor opening, a ceiling, a roof, a drawn room or a drawn balcony has its outline's edges bent and its corners rounded here.");
+        if (StoredBodies.Has(e) || e.Attrs["reference"] != null) throw new CommandException("An element kept as it came from its file is not edited by its outline.");
+        var corners = Slabs.Corners(e);
+        if (corners.Count < 3) throw new CommandException("The element has no outline.");
+        // One of its own holes (audit S4): {hole: its index}.
+        if (OutlineHoles.Index(a, e) is { } k) { var h = OutlineHoles.Of(e)[k]; return (e, h.Corners, h.Rises); }
+        // A corner beside an elliptical edge is not rounded or cut, and that edge is no arc (audit S4).
+        if (Slabs.Ellipses(e) is { } el && Json.Number(a["index"]) is { } ix && ix >= 0 && ix < corners.Count
+            && (el[(int)ix] != null || (a["rise"] == null && el[((int)ix - 1 + corners.Count) % corners.Count] != null)))
+            throw new CommandException("That edge runs along an ellipse: only a corner between two straight edges is rounded or cut, and an elliptical edge is not bent.");
+        return (e, corners, Slabs.Rises(e));
+    }
+
+    static int Index(JsonObject a, int n) =>
+        Json.Number(a["index"]) is { } ix && ix >= 0 && ix < n && ix == Math.Floor(ix) ? (int)ix : throw new CommandException($"Which corner? The outline has {n}, from 0.");
+
+    /// <summary>An outline edit written: checked, its arcs with it, a floor's layer extents following its edges.</summary>
+    static void ReplaceOutline(ICommandContext ctx, Entity e, IReadOnlyList<Vec2> was, IReadOnlyList<Vec2> corners, IReadOnlyList<double>? rises, int? hole = null)
+    {
+        if (hole is { } k) { ctx.Replace(e.With(attrs: OutlineHoles.Replaced(e, k, corners, rises))); return; }
+        if (e.Class == Balconies.BalconyModule.Class)
+        {
+            // A balcony keeps the order it was drawn in: its first edge lies against the building.
+            Balconies.BalconyModule.Update(ctx, new JsonObject { ["id"] = e.Id, ["contour"] = Slabs.ContourJson(corners), ["arcs"] = ArcOutline.ToJson(rises) ?? new JsonArray([.. corners.Select(_ => (JsonNode)0)]) });
+            return;
+        }
+        var (c, r) = ArcOutline.Check(corners, rises, e.Class == IfcClass.Slab ? "A floor" : e.Class == IfcClass.Roof ? "A roof" : e.Class == Ceilings.Class ? "A ceiling" : e.Class == Rooms.Class ? "A room" : "An opening");
+        var attrs = e.CloneAttrs();
+        Slabs.SetOutline(attrs, c, r);
+        if (e.Class == IfcClass.Roof)
+        {
+            var matched = c.Count != was.Count ? RoofEdges.Match(was, c) : null;
+            if (matched != null) RoofEdges.Renumber(attrs, matched);
+            var next = e.With(attrs: attrs);
+            CheckRoof(ctx.Model, next);
+            CheckRoofOpenings(ctx.Model, next);
+            ctx.Replace(next);
+            if (matched != null) RoofEdges.Downpipes(ctx, e, next, matched, p => p);
+            return;
+        }
+        Slabs.SetEllipses(attrs, new JsonObject(), e);
+        if (e.Class == IfcClass.Slab) RemapExtents(e, attrs, c);
+        OutlineHoles.Apply(attrs, new JsonObject());
+        ctx.Replace(e.With(attrs: attrs));
+    }
+
+    /// <summary>Refused when a layer's extents would leave nothing of it: a wall's layer shorter than nothing along or up, a floor's outline crossing itself.</summary>
+    static void LayerExtentFits(IModelView m, Entity e, IReadOnlyList<LayerExtents.Extent> own, int layer)
+    {
+        // A type's are checked where its elements are built (a problem on the element, which keeps its layer whole there).
+        if (e.Class is not (IfcClass.Wall or IfcClass.Slab)) return;
+        // As the element builds: its type's under its own.
+        var type = LayerExtents.TypeOf(m, e) is { } t ? LayerExtents.Of(t) : [];
+        var xs = type.Where(x => !own.Any(y => LayerExtents.SamePlace(x, y))).Concat(own).Where(x => Math.Abs(x.Offset) > 1e-9).ToList();
+        if (e.Class == IfcClass.Wall)
+        {
+            var length = PathCurve.Of(e).Length;
+            if (length + LayerExtents.Short(xs, layer, LayerExtents.Start) + LayerExtents.Short(xs, layer, LayerExtents.End) < 0.01)
+                throw new CommandException("The layer would stop short of both ends by more than the wall is long.");
+            var band = LayerSets.BandsOf(m, e.Id)!.First(b => b.Index == layer);
+            var height = Walls.HeightOf(m, e);
+            var tall = Math.Clamp(band.Z1 ?? height, 0, height) - Math.Clamp(band.Z0 ?? 0, 0, height);
+            if (tall + LayerExtents.Short(xs, layer, LayerExtents.Bottom) + LayerExtents.Short(xs, layer, LayerExtents.Top) < 0.01)
+                throw new CommandException("The layer would stop short of its bottom and top by more than it is high.");
+            return;
+        }
+        var (contour, built) = Slabs.Built(e, xs);
+        xs = [.. built];
+        if (LayerExtents.SlabContour(contour, xs, layer, x => x.Offset) == null || LayerExtents.SlabContour(contour, xs, layer, x => Math.Min(0, x.Offset)) == null)
+            throw new CommandException("The layer's outline would cross itself: a smaller extent.");
+    }
+}
+
+/// <summary>Heights over the storey: a wall's base, a floor's top, a roof's wall plate (over the storey's top).</summary>
+sealed class Levels : IStoreyLevels
+{
+    public IEnumerable<(string Key, bool FromTop)> LevelsOf(Entity e) => e.Class switch
+    {
+        IfcClass.Wall => [("baseOffset", false)],
+        IfcClass.Slab => [("offset", false)],
+        IfcClass.Roof => [("eaveOffset", true)],
+        _ => [],
+    };
+}
+
+/// <summary>The bodies of the openings in walls and floors, for the IFC export (IfcOpeningElement).</summary>
+sealed class VoidShapes : IVoidShapes
+{
+    public Solid? Shape(Entity opening, IModelView m)
+    {
+        if (m.RelatingOf(opening.Id, IfcClass.RelVoidsElement) is not { } host) return null;
+        return host.Class switch
+        {
+            IfcClass.Wall => Openings.CutterIn(m, host, Openings.Place(m, opening)),
+            IfcClass.Slab => Slabs.OpeningSolid(m, host, opening),
+            _ => null,
+        };
+    }
+
+    /// <summary>The openings of the walls along a wall that pass through it (forum topic 64), each its box through this wall.</summary>
+    public IEnumerable<(string OpeningId, Solid Body)> Through(Entity element, IModelView m)
+    {
+        if (element.Class != IfcClass.Wall) yield break;
+        foreach (var (p, _) in ThroughOpenings.Into(m, element))
+            if (Openings.Cutter(Openings.FrameOf(m, element), p) is { } body) yield return (p.Opening.Id, body);
+    }
+}
+
+/// <summary>Roofs in the cut order: their body cut by higher priorities, their covering cutting lower ones.</summary>
+static class RoofCuts
+{
+    /// <summary>A roof's body, cut by what has a higher cut priority.</summary>
+    public static ElementGeometry? Geometry(Entity roof, IModelView m, IServices? services)
+    {
+        var g = Roof.Geometry(roof, m, services);
+        if (g == null || g.Parts.Count == 0 || services == null) return g;
+        var problems = new List<string>();
+        var parts = CutPriorities.Apply(roof, m, services, g.Parts.ToList(), problems);
+        return g with { Parts = parts, Diagnostics = problems.Count > 0 ? [.. g.Diagnostics ?? [], .. problems] : g.Diagnostics };
+    }
+
+    /// <summary>A roof's covering (with its deck, unframed) as what it cuts with, solved once per model revision (every wall around asks for it).</summary>
+    static readonly RevisionCache<Solid?> RoofEnvelopes = new();
+    public static Solid? Envelope(Entity roof, IModelView m) => RoofEnvelopes.Get(roof, m, v => Roof.Envelope(roof, v));
+
+}
+
+/// <summary>
+/// Before a storey goes, the walls whose top goes to it are let go, keeping their height (<see cref="WallTop.Release"/>);
+/// the storey is deleted as any. A height typed on a wall with a top (element.update) makes it unconnected at that height.
+/// </summary>
+sealed class WallTopDeletion : IDeletion, IElementUpdate
+{
+    public void Updated(ICommandContext ctx, Entity before, Entity after)
+    {
+        // A wall's or a wall type's finished floor typed in the inspector (forum topic 192): the sills measured from it moved with it, and must still fit.
+        if (after.Class is IfcClass.Wall or IfcClass.WallType && before.NumOrNull(OpeningSills.FinishedFloorKey) != after.NumOrNull(OpeningSills.FinishedFloorKey))
+        {
+            if (after.Class == IfcClass.Wall) OpeningSills.CheckWall(ctx.Model, after); else OpeningSills.CheckType(ctx.Model, after);
+        }
+        // Its top's mode changed by hand (the inspector's roofTop): what it lost to a deletion is no longer a problem.
+        if (after.Class == IfcClass.Wall && after.Attrs[WallTops.GoneKey] != null && after.Str("roofTop") != before.Str("roofTop"))
+        {
+            var cleared = after.CloneAttrs();
+            cleared.Remove(WallTops.GoneKey);
+            ctx.Replace(after.With(attrs: cleared));
+            after = ctx.Model.Get(after.Id)!;
+        }
+        if (after.Class != IfcClass.Wall || WallTop.Of(after) == null || Math.Abs(after.Num("height", Walls.DefaultHeight) - before.Num("height", Walls.DefaultHeight)) < 1e-12) return;
+        var attrs = after.CloneAttrs();
+        attrs.Remove(WallTop.Key);
+        attrs.Remove(WallTop.OffsetKey);
+        ctx.Replace(after.With(attrs: attrs));
+    }
+
+    public bool Delete(ICommandContext ctx, string id)
+    {
+        if (ctx.Model.Get(id) is { Class: IfcClass.BuildingStorey } storey) WallTop.Release(ctx, storey);
+        return false;
+    }
+}
+
+/// <summary>The doors', windows' and sunshades' plan symbols at a plan's own cut height (audit 22.11.2026).</summary>
+sealed class JoineryPlanAtCut : IPlanAtCut
+{
+    public bool Handles(Entity e) => e.Class is IfcClass.Door or IfcClass.Window or Sunshades.Class;
+
+    public IReadOnlyList<PlanItem>? PlanAt(IModelView m, Entity e, double cut) =>
+        e.Class == Sunshades.Class ? Sunshades.PlanAt(e, m, cut) : Openings.FillPlanAt(e, m, cut);
+}

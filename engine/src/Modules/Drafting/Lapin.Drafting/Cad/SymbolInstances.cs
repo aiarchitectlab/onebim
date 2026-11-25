@@ -1,0 +1,509 @@
+using System.Text.Json.Nodes;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Drafting.Cad;
+
+/// <summary>
+/// Symbols placed on views and sheets (docs/plan-user-extensibility.md §3.1–3.2): IfcAnnotation <c>SYMBOL</c>, drawn by
+/// <see cref="Symbols"/> on their drafting layer; drafted shapes and texts saved as a symbol (Save as symbol…), an instance
+/// exploded back into drafting. Each command is one undo step.
+/// </summary>
+public static class SymbolInstances
+{
+    public const string Predefined = Symbols.Predefined;
+
+    /// <summary>The view's symbols, on their layers' pens (a hidden layer hides them, a locked one keeps them where they are).</summary>
+    public static IEnumerable<ViewMark> Marks(ViewContext c)
+    {
+        var layers = Drafts.Layers(c.Model).ToDictionary(l => l.Name);
+        var hidden = (c.View.Attrs["hiddenLayers"] as JsonArray)?.Select(x => (string?)x).ToHashSet() ?? [];
+        foreach (var e in Symbols.Instances(c.Model).Where(e => e.Str("viewId") == c.View.Id))
+        {
+            var layer = layers.GetValueOrDefault(e.Str("layer") ?? "0") ?? layers["0"];
+            if (!layer.Shows || hidden.Contains(layer.Name)) continue;
+            if (Symbols.Mark(c, e, layer.Name, layer.Color) is { } mk) yield return mk;
+        }
+    }
+
+    /// <summary>
+    /// A placed symbol's drawing in its view's own metres, as it draws there (its pose, scale, flips and the layers its
+    /// attributes hide): its strokes as runs of points (a closed one back to its start, circles and arcs in chords) and
+    /// the loops of its fills and hatches. Texts are left out. Null when its symbol is gone.
+    /// </summary>
+    public static (List<List<Vec2>> Runs, List<List<Vec2>> Loops)? Linework(IModelView m, Entity e, Entity view)
+    {
+        if (Symbols.DefOf(m, e.Str("symbolId")) is not { } def) return null;
+        var (at, angle, scale, fx, fy) = Symbols.Pose(e);
+        var mm = (view.NumOrNull("scale") ?? 100) / 1000;
+        var model = def.Scale == "model";
+        var unit = (model ? 0.001 : mm) * scale;
+        var x = new SymbolXf(at, angle * Math.PI / 180, unit, model ? scale * 0.001 / mm : scale, fx, fy);
+        var sd = SymbolRender.Render(m, def, Symbols.Resolver(m, def, e, view, at), unit);
+        var runs = new List<List<Vec2>>();
+        foreach (var s in sd.Strokes)
+        {
+            var pts = s.Pts.Select(x.Point).ToList();
+            if (s.Closed && pts.Count >= 3 && (pts[0] - pts[^1]).Length > 1e-12) pts.Add(pts[0]);
+            if (pts.Count >= 2) runs.Add(pts);
+        }
+        var loops = sd.Fills.SelectMany(f => f.Loops).Concat(sd.Hatches.SelectMany(h => h.Loops))
+            .Select(l => l.Select(x.Point).ToList()).Where(l => l.Count >= 3).ToList();
+        return (runs, loops);
+    }
+
+    /// <summary>
+    /// A placed symbol in the 3D view (issue #103): its strokes on its view's plane, as a drafted shape stands there
+    /// (<see cref="Drafts.Geometry3d"/>), in its own colour or its layer's. A DXF's block kept as a symbol (<c>dxf</c>, or
+    /// made by an import) is part of the DXF's drawing and comes with it in <see cref="Underlays3d"/> instead, under the
+    /// import's and the link's 3D switches; a symbol on a sheet or on a 3D view has none.
+    /// </summary>
+    public static ElementGeometry? Geometry3d(Entity e, IModelView m, IServices services)
+    {
+        if (e.PredefinedType != Predefined || Underlays3d.IsUnderlay(e)) return null;
+        if (Views.Find(m, e.Str("viewId") ?? "") is not { } view || view.Str("kind") is "3d") return null;
+        if (Linework(m, e, view) is not { Runs.Count: > 0 } drawn) return null;
+        var xs = drawn.Runs.SelectMany(r => r).Select(p => p.X).ToList();
+        if (Views.PlaneOf(m, services, view, (xs.Min() + xs.Max()) / 2) is not { } plane) return null;
+        var color = e.Str("color") ?? Drafts.LayerOf(m, e.Str("layer")).Color;
+        return new ElementGeometry([], Lines: drawn.Runs.Select(run => (IReadOnlyList<Vec3>)run.Select(plane.World).ToList()).ToList(), LineColor: color);
+    }
+
+    static Entity Require(IModelView m, string? id) =>
+        m.Get(id ?? "") is { Class: IfcClass.Annotation, PredefinedType: Predefined } e ? e : throw new CommandException("Not a placed symbol.");
+
+    static List<string> Ids(JsonObject a) =>
+        a["ids"] is JsonArray arr ? [.. arr.Select(x => (string?)x).OfType<string>()] : (string?)a["id"] is { Length: > 0 } id ? [id] : throw new CommandException("Which symbols?");
+
+    static Vec2 P(JsonNode? n, string what) =>
+        n is JsonArray a && a.Count >= 2 && Json.Number(a[0]) is { } x && Json.Number(a[1]) is { } y && double.IsFinite(x) && double.IsFinite(y) ? new Vec2(x, y) : throw new CommandException($"{what} is [x, y].");
+
+    static JsonArray J(Vec2 p) => new(Math.Round(p.X, 9), Math.Round(p.Y, 9));
+
+    static bool? B(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) ? b : null;
+
+    /// <summary>An instance's pose and look from a command's arguments, over <paramref name="attrs"/>; what it does not name stays.</summary>
+    static void Apply(IModelView m, JsonObject attrs, JsonObject a)
+    {
+        if ((string?)a["symbolId"] is { Length: > 0 } sid)
+        {
+            if (Symbols.DefOf(m, sid) == null) throw new CommandException("There is no such symbol.");
+            attrs["symbolId"] = sid;
+        }
+        if (a.ContainsKey("at")) attrs["at"] = J(P(a["at"], "Where it stands"));
+        if (Json.Number(a["angle"]) is { } angle) attrs["angle"] = Math.Round(((angle % 360) + 360) % 360, 9);
+        if (a.ContainsKey("scale"))
+            attrs["scale"] = Json.Number(a["scale"]) is > 0 and <= 1000 and var s ? s : throw new CommandException("A symbol's scale is above 0 and at most 1000.");
+        if (B(a["flipX"]) is { } fx) attrs["flipX"] = fx;
+        if (B(a["flipY"]) is { } fy) attrs["flipY"] = fy;
+        if (a.ContainsKey("layer"))
+        {
+            var layer = (string?)a["layer"] is { Length: > 0 } l ? l : "0";
+            if (Drafts.Layers(m).All(x => x.Name != layer)) throw new CommandException($"There is no drafting layer „{layer}”.");
+            attrs["layer"] = layer;
+        }
+        if (a.ContainsKey("color"))
+        {
+            if ((string?)a["color"] is { Length: > 0 } col) attrs["color"] = col; else attrs.Remove("color");
+        }
+        // Attribute values merged: a key given null takes the symbol's default back.
+        if (a["values"] is JsonObject values)
+        {
+            var own = attrs["values"] as JsonObject ?? new JsonObject();
+            foreach (var (k, v) in values)
+            {
+                if (v == null) own.Remove(k);
+                else own[k] = v.ToString();
+            }
+            if (own.Count > 0) attrs["values"] = own.DeepClone(); else attrs.Remove("values");
+        }
+    }
+
+    // ------------------------------------------------------------ drafting → symbol
+
+    /// <summary>
+    /// Drafted shapes and texts of a view as a symbol's items, in its mm: seen from <paramref name="base"/>, its +x along
+    /// <paramref name="angle"/> (radians); an annotation symbol's mm the view's paper mm, a model symbol's the building's.
+    /// Construction lines are left out. Returns the items and the attributes the texts name (<c>{attr.key}</c>).
+    /// </summary>
+    public static (JsonArray Items, List<SymbolAttribute> Attributes) ItemsOf(IModelView m, Entity view, IEnumerable<Entity> sources, Vec2 @base, double angle, bool model)
+    {
+        var mm = (view.NumOrNull("scale") ?? 100) / 1000;
+        var unit = model ? 0.001 : mm;
+        var (c, s) = (Math.Cos(-angle), Math.Sin(-angle));
+        Vec2 L(Vec2 p) { var d = p - @base; return new Vec2(d.X * c - d.Y * s, d.X * s + d.Y * c) * (1 / unit); }
+        static JsonNode N(double v) => JsonValue.Create(Math.Round(v, 4))!;
+        JsonArray Pt(Vec2 p) { var q = L(p); return new JsonArray(N(q.X), N(q.Y)); }
+        double Deg(double rad) => ((rad - angle) * 180 / Math.PI % 360 + 360) % 360;
+        var book = DraftingResources.Book(m);
+        var items = new JsonArray();
+        var keys = new List<string>();
+        foreach (var e in sources)
+        {
+            if (e.Class != IfcClass.Annotation) continue;
+            if (e.PredefinedType == Drafts.Predefined)
+            {
+                if (e.Str("role") == "draft") continue;
+                var layer = Drafts.LayerOf(m, e.Str("layer"));
+                var color = e.Str("color");
+                JsonObject Pen(JsonObject o, string widthKey = "stroke")
+                {
+                    o[widthKey] = layer.Weight;
+                    if (color != null) o["color"] = color;
+                    if (layer.DashIn(book) is { } dash) o["dash"] = new JsonArray(dash.Select(d => (JsonNode)d).ToArray());
+                    return o;
+                }
+                if (e.Attrs["hatch"] is JsonObject h)
+                {
+                    var pattern = (string?)h["pattern"] ?? "LINES45";
+                    var solid = HatchLibrary.Find(pattern, DraftingResources.Patterns(m)) is null or { Solid: true };
+                    foreach (var loop in Drafts.HatchLoops(e))
+                    {
+                        var o = new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(loop.Select(p => (JsonNode)Pt(p)).ToArray()), ["closed"] = true, ["stroke"] = 0 };
+                        if (solid) o["fill"] = color ?? "byInstance";
+                        else
+                        {
+                            var hatch = new JsonObject { ["pattern"] = pattern, ["scale"] = Json.Number(h["scale"]) ?? 1, ["angle"] = Math.Round(((Json.Number(h["angle"]) ?? 0) - angle * 180 / Math.PI) % 360, 6) };
+                            if (color != null) hatch["color"] = color;
+                            o["hatch"] = hatch;
+                        }
+                        items.Add((JsonNode)o);
+                    }
+                    continue;
+                }
+                switch (Drafts.ShapeOf(e))
+                {
+                    case Line l: items.Add((JsonNode)Pen(new JsonObject { ["type"] = "line", ["a"] = Pt(l.A), ["b"] = Pt(l.B) }, "w")); break;
+                    case Polyline p: items.Add((JsonNode)Pen(new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(p.Pts.Select(q => (JsonNode)Pt(q)).ToArray()), ["closed"] = p.Closed })); break;
+                    case Circle ci: items.Add((JsonNode)Pen(new JsonObject { ["type"] = "circle", ["c"] = Pt(ci.C), ["r"] = N(ci.R / unit) })); break;
+                    case Arc ar: items.Add((JsonNode)Pen(new JsonObject { ["type"] = "arc", ["c"] = Pt(ar.C), ["r"] = N(ar.R / unit), ["start"] = N(Deg(ar.Start)), ["end"] = N(Deg(ar.End)) }, "w")); break;
+                    // A symbol has no ellipses: one is its points by the one rule for curves (a whole one closed).
+                    case Ellipse el:
+                        var ep = el.Points();
+                        if (el.Whole && ep.Count > 1) ep.RemoveAt(ep.Count - 1);
+                        items.Add((JsonNode)Pen(new JsonObject { ["type"] = "polyline", ["pts"] = new JsonArray(ep.Select(q => (JsonNode)Pt(q)).ToArray()), ["closed"] = el.Whole }));
+                        break;
+                }
+            }
+            else if (e.PredefinedType == DraftingTables.Predefined && e.Attrs["table"] is JsonObject tj)
+            {
+                // A drafting table: its sizes are paper mm, a model symbol's mm the building's (as a text's height).
+                var table = DraftingTables.Scaled(tj, model ? mm * 1000 : 1);
+                var o = new JsonObject { ["type"] = "table", ["at"] = Pt(Args.PointOf(e.Attrs["at"])), ["angle"] = N(Deg(e.Num("angle") * Math.PI / 180)), ["table"] = table };
+                if (e.Str("textStyle") is { } ts) o["style"] = ts;
+                items.Add((JsonNode)o);
+                foreach (var cell in (tj["rows"] as JsonArray ?? []).SelectMany(r => (r as JsonObject)?["cells"] as JsonArray ?? []).OfType<JsonObject>())
+                    if ((string?)cell["t"] is { } text)
+                        foreach (var token in TitleBlocks.Tokens(text).Concat(FormulaNames(text)))
+                            if (token.StartsWith("attr.", StringComparison.Ordinal) && token[5..] is { Length: > 0 } k && !keys.Contains(k, StringComparer.OrdinalIgnoreCase)) keys.Add(k);
+            }
+            else if (e.PredefinedType == "TEXT")
+            {
+                var style = Standards.ResolveText(book, Dimensions.ParamsOf(e));
+                var text = e.Str("text") ?? "";
+                var at = Args.PointOf(e.Attrs["at"]);
+                // Its alignment kept (forum topic 148): in a box of its own width, the anchor goes to the box's middle or right side.
+                var (share, anchor) = Texts.AlignOf(e);
+                if (e.NumOrNull("width") is { } bw && bw > 0)
+                {
+                    var r = e.Num("angle") * Math.PI / 180;
+                    at += new Vec2(Math.Cos(r), Math.Sin(r)) * (share * bw);
+                }
+                // A text's height is paper mm: a model symbol's mm are the building's.
+                var h = model ? style.Height * mm * 1000 : style.Height;
+                var o = new JsonObject
+                {
+                    ["type"] = "text", ["at"] = Pt(at), ["text"] = text, ["h"] = N(h), ["angle"] = N(Deg(e.Num("angle") * Math.PI / 180)),
+                    ["align"] = anchor, ["valign"] = "bottom", ["bold"] = style.Bold, ["italic"] = style.Italic, ["font"] = style.Font,
+                };
+                if (style.Color != null) o["color"] = style.Color;
+                items.Add((JsonNode)o);
+                foreach (var token in TitleBlocks.Tokens(text).Concat(FormulaNames(text)))
+                    if (token.StartsWith("attr.", StringComparison.Ordinal) && token[5..] is { Length: > 0 } k && !keys.Contains(k, StringComparer.OrdinalIgnoreCase)) keys.Add(k);
+            }
+        }
+        return (items, [.. keys.Select(k => new SymbolAttribute(k, k, ""))]);
+    }
+
+    /// <summary>The names the formulas of a text read (<c>{= attr.w * 2}</c> → attr.w).</summary>
+    static IEnumerable<string> FormulaNames(string text)
+    {
+        for (var i = text.IndexOf("{=", StringComparison.Ordinal); i >= 0; i = text.IndexOf("{=", i + 2, StringComparison.Ordinal))
+        {
+            var close = text.IndexOf('}', i);
+            if (close < 0) yield break;
+            var body = text[(i + 2)..close];
+            var bar = body.LastIndexOf('|');
+            foreach (var n in Expr.Names(bar >= 0 ? body[..bar] : body)) yield return n;
+        }
+    }
+
+    // ------------------------------------------------------------ symbol → drafting
+
+    /// <summary>An instance laid out as drafted shapes, hatches and texts on its view, as it draws (its texts readable); the instance goes.</summary>
+    static List<string> Explode(ICommandContext ctx, Entity e)
+    {
+        var m = ctx.Model;
+        var viewId = e.Str("viewId") ?? throw new CommandException("Only a symbol on a view is exploded into drafting.");
+        var view = Views.Find(m, viewId) ?? throw new CommandException("The symbol's view is gone.");
+        var def = Symbols.DefOf(m, e.Str("symbolId")) ?? throw new CommandException("The symbol's definition is gone.");
+        var (at, angle, scale, fx, fy) = Symbols.Pose(e);
+        var mm = (view.NumOrNull("scale") ?? 100) / 1000;
+        var model = def.Scale == "model";
+        var unit = (model ? 0.001 : mm) * scale;
+        var x = new SymbolXf(at, angle * Math.PI / 180, unit, model ? scale * 0.001 / mm : scale, fx, fy);
+        var layer = e.Str("layer") ?? "0";
+        var color = e.Str("color");
+        var made = new List<string>();
+        Entity Add(Shape s)
+        {
+            var d = Drafts.Add(ctx, viewId, layer, s);
+            if (color != null) { var at2 = d.CloneAttrs(); at2["color"] = color; d = d.With(attrs: at2); ctx.Replace(d); }
+            made.Add(d.Id);
+            return d;
+        }
+        static Vec2 Pnt(JsonNode? n) => Args.PointOf(n);
+        // Circles and arcs stay circles and arcs; every other item as it draws.
+        var rest = new JsonArray();
+        foreach (var item in def.Items.OfType<JsonObject>())
+        {
+            var type = (string?)item["type"];
+            if (type == "circle" && (string?)item["fill"] is null or "" or "none" && item["hatch"] == null && Json.Number(item["r"]) is > 0 and var r)
+            {
+                Add(new Circle(x.Point(Pnt(item["c"])), r * unit));
+                continue;
+            }
+            if (type == "arc" && Json.Number(item["r"]) is > 0 and var ra)
+            {
+                var (s0, s1) = ((Json.Number(item["start"]) ?? 0) * Math.PI / 180, (Json.Number(item["end"]) ?? 0) * Math.PI / 180);
+                var d0 = x.Dir(new Vec2(Math.Cos(s0), Math.Sin(s0)));
+                var d1 = x.Dir(new Vec2(Math.Cos(s1), Math.Sin(s1)));
+                var (a0, a1) = (Math.Atan2(d0.Y, d0.X), Math.Atan2(d1.Y, d1.X));
+                // Turned over, an arc runs the other way round: its ends swap.
+                Add(x.Mirrors ? new Arc(x.Point(Pnt(item["c"])), ra * unit, Geo.NormAngle(a1), Geo.NormAngle(a0)) : new Arc(x.Point(Pnt(item["c"])), ra * unit, Geo.NormAngle(a0), Geo.NormAngle(a1)));
+                continue;
+            }
+            rest.Add((JsonNode)item.DeepClone());
+        }
+        var sd = SymbolRender.Render(m, def with { Items = rest }, Symbols.Resolver(m, def, e, view, at), unit);
+        foreach (var s in sd.Strokes)
+        {
+            var pts = s.Pts.Select(x.Point).ToList();
+            Add(pts.Count == 2 && !s.Closed ? new Line(pts[0], pts[1]) : new Polyline(pts, s.Closed));
+        }
+        foreach (var f in sd.Fills.Select(f => (f.Loops, Pattern: "SOLID", Scale: 1.0, Angle: 0.0, f.Color)).Concat(sd.Hatches.Select(h => (h.Loops, h.Pattern, h.Scale, Angle: h.Angle + angle, h.Color))))
+        {
+            var loops = f.Loops.Select(l => l.Select(x.Point).ToList()).ToList();
+            var attrs = new JsonObject
+            {
+                ["viewId"] = viewId, ["layer"] = layer, ["shape"] = new Polyline(loops[0], true).ToJson(),
+                ["hatch"] = new JsonObject { ["pattern"] = f.Pattern, ["scale"] = f.Scale, ["angle"] = f.Angle, ["loops"] = new JsonArray(loops.Select(l => (JsonNode)new JsonArray(l.Select(p => (JsonNode)J(p)).ToArray())).ToArray()) },
+            };
+            if ((f.Color ?? color) is { } hc) attrs["color"] = hc;
+            var hatch = new Entity(ctx.NewId(), IfcClass.Annotation, Drafts.UniqueName(m, viewId, "Hatch"), attrs, Drafts.Predefined);
+            ctx.Add(hatch);
+            made.Add(hatch.Id);
+        }
+        foreach (var t in sd.Texts)
+        {
+            var (p, a, anchor, height) = SymbolRender.LayText(t, x);
+            // A drafted text hangs from its start, on its baseline: an end or a middle one moved back along it.
+            var w = TextMeasure.Width(t.Text, height, t.Font, t.Bold, t.Italic) * mm;
+            var r = a * Math.PI / 180;
+            var u = new Vec2(Math.Cos(r), Math.Sin(r));
+            var n = new Vec2(-Math.Sin(r), Math.Cos(r));
+            var start = p - u * (anchor == "end" ? w : anchor == "middle" ? w / 2 : 0) - n * (t.Baseline == "middle" ? height * mm / 2 : 0);
+            var attrs = new JsonObject { ["viewId"] = viewId, ["at"] = J(start), ["text"] = t.Text, ["angle"] = Math.Round(a, 6), ["textHeight"] = Math.Round(height, 4) };
+            var text = new Entity(ctx.NewId(), IfcClass.Annotation, "Text", attrs, "TEXT");
+            ctx.Add(text);
+            made.Add(text.Id);
+        }
+        ctx.Remove(e.Id);
+        return made;
+    }
+
+    // ------------------------------------------------------------ commands
+
+    public static void Register(IModuleRegistry r)
+    {
+        // A symbol placed on a view ({viewId, at: [x, y] in the view's metres}) or on a sheet ({sheetId, at: [x, y] in paper mm
+        // from its top-left}): its symbol, angle (°), scale, flips, attribute values, drafting layer and colour.
+        r.Command("drafting.placeSymbol", "Place symbol", (ctx, a) =>
+        {
+            var m = ctx.Model;
+            var sid = (string?)a["symbolId"] is { Length: > 0 } s ? s : throw new CommandException("Which symbol?");
+            if (Symbols.DefOf(m, sid) == null) throw new CommandException("There is no such symbol.");
+            var attrs = new JsonObject { ["symbolId"] = sid, ["layer"] = "0" };
+            if ((string?)a["viewId"] is { Length: > 0 } viewId)
+            {
+                if (Views.Find(m, viewId) is not { } view || view.Str("kind") == "3d") throw new CommandException("A symbol is placed on a plan, a section, an elevation or a drafting view.");
+                attrs["viewId"] = viewId;
+            }
+            else if ((string?)a["sheetId"] is { Length: > 0 } sheetId)
+            {
+                if (m.Get(sheetId) is not { Class: Sheets.Class }) throw new CommandException("There is no such sheet.");
+                attrs["sheetId"] = sheetId;
+            }
+            else throw new CommandException("A symbol is placed on a view or a sheet.");
+            if (!a.ContainsKey("at")) throw new CommandException("Where does the symbol stand?");
+            Apply(m, attrs, a);
+            var e = new Entity(ctx.NewId(), IfcClass.Annotation, Symbols.NameOf(m, sid) ?? "Symbol", attrs, Predefined);
+            ctx.Add(e);
+            return new JsonObject { ["id"] = e.Id };
+        });
+
+        // Placed symbols changed together ({ids}): another symbol, where, angle, scale, flips, values (merged), layer, colour.
+        r.Command("drafting.setSymbol", "Change symbol", (ctx, a) =>
+        {
+            foreach (var id in Ids(a))
+            {
+                var e = Require(ctx.Model, id);
+                var attrs = e.CloneAttrs();
+                Apply(ctx.Model, attrs, a);
+                var name = (string?)a["symbolId"] is { Length: > 0 } sid ? Symbols.NameOf(ctx.Model, sid) : null;
+                ctx.Replace(e.With(name: name, attrs: attrs));
+            }
+            return null;
+        });
+
+        // Placed symbols turned over across their own x (axis "x": left ↔ right) or y ("y": up ↔ down); texts stay readable.
+        r.Command("drafting.flipSymbol", "Flip symbol", (ctx, a) =>
+        {
+            var key = (string?)a["axis"] switch { "x" => "flipX", "y" => "flipY", _ => throw new CommandException("Flip across x (left ↔ right) or y (up ↔ down)?") };
+            foreach (var id in Ids(a))
+            {
+                var e = Require(ctx.Model, id);
+                var attrs = e.CloneAttrs();
+                attrs[key] = !e.Bool(key);
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // Drafted shapes and texts of a view saved as a symbol (Save as symbol…): {viewId, ids, base: [x, y], angle (° of its +x),
+        // name, category, scale: annotation | model, attributes?, replace (default true: the drafting becomes one instance)}.
+        r.Command("drafting.toSymbol", "Save as symbol", (ctx, a) =>
+        {
+            var m = ctx.Model;
+            var view = Views.Find(m, (string?)a["viewId"] ?? "") ?? throw new CommandException("There is no such view.");
+            var sources = Ids(a).Select(id => m.Get(id) ?? throw new CommandException("Something chosen is gone.")).ToList();
+            if (sources.Any(e => e.Class != IfcClass.Annotation || e.PredefinedType is not (Drafts.Predefined or "TEXT" or DraftingTables.Predefined) || e.Str("viewId") != view.Id))
+                throw new CommandException("A symbol is made of drafted lines, shapes, hatches, texts and tables of this view.");
+            var @base = P(a["base"], "The insertion point");
+            var angle = (Json.Number(a["angle"]) ?? 0) * Math.PI / 180;
+            var scale = (string?)a["scale"] is "model" ? "model" : "annotation";
+            var (items, found) = ItemsOf(m, view, sources, @base, angle, scale == "model");
+            if (items.Count == 0) throw new CommandException("Nothing to save: construction lines are not part of a symbol.");
+            var given = (a["attributes"] as JsonArray ?? []).Select(SymbolAttribute.From).OfType<SymbolAttribute>().ToList();
+            var attributes = given.Concat(found.Where(f => !given.Any(g => g.Key.Equals(f.Key, StringComparison.OrdinalIgnoreCase)))).ToList();
+            var def = SymbolDef.Parse(new SymbolDef(scale, (string?)a["category"] is { Length: > 0 } cat ? cat : "other", items, attributes, (string?)a["description"]).ToJson());
+            var symbol = Symbols.Create(ctx, (string?)a["name"] ?? "Symbol", def);
+            string? instance = null;
+            if (B(a["replace"]) ?? true)
+            {
+                var layer = sources.Select(e => e.Str("layer")).OfType<string>().GroupBy(l => l).OrderByDescending(g => g.Count()).FirstOrDefault()?.Key ?? "0";
+                foreach (var e in sources) ctx.Remove(e.Id);
+                var attrs = new JsonObject { ["symbolId"] = symbol.Id, ["viewId"] = view.Id, ["at"] = J(@base), ["angle"] = Math.Round(((Json.Number(a["angle"]) ?? 0) % 360 + 360) % 360, 9), ["layer"] = layer };
+                var e2 = new Entity(ctx.NewId(), IfcClass.Annotation, symbol.Name, attrs, Predefined);
+                ctx.Add(e2);
+                instance = e2.Id;
+            }
+            return new JsonObject { ["symbolId"] = symbol.Id, ["name"] = symbol.Name, ["instanceId"] = instance };
+        });
+
+        // Drafted linework of a view saved as a hatch pattern (stage 7 of docs/plan-material-graphics.md, Save as hatch pattern…):
+        // {viewId, ids, cell: {width, height, origin?: [x, y]} (the view's metres; none: the linework's bounds), name, description?,
+        // units: paper | model}. Straight pieces and dots that line families say exactly make a .pat pattern; anything else a tile.
+        r.Command("drafting.toPattern", "Save as hatch pattern", (ctx, a) =>
+        {
+            var m = ctx.Model;
+            var view = Views.Find(m, (string?)a["viewId"] ?? (string?)a["view"] ?? "") ?? throw new CommandException("There is no such view.");
+            var sources = Ids(a).Select(id => m.Get(id) ?? throw new CommandException("Something chosen is gone.")).ToList();
+            if (sources.Any(e => e.Class != IfcClass.Annotation || e.PredefinedType != Drafts.Predefined || e.Str("viewId") != view.Id || e.Attrs["hatch"] is JsonObject))
+                throw new CommandException("A hatch pattern is drawn with drafted lines, polylines, arcs and circles of this view.");
+            var name = HatchPatternCommands.CheckName((string?)a["name"]);
+            var units = a["units"] is null ? HatchUnits.Paper : HatchScale.Parse((string?)a["units"]) ?? throw new CommandException("A pattern's units are \"paper\" or \"model\".");
+            // Pattern millimetres per metre of the view: the object's, or the paper's at the view's scale.
+            var per = units == HatchUnits.Model ? 1000 : 1000 / (view.NumOrNull("scale") is { } sc && sc > 0 ? sc : 100);
+            var prims = sources.Where(e => e.Str("role") != "draft").Select(Drafts.ShapeOf).OfType<Shape>().SelectMany(Geo.Prims).ToList();
+            if (prims.Count == 0) throw new CommandException("Nothing to save: construction lines are not part of a pattern.");
+            var cell = a["cell"] as JsonObject;
+            var (lo, hi) = Bounds(prims);
+            var origin = cell?["origin"] is { } on ? P(on, "The cell's origin") : lo;
+            var w = Json.Number(cell?["width"]) ?? hi.X - origin.X;
+            var h = Json.Number(cell?["height"]) ?? hi.Y - origin.Y;
+            if (!(w * per > 0.01 && h * per > 0.01)) throw new CommandException("The cell has a width and a height (the view's metres).");
+            TileLine? Clip(Vec2 pa, Vec2 pb)
+            {
+                // The piece kept inside the cell (Liang–Barsky), in pattern millimetres from its lower left corner.
+                var (p0, d) = ((pa - origin) * per, (pb - pa) * per);
+                var (wm, hm, eps) = (w * per, h * per, 1e-6);
+                double t0 = 0, t1 = 1;
+                foreach (var (p, q) in new[] { (-d.X, p0.X + eps), (d.X, wm + eps - p0.X), (-d.Y, p0.Y + eps), (d.Y, hm + eps - p0.Y) })
+                {
+                    if (Math.Abs(p) < 1e-15) { if (q < 0) return null; continue; }
+                    var t = q / p;
+                    if (p < 0) t0 = Math.Max(t0, t); else t1 = Math.Min(t1, t);
+                    if (t0 > t1) return null;
+                }
+                Vec2 In(Vec2 v) => new(Math.Clamp(v.X, 0, wm), Math.Clamp(v.Y, 0, hm));
+                return new TileLine(In(p0 + d * t0), In(p0 + d * t1));
+            }
+            var lines = new List<TileLine>();
+            var arcs = new List<TileArc>();
+            foreach (var pr in prims)
+                switch (pr)
+                {
+                    case SegP sp when Clip(sp.A, sp.B) is { } tl: lines.Add(tl); break;
+                    case ArcP ap:
+                        var c = (ap.C - origin) * per;
+                        var rr = ap.R * per;
+                        // An arc wholly off the cell is left out; one crossing its edge repeats as drawn.
+                        if (c.X + rr < 0 || c.Y + rr < 0 || c.X - rr > w * per || c.Y - rr > h * per) break;
+                        arcs.Add(new TileArc(c, rr, ap.Full ? 0 : ap.Start * 180 / Math.PI, ap.Full ? 360 : Geo.Sweep(ap.Start, ap.End) * 180 / Math.PI));
+                        break;
+                }
+            if (lines.Count + arcs.Count == 0) throw new CommandException("Nothing of the linework is inside the cell.");
+            var pattern = TileFit.Make(name, ((string?)a["description"])?.Trim() ?? "", units, Math.Round(w * per, 6), Math.Round(h * per, 6), lines, arcs);
+            HatchPatternCommands.Add(ctx, pattern);
+            return new JsonObject { ["name"] = pattern.Name, ["kind"] = pattern.Tile != null ? "tile" : "lines", ["families"] = pattern.Families.Count };
+        });
+
+        // Placed symbols exploded into drafting on their views (their texts filled as they read now).
+        r.Command("drafting.explodeSymbol", "Explode symbol", (ctx, a) =>
+        {
+            var made = new JsonArray();
+            foreach (var id in Ids(a))
+                foreach (var x in Explode(ctx, Require(ctx.Model, id))) made.Add((JsonNode)x);
+            return new JsonObject { ["ids"] = made };
+        });
+    }
+
+    static (Vec2 Lo, Vec2 Hi) Bounds(List<Prim> prims)
+    {
+        var (lo, hi) = (new Vec2(double.MaxValue, double.MaxValue), new Vec2(double.MinValue, double.MinValue));
+        void Take(Vec2 p) { lo = new Vec2(Math.Min(lo.X, p.X), Math.Min(lo.Y, p.Y)); hi = new Vec2(Math.Max(hi.X, p.X), Math.Max(hi.Y, p.Y)); }
+        foreach (var pr in prims)
+            switch (pr)
+            {
+                case SegP s: Take(s.A); Take(s.B); break;
+                case ArcP ar: Take(ar.C - new Vec2(ar.R, ar.R)); Take(ar.C + new Vec2(ar.R, ar.R)); break;
+            }
+        return (lo, hi);
+    }
+
+    /// <summary>A placed symbol carried by a move, a turn or a mirror: its point, its angle, and a mirror turns it over (its texts stay readable).</summary>
+    public static void Carry(JsonObject attrs, Placement2D t)
+    {
+        var at = Args.PointOf(attrs["at"]);
+        attrs["at"] = J(t.Point(at));
+        var angle = (Json.Number(attrs["angle"]) ?? 0) * Math.PI / 180;
+        var turned = t.Angle(angle) * 180 / Math.PI;
+        attrs["angle"] = Math.Round((turned % 360 + 360) % 360, 9);
+        // A mirror is a half turn about the mirror line's angle and a flip across the symbol's x.
+        if (t.Mirrored) attrs["flipY"] = !(attrs["flipY"] is JsonValue fy && fy.TryGetValue<bool>(out var f) && f);
+    }
+}

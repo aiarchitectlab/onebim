@@ -1,0 +1,774 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing;
+using Lapin.Drawing.Views;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Civil;
+
+/// <summary>Civil: the terrain from survey points, its contours and the platforms levelled into it, with their cut and fill.</summary>
+public sealed class CivilModule : ILapinModule, IViewAnnotations
+{
+    public string Id => "civil";
+    public string Name => "Civil";
+
+    public void Register(IModuleRegistry r)
+    {
+        // A terrain moved to another storey with it rises or falls by the levels' difference (its heights are absolute, below its datum).
+        r.Service<IStoreyDatum>(new TerrainDatum());
+        r.Class(new(IfcClass.GeographicElement, "Terrain",
+        [
+            new("datum", "Datum (±0.00 =)", "length"),
+            new("interval", "Contour interval", "length", Min: 0.05),
+            new("majorEvery", "Major contour every", "number", Min: 1, Max: 100),
+            new("depth", "Depth below the lowest point", "length", Min: 0.1),
+            new("analysis", "Analysis", "choice", Choices: Analysis.Kinds),
+        ], Terrains.Color));
+        r.Class(new(IfcClass.EarthworksCut, "Earthwork",
+        [
+            new("elevation", "Elevation (platform)", "length"),
+            new("depth", "Depth under the ground (ditch)", "length", Min: 0.05),
+            new("bottomWidth", "Bottom width (ditch)", "length", Min: 0.05),
+            new("slope", "Side slope 1:n (ditch)", "number", Min: 0, Max: 10),
+        ], "#b39b72"));
+        r.Class(new(IfcClass.Pavement, "Path",
+        [
+            // A road's width is its two lanes; an alley's width and the old single kerb switch do not apply to it (report #136).
+            new("width", "Width", "length", Min: 0.2, ShowIf: FieldDescriptor.When("template", "!road")),
+            new("laneWidth", "Lane width", "length", Min: 1, Max: 6, ShowIf: FieldDescriptor.When("template", "road")),
+            new("surfaceThickness", "Surface course", "length", Min: 0), new("baseThickness", "Base course", "length", Min: 0),
+            new("kerb", "Kerbs", "bool", ShowIf: FieldDescriptor.When("template", "!road")),
+            new("kerbHeight", "Kerb height", "length", Min: 0.02, ShowIf: FieldDescriptor.When("template", "!road")),
+            new("kerbWidth", "Kerb width", "length", Min: 0.02, ShowIf: FieldDescriptor.When("template", "!road")),
+        ], Paths.Color));
+        r.Class(new(RetainingWalls.Class, "Retaining wall",
+        [
+            new("thickness", "Thickness", "length", Min: 0.1), new("height", "Height over the high ground", "length", Min: 0), new("topElevation", "Crown elevation (fixed)", "length"),
+            new("embed", "Embedment under the low ground", "length", Min: 0), new("footingWidth", "Footing width", "length", Min: 0.1), new("footingThickness", "Footing thickness", "length", Min: 0),
+            new("side", "High ground on the", "choice", Choices: ["left", "right"]),
+            new("frontBatter", "Front batter n:1 (0: upright)", "number", Min: 0, Max: 100), new("backBatter", "Back batter n:1 (0: upright)", "number", Min: 0, Max: 100),
+            new("baseThickness", "Thickness at the base", "length", Min: 0.05), new("toe", "Toe", "length", Min: 0), new("heel", "Heel", "length", Min: 0),
+            new("keyWidth", "Key width", "length", Min: 0), new("keyDepth", "Key depth", "length", Min: 0), new("keyAt", "Key from the toe", "length", Min: 0),
+        ], RetainingWalls.Color));
+        // The tunnel lining (docs/plan-wing-walls.md, S4): a section swept along an axis, in casting blocks or rings.
+        r.Class(new(Tunnels.Class, "Tunnel lining",
+        [
+            new("skewStart", "Start skewed by (°)", "number", Min: -60, Max: 60), new("skewEnd", "End skewed by (°)", "number", Min: -60, Max: 60),
+        ], Tunnels.Color));
+        r.Class(new(Plantings.Class, "Planting", [new("density", "Plants per 100 m²", "number", Min: 0.1, Max: 500), new("seed", "Seed", "number", Min: 0, Max: 1e9)], "#5a9440"));
+        r.Class(new(Entourage.Class, "Entourage",
+        [
+            new("kind", "Kind", "text"), new("rotation", "Rotation (°)", "number"),
+            new("height", "Height", "length", Min: 0.3, Max: 6), new("offset", "Above the ground", "length"), new("color", "Colour", "color"),
+        ], "#9aa3ad"));
+        r.Class(new(Entourage.KindClass, "Entourage kind",
+        [
+            new("image", "Picture", "text", ReadOnly: true), new("height", "Height", "length", Min: 0.2, Max: 10),
+            new("width", "Width", "length", Min: 0.1, Max: 10), new("category", "Group", "choice", Choices: Entourage.Categories),
+        ], "#9aa3ad", Kind: "type"));
+        r.Geometry(IfcClass.GeographicElement, Terrains.Geometry);
+        r.Quantities(IfcClass.GeographicElement, Terrains.Quantities);
+        r.Geometry(IfcClass.Pavement, (e, m, _) => Paths.Geometry(e, m));
+        r.Quantities(IfcClass.Pavement, Paths.Quantities);
+        // A wall with batters, segments of its own, a toe, a heel or a key is built by BatteredWalls (docs/plan-wing-walls.md); one whose
+        // section is a drawn profile, or any other, as before (RetainingWalls).
+        r.Geometry(RetainingWalls.Class, (e, m, services) => RetainingWalls.ProfileOf(m, e) == null && BatteredWalls.Is(e) ? BatteredWalls.Geometry(e, m, services) : RetainingWalls.Geometry(e, m));
+        r.Quantities(RetainingWalls.Class, RetainingWalls.Quantities);
+        r.Geometry(Tunnels.Class, (e, m, _) => Tunnels.Geometry(e, m));
+        r.Quantities(Tunnels.Class, Tunnels.Quantities);
+        LineworkElements.Register(r);
+        // What drafted linework becomes on the site, in Convert to… (audit S12).
+        LineworkConverters.Register(r);
+        r.Geometry(Plantings.Class, (e, m, s) => Plantings.Geometry(e, m, s?.Get<GeometryOptions>()?.Maquette == true));
+        r.Quantities(Plantings.Class, Plantings.Quantities);
+        r.Geometry(Entourage.Class, (e, m, _) => Entourage.Geometry(e, m));
+        Entourage.Register(r);
+        r.Service<IDeletion>(new KindDeletion());
+        r.Service<IElementUpdate>(new KindUpdate());
+        r.Service<IViewAnnotations>(this);
+        r.Service<IGround>(new Ground());
+        r.Service<IIfcExactBodies>(new RetainingWallExactBodies());
+        r.Service<IScheduleSource>(new PlantingSchedule());
+        PlantingSchedule.RegisterTemplate(r);
+        r.Service<IScheduleSource>(new ParcelCoordinates());
+        r.Service<ISectionPaths>(new CivilSectionPaths());
+        r.Service<IArrayPaths>(new CivilArrayPaths());
+        // Split, Trim/Extend and Offset on paths, roads, retaining walls and ditches (audit §15).
+        r.Service<IPolylinePieces>(new CorridorPieces());
+        r.Service<IOutlinePieces>(new PlatformPieces());
+        r.Service<IOutlinePieces>(new ParcelPieces());
+        r.Catalog("plants", Plantings.SpeciesJson(Plantings.Catalog));
+        r.Catalog("entourage", new JsonArray([.. Entourage.Kinds.Select(k => (JsonNode)new JsonObject { ["key"] = k.Key, ["label"] = k.Label, ["category"] = k.Category, ["height"] = k.Height, ["color"] = k.Color })]));
+        r.Catalog("sculptKinds", new JsonArray(SculptDab.Kinds.Select(k => (JsonNode)k).ToArray()));
+        SiteCommands.Register(r);
+        // The tunnel-portal and bridge-abutment configurator (docs/plan-wing-walls.md, S3).
+        Portals.Register(r);
+        // The tunnel lining along an axis (S4).
+        Tunnels.Register(r);
+        TerrainOutlines.Register(r);
+        GeoImportCommands.Register(r);
+        CorridorCommands.Register(r);
+        // Feature lines, the terrain's breaklines as elements of their own; contours drawn and dragged (T2).
+        FeatureLines.Register(r);
+        LineProfiles.Register(r);
+        // Hardscapes, their types and kerbs (T4).
+        Hardscapes.Register(r);
+        PathTypes.Register(r);
+        // Grading between edges and slopes to the ground (T5).
+        Gradings.Register(r);
+        // Standalone channels (T6); standalone kerbs register with the hardscape's (Kerbs); a platform's slopes made a grading.
+        Channels.Register(r);
+        PlatformGradings.Register(r);
+
+        // A terrain from points ([x, y, z]) or from a survey file's text (xyz or PENZD).
+        r.Command("addTerrain", "Terrain", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var pts = PointsOf(a);
+            if (pts.Count < 3) throw new CommandException("The terrain needs at least three points.");
+            if (!Tin.Spans(pts)) throw new CommandException("The terrain needs at least three points that are not in a line.");
+            var name = ((string?)a["name"])?.Trim() is { Length: > 0 } n ? n : "Terrain";
+            var attrs = Terrains.NewAttrs(ctx, pts, Json.Number(a["datum"]) ?? 0, Json.Number(a["interval"]), Json.Number(a["majorEvery"]), Json.Number(a["depth"]));
+            if (a["boundary"] is JsonArray bArr && bArr.Count >= 3)
+            {
+                var (bPts, bArcs) = Terrains.OutlineArg(new JsonObject { ["points"] = bArr.DeepClone(), ["arcs"] = a["arcs"]?.DeepClone() }, null, "A terrain boundary");
+                attrs[Terrains.BoundaryKey] = Terrains.ContourJson(bPts);
+                ArcOutline.Write(attrs, bArcs, Terrains.BoundaryArcs);
+            }
+            var t = new Entity(ctx.NewId(), IfcClass.GeographicElement, name, attrs, Terrains.Predefined);
+            ctx.Add(t);
+            Spatial.Contain(ctx, storeyId, t.Id);
+            return new JsonObject { ["id"] = t.Id, ["points"] = pts.Count };
+        });
+
+        r.Command("updateTerrain", "Change terrain", (ctx, a) =>
+        {
+            var t = Terrain(ctx.Model, (string?)a["id"]);
+            var attrs = t.CloneAttrs();
+            if (a["points"] != null || a["text"] != null)
+            {
+                var pts = PointsOf(a);
+                if (!Tin.Spans(pts)) throw new CommandException("The terrain needs at least three points that are not in a line.");
+                attrs["points"] = Terrains.PointsJson(pts);
+                // New points: the file's triangles no longer fit them.
+                attrs.Remove("faces");
+                // Nor are the outline's vertices its points any more (T1): the flag and the arcs' own heights go with the old survey.
+                attrs.Remove(TerrainOutlines.Flag);
+                attrs.Remove(TerrainOutlines.OwnKey);
+                // The cage's controls that no longer stand on a point go.
+                Cage.Prune(attrs, pts);
+            }
+            foreach (var k in new[] { "datum", "interval", "majorEvery", "depth" })
+                if (Json.Number(a[k]) is { } v) attrs[k] = k == "interval" ? Terrains.Interval(v) : v;
+            if (Json.Number(a["cutFillGrid"]) is { } grid)
+            {
+                if (grid <= 0) attrs.Remove("cutFillGrid"); else attrs["cutFillGrid"] = Math.Max(0.5, grid);
+            }
+            if (a["contourLabels"] is JsonValue clv && clv.TryGetValue<bool>(out var cl)) attrs["contourLabels"] = cl;
+            if ((string?)a["analysis"] is { } analysis)
+            {
+                if (!Analysis.Kinds.Contains(analysis)) throw new CommandException("An analysis shows slopes, cut and fill, or elevations; or none.");
+                if (analysis == "none") attrs.Remove("analysis"); else attrs["analysis"] = analysis;
+            }
+            ctx.Replace(t.With(attrs: attrs));
+            return null;
+        });
+
+        // The surfaces of a LandXML file, each a terrain (on the storey; the datum as given).
+        r.Command("importLandXml", "Terrain from LandXML", (ctx, a) =>
+        {
+            var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+            var surfaces = LandXml.Surfaces((string?)a["text"] ?? throw new CommandException("Which file?"));
+            if (surfaces.Count == 0) throw new CommandException("The file has no surface with points.");
+            var ids = new JsonArray();
+            foreach (var s in surfaces)
+            {
+                if (!Tin.Spans(s.Points)) continue;
+                var attrs = Terrains.NewAttrs(ctx, s.Points, Json.Number(a["datum"]) ?? 0);
+                // The file's triangles, so the terrain is its TIN, holes and concave edge kept (audit G9).
+                if (s.Triangles.Count > 0) attrs["faces"] = Terrains.FacesJson(s.Triangles);
+                var t = new Entity(ctx.NewId(), IfcClass.GeographicElement, s.Name, attrs, Terrains.Predefined);
+                ctx.Add(t);
+                Spatial.Contain(ctx, storeyId, t.Id);
+                ids.Add((JsonNode)t.Id);
+            }
+            return new JsonObject { ["ids"] = ids };
+        });
+
+        // A breakline the terrain must keep (a kerb, a ditch's bottom): surveyed points [[x, y, z], …]; remove: its index.
+        r.Command("setBreakline", "Breakline", (ctx, a) =>
+        {
+            var t = Terrain(ctx.Model, (string?)a["id"]);
+            var lines = (t.Attrs["breaklines"] as JsonArray)?.Select(x => x!.DeepClone()).ToList() ?? [];
+            if (Json.Number(a["remove"]) is { } ri) { if (ri < 0 || ri >= lines.Count) throw new CommandException("There is no such breakline."); lines.RemoveAt((int)ri); }
+            else
+            {
+                var pts = PointsOf(new JsonObject { ["points"] = a["points"]?.DeepClone() });
+                if (pts.Count < 2) throw new CommandException("A breakline needs two points at least.");
+                lines.Add(Terrains.PointsJson(pts));
+            }
+            var attrs = t.CloneAttrs();
+            if (lines.Count > 0) attrs["breaklines"] = new JsonArray([.. lines]); else attrs.Remove("breaklines");
+            ctx.Replace(t.With(attrs: attrs));
+            return null;
+        });
+
+        // A platform: its outline in plan, levelled at its elevation (model height).
+        r.Command("addPlatform", "Platform", (ctx, a) =>
+        {
+            var t = Terrain(ctx.Model, (string?)a["terrainId"] ?? Terrains.All(ctx.Model).FirstOrDefault()?.Id);
+            var (outline, arcs) = Terrains.OutlineArg(a, null);
+            var z = Json.Number(a["elevation"]) ?? Terrains.Of(t).ElevationAt(outline.Average(p => p.X), outline.Average(p => p.Y)) ?? 0;
+            var n = Terrains.Pads(ctx.Model, t.Id).Count() + 1;
+            var attrs = new JsonObject { ["contour"] = Terrains.ContourJson(outline), ["elevation"] = Math.Round(z, 3) };
+            ArcOutline.Write(attrs, arcs);
+            if (a[OutlineHoles.Key] != null) OutlineHoles.Apply(attrs, a);
+            var pad = new Entity(ctx.NewId(), IfcClass.EarthworksCut, ((string?)a["name"])?.Trim() is { Length: > 0 } nm ? nm : $"Platform {n}", attrs, "USERDEFINED");
+            ctx.Add(pad);
+            ctx.AddRelation(new Relation(ctx.NewId(), IfcClass.RelVoidsElement, t.Id, [pad.Id]));
+            return new JsonObject { ["id"] = pad.Id, ["elevation"] = Math.Round(z, 3) };
+        });
+
+        r.Command("updatePlatform", "Change platform", (ctx, a) =>
+        {
+            var pad = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.EarthworksCut);
+            var attrs = pad.CloneAttrs();
+            if (a["points"] != null || a["x1"] != null)
+            {
+                var (outline, arcs) = Terrains.OutlineArg(a, ArcOutline.RisesOf(pad));
+                attrs["contour"] = Terrains.ContourJson(outline);
+                ArcOutline.Write(attrs, arcs);
+            }
+            // Its own holes (audit S4): given, or kept and checked against the outline as it now is.
+            if (a[OutlineHoles.Key] != null || a["points"] != null || a["x1"] != null) OutlineHoles.Apply(attrs, a);
+            if (Json.Number(a["elevation"]) is { } z) attrs["elevation"] = z;
+            foreach (var k in new[] { "cutSlope", "fillSlope" })
+                if (Json.Number(a[k]) is { } s) { if (s <= 0) attrs.Remove(k); else attrs[k] = s; }
+            ctx.Replace(pad.With(attrs: attrs));
+            return null;
+        });
+
+        // A hole in a platform's outline (audit S4), its ground kept as it is: {id? (else the platform that holds the loop), points,
+        // arcs?} → {id}; {id, hole} takes one away.
+        r.Command("addOutlineHole", "Hole in platform", (ctx, a) =>
+        {
+            var pts = Args.Points(a);
+            var pad = (string?)a["id"] is { } id ? Spatial.Require(ctx.Model, id, IfcClass.EarthworksCut)
+                : ctx.Model.OfClass(IfcClass.EarthworksCut).FirstOrDefault(x => !Ditches.Is(x) && OutlineHoles.Holds(x, pts)) ?? throw new CommandException("Draw the hole inside a platform.");
+            if (Ditches.Is(pad)) throw new CommandException("A ditch has no holes.");
+            ctx.Replace(pad.With(attrs: OutlineHoles.Added(pad, a)));
+            return new JsonObject { ["id"] = pad.Id };
+        });
+        r.Command("removeOutlineHole", "Remove hole", (ctx, a) =>
+        {
+            var pad = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.EarthworksCut);
+            var k = OutlineHoles.Index(a, pad) ?? throw new CommandException("Which hole? Its index, from 0.");
+            ctx.Replace(pad.With(attrs: OutlineHoles.Removed(pad, k)));
+            return null;
+        });
+
+        // A platform's or a parcel's corner rounded (a fillet tangent to its two straight edges) or cut straight across, or an edge
+        // bent into an arc or made straight (decision 589, as a floor's): {id (the platform, or the terrain for its parcel), index
+        // (the corner; the edge from it), radius | distance | rise}.
+        r.Command("roundCorner", "Fillet corner", (ctx, a) =>
+        {
+            var (e, key, arcsKey, corners, rises) = OutlineOf(ctx, a);
+            var (c, r2) = ArcOutline.Fillet(corners, rises, CornerIndex(a, corners.Count), Json.Number(a["radius"]) ?? throw new CommandException("What radius? A length in metres."));
+            ReplaceOutline(ctx, e, key, arcsKey, c, r2);
+            return null;
+        });
+        r.Command("chamferCorner", "Chamfer corner", (ctx, a) =>
+        {
+            var (e, key, arcsKey, corners, rises) = OutlineOf(ctx, a);
+            var (c, r2) = ArcOutline.Chamfer(corners, rises, CornerIndex(a, corners.Count), Json.Number(a["distance"]) ?? throw new CommandException("What distance? A length in metres."));
+            ReplaceOutline(ctx, e, key, arcsKey, c, r2);
+            return null;
+        });
+        r.Command("setEdgeArc", "Edge arc", (ctx, a) =>
+        {
+            var (e, key, arcsKey, corners, rises) = OutlineOf(ctx, a);
+            var next = rises?.ToArray() ?? new double[corners.Count];
+            next[CornerIndex(a, corners.Count)] = Json.Number(a["rise"]) ?? 0;
+            ReplaceOutline(ctx, e, key, arcsKey, corners, next);
+            return null;
+        });
+
+        // The ground's height at a point (model height), for tools that place on it.
+        r.Query("civil.elevationAt", (q, a) =>
+        {
+            var t = Terrain(q.Model, (string?)a["id"] ?? Terrains.All(q.Model).FirstOrDefault()?.Id);
+            return Terrains.Of(t).ElevationAt(Json.Number(a["x"]) ?? 0, Json.Number(a["y"]) ?? 0) is { } z ? JsonValue.Create(z) : null;
+        });
+    }
+
+    static Entity Terrain(IModelView m, string? id) => Terrains.Require(m, id);
+
+    static List<Vec3> PointsOf(JsonObject a)
+    {
+        if ((string?)a["text"] is { } text) return Tin.ParseSurveyPoints(text);
+        if (a["points"] is JsonArray arr) return PointLists.Xyz(arr);
+        throw new CommandException("A terrain needs points: [[x, y, z], …] or a survey file's text.");
+    }
+
+    /// <summary>The outline an edit names: a platform's (<c>contour</c>, <c>arcs</c>) or, a terrain named, its parcel's (<c>parcel</c>, <c>parcelArcs</c>).</summary>
+    static (Entity E, string Key, string ArcsKey, List<Vec2> Corners, double[]? Rises) OutlineOf(ICommandContext ctx, JsonObject a)
+    {
+        var e = ctx.Model.Get((string?)a["id"] ?? "") ?? throw new CommandException("The element is not in the project.");
+        var (key, arcsKey) = (e.Class == IfcClass.EarthworksCut && !Ditches.Is(e)) || Hardscapes.Is(e) ? ("contour", ArcOutline.Key)
+            : Terrains.IsTerrain(e) ? ("parcel", Terrains.ParcelArcs)
+            : throw new CommandException("Only a platform, a hardscape or a terrain's parcel has its outline's edges bent and its corners rounded here.");
+        var corners = ArcOutline.CornersOf(e, key);
+        if (corners.Count < 3) throw new CommandException(key == "parcel" ? "The terrain has no parcel." : "The platform has no outline.");
+        // One of a platform's own holes (audit S4): {hole: its index}.
+        if (key == "contour" && !Hardscapes.Is(e) && OutlineHoles.Index(a, e) is { } k) { var h = OutlineHoles.Of(e)[k]; return (e, "hole:" + k, arcsKey, [.. h.Corners], h.Rises); }
+        return (e, key, arcsKey, corners, ArcOutline.RisesOf(e, key, arcsKey));
+    }
+
+    static int CornerIndex(JsonObject a, int n) =>
+        Json.Number(a["index"]) is { } ix && ix >= 0 && ix < n && ix == Math.Floor(ix) ? (int)ix : throw new CommandException($"Which corner? The outline has {n}, from 0.");
+
+    static void ReplaceOutline(ICommandContext ctx, Entity e, string key, string arcsKey, IReadOnlyList<Vec2> corners, IReadOnlyList<double>? rises)
+    {
+        if (key.StartsWith("hole:", StringComparison.Ordinal)) { ctx.Replace(e.With(attrs: OutlineHoles.Replaced(e, int.Parse(key[5..], System.Globalization.CultureInfo.InvariantCulture), corners, rises))); return; }
+        var (c, r) = ArcOutline.Check(corners, rises, key == "parcel" ? "A parcel" : "A platform", simple: true);
+        var attrs = e.CloneAttrs();
+        attrs[key] = Terrains.ContourJson(c);
+        ArcOutline.Write(attrs, r, arcsKey);
+        if (key == "contour" && !Hardscapes.Is(e)) OutlineHoles.Apply(attrs, new JsonObject());
+        // A hardscape's corners' own heights follow the corners that stayed (a fillet adds two, a chamfer one: none of their own).
+        if (Hardscapes.Is(e) && attrs["cornerZ"] is JsonArray) attrs.Remove("cornerZ");
+        ctx.Replace(e.With(attrs: attrs));
+    }
+
+    /// <summary>In plans, the orthophotos; the major contours' elevations (relative to ±0.00), along them; the platforms' elevations inside them.</summary>
+    public IEnumerable<ViewMark> Marks(ViewContext c)
+    {
+        if (c.Kind != "plan") yield break;
+        var storey = c.View.Str("storeyId");
+        // The orthophotos under it all, laid by their corners: a site view shows every one, any other plan those of its storey (or of none).
+        foreach (var o in c.Model.OfClass(Orthophotos.Class))
+        {
+            if (SitePlans.Of(c.View) == null && Spatial.StoreyOf(c.Model, o.Id) is { } on && on.Id != storey) continue;
+            if (o.Str("image") is not { } image || Orthophotos.Corners(o) is not { Count: 4 } corners) continue;
+            var mk = new ViewMark(o.Id);
+            mk.Images.Add(new PenImage(image, [.. corners.Select(p => c.Map(p))], Math.Clamp(o.NumOrNull("opacity") ?? 1, 0.05, 1)));
+            yield return mk;
+        }
+        var text = Standards.ResolveText(c.Book, new JsonObject());
+        // The hardscapes (T4): their paving hatched as its material's surface looks, their level or their fall written in them.
+        foreach (var mk in HardscapeMarks(c, storey, text)) yield return mk;
+        // The gradings (T5): their material hatched, a slope's hachures from its top down.
+        foreach (var mk in GradingMarks(c, storey)) yield return mk;
+        // The channels (T6): their fall, their inverts at the ends, their gullies and low points.
+        foreach (var mk in ChannelMarks(c, storey, text)) yield return mk;
+        foreach (var e in c.Model.OfClass(IfcClass.GeographicElement))
+        {
+            // A site plan shows every terrain; any other plan its own storey's.
+            var site = SitePlans.Of(c.View);
+            if (site == null && Spatial.StoreyOf(c.Model, e.Id)?.Id != storey) continue;
+            if (!Terrains.IsTerrain(e)) continue;
+            var t = Terrains.Of(e);
+            // Coarser than asked when the asked one would draw too many (the terrain says so).
+            var interval = Terrains.DrawnInterval(e, t);
+            var major = Math.Max(1, (int)Math.Round(e.NumOrNull("majorEvery") ?? Terrains.Defaults.MajorEvery));
+            if (interval <= 0) continue;
+            var designed = new Analysis.Designed(c.Model, e, t);
+            var mk = new ViewMark(e.Id);
+            var padAreas = Terrains.Pads(c.Model, e.Id)
+                .Select(p => (Outer: ArcOutline.BuiltOf(p), Holes: (IReadOnlyList<IReadOnlyList<Vec2>>)OutlineHoles.Built(p)))
+                .Where(p => p.Outer.Count >= 3).ToList();
+            if (e.Attrs["contourLabels"] is not JsonValue clv || !clv.TryGetValue<bool>(out var showLabels) || showLabels)
+            {
+                foreach (var z in t.Levels(interval * major))
+                {
+                    foreach (var line in Terrains.ChainedContours(t, z, padAreas))
+                    {
+                        if (MidpointTangent(line) is not { } mid || mid.Length < Math.Max(1.5, text.Height * 4)) continue;
+                        var angle = -Standards.ReadableDeg(-Math.Atan2(mid.Dir.Y, mid.Dir.X) * 180 / Math.PI);
+                        mk.Text(new PenText(mid.Pos, Standards.FormatLevel(z, c.Book), text.Height * 0.8, angle, "middle", "middle", true, text.Font), "#5d7a3e");
+                    }
+                }
+            }
+            foreach (var pad in Terrains.Pads(c.Model, e.Id))
+            {
+                var o = ArcOutline.BuiltOf(pad);
+                if (o.Count < 3) continue;
+                var mid = new Vec2(o.Average(p => p.X), o.Average(p => p.Y));
+                mk.Text(new PenText(mid, $"{pad.Name} {Standards.FormatLevel(pad.Num("elevation"), c.Book)}", text.Height, 0, "middle", "middle", true, text.Font), "#000000");
+            }
+            // Feature lines crossing at different heights (Î7): a red cross at each, the height that holds and the other's.
+            foreach (var (cl, _, _) in FeatureLines.Clashes(e))
+            {
+                var rr = 1.5 * c.Mm;
+                var at = cl.At;
+                mk.Line(at + new Vec2(-rr, -rr), at + new Vec2(rr, rr), "LEVELS", Pens.Default.Cut, "#c0392b");
+                mk.Line(at + new Vec2(-rr, rr), at + new Vec2(rr, -rr), "LEVELS", Pens.Default.Cut, "#c0392b");
+                mk.Text(new PenText(at + new Vec2(rr * 1.3, rr * 0.4), $"{Standards.FormatLevel(cl.Held, c.Book)} / {Standards.FormatLevel(cl.Other, c.Book)}", text.Height * 0.8, 0, "start", "bottom", false, text.Font), "#c0392b");
+                mk.Snaps.Add(at);
+            }
+            // Spot levels: a cross and the designed ground's height beside it.
+            var r = 1.2 * c.Mm;
+            foreach (var p in Terrains.Spots(e))
+            {
+                if (designed.At(p) is not { } z) continue;
+                mk.Line(p - new Vec2(r, 0), p + new Vec2(r, 0), "LEVELS", Pens.Default.Seen, "#000000");
+                mk.Line(p - new Vec2(0, r), p + new Vec2(0, r), "LEVELS", Pens.Default.Seen, "#000000");
+                mk.Text(new PenText(p + new Vec2(r * 1.2, r * 0.3), Standards.FormatLevel(z, c.Book), text.Height * 0.8, 0, "start", "bottom", false, text.Font), "#000000");
+                mk.Snaps.Add(p);
+            }
+            // Slope tags: point gradient arrow or two-point grade line.
+            foreach (var s in Terrains.SlopeTags(e))
+            {
+                if (s.Length == 2)
+                {
+                    var p = new Vec2(s[0], s[1]);
+                    if (designed.At(p) is not { } z0) continue;
+                    var h = Math.Max(0.25, Math.Min(t.Bounds.Max.X - t.Bounds.Min.X, t.Bounds.Max.Y - t.Bounds.Min.Y) / 100);
+                    // At the terrain's edge, over the half span that is there.
+                    double Fall(double? up, double? down) =>
+                        up is { } u && down is { } d ? (u - d) / (2 * h) : up is { } u1 ? (u1 - z0) / h : down is { } d1 ? (z0 - d1) / h : 0;
+                    var grad = new Vec2(Fall(designed.At(new Vec2(p.X + h, p.Y)), designed.At(new Vec2(p.X - h, p.Y))),
+                        Fall(designed.At(new Vec2(p.X, p.Y + h)), designed.At(new Vec2(p.X, p.Y - h))));
+                    var pct = grad.Length * 100;
+                    var dir = grad.Length > 1e-6 ? (-grad).Normalized() : new Vec2(1, 0);
+                    var len = 3.0 * c.Mm;
+                    var a = p - dir * (len * 0.5);
+                    var b = p + dir * (len * 0.5);
+                    DrawSlopeArrow(mk, a, b, c.Mm, $"{pct:0.0} %", text.Height, text.Font);
+                    mk.Snaps.Add(p);
+                }
+                else if (s.Length == 4)
+                {
+                    var (p1, p2) = (new Vec2(s[0], s[1]), new Vec2(s[2], s[3]));
+                    var run = (p2 - p1).Length;
+                    if (run < 1e-6 || designed.At(p1) is not { } z1 || designed.At(p2) is not { } z2) continue;
+                    var (hi, lo) = z1 >= z2 ? (p1, p2) : (p2, p1);
+                    var dz = Math.Abs(z1 - z2);
+                    var pct = dz / run * 100;
+                    var label = dz > 1e-4 ? $"{pct:0.0} % (1:{run / dz:0.0})" : "0.0 %";
+                    DrawSlopeArrow(mk, hi, lo, c.Mm, label, text.Height, text.Font);
+                    mk.Snaps.Add(p1); mk.Snaps.Add(p2);
+                }
+            }
+            // Cut/fill grid labels in plan (T5).
+            // Coarser than asked when the asked one would write too many values (the terrain says so).
+            if (Terrains.DrawnGrid(e, t) is { } grid)
+            {
+                var existing = Terrains.Existing(e);
+                var (min, max) = t.Bounds;
+                var x0 = Math.Ceiling(min.X / grid - 1e-9) * grid;
+                var y0 = Math.Ceiling(min.Y / grid - 1e-9) * grid;
+                var cr = 0.6 * c.Mm;
+                for (var gx = x0; gx <= max.X + 1e-9; gx += grid)
+                    for (var gy = y0; gy <= max.Y + 1e-9; gy += grid)
+                    {
+                        var gp = new Vec2(gx, gy);
+                        if (existing.ElevationAt(gx, gy) is null || designed.CutFill(gp, existing) is not { } dz) continue;
+                        var col = dz > 0.01 ? "#2166ac" : dz < -0.01 ? "#c0392b" : "#666666";
+                        mk.Line(gp - new Vec2(cr, 0), gp + new Vec2(cr, 0), "LEVELS", Pens.Default.Seen, col);
+                        mk.Line(gp - new Vec2(0, cr), gp + new Vec2(0, cr), "LEVELS", Pens.Default.Seen, col);
+                        var txt = dz >= 0 ? $"+{dz:0.00}" : $"{dz:0.00}";
+                        mk.Text(new PenText(gp + new Vec2(cr * 1.2, 0), txt, text.Height * 0.7, 0, "start", "middle", false, text.Font), col);
+                    }
+            }
+            // The parcel: its boundary, dash-dotted, and its area.
+            if (ArcOutline.BuiltOf(e, "parcel", Terrains.ParcelArcs) is { Count: >= 3 } parcel)
+            {
+                // A site view that highlights the project draws the parcel in its colour, heavier.
+                if (site != null && SitePlans.Highlight(c.View)) mk.Polyline(parcel, true, "PARCEL", Pens.Default.Cut * 2, SitePlans.ProjectColor, [6, 2, 1, 2]);
+                else mk.Polyline(parcel, true, "PARCEL", Pens.Default.Cut, "#6b4e2e", [6, 2, 1, 2]);
+                var centre = new Vec2(parcel.Average(p => p.X), parcel.Average(p => p.Y));
+                mk.Text(new PenText(centre, $"S = {ArcOutline.AreaOf(e, "parcel", Terrains.ParcelArcs):0.0} m²", text.Height, 0, "middle", "middle", true, text.Font), "#6b4e2e");
+                // On a site plan its corners are numbered, as the coordinate inventory lists them (ParcelCoordinates).
+                if (site == SitePlans.Situation)
+                {
+                    var corners = ArcOutline.CornersOf(e, "parcel");
+                    for (var k = 0; k < corners.Count; k++)
+                    {
+                        var away = corners[k] - centre;
+                        var at = corners[k] + (away.Length > 1e-9 ? away.Normalized() : new Vec2(1, 0)) * (2.5 * c.Mm);
+                        mk.Text(new PenText(at, (k + 1).ToString(System.Globalization.CultureInfo.InvariantCulture), text.Height * 0.8, 0, "middle", "middle", false, text.Font), "#6b4e2e");
+                    }
+                }
+            }
+            // The analysis, as fills under the lines.
+            if (e.Str("analysis") is { } kind && kind != "none" && Analysis.Of(c.Model, e, kind) is { } analysis)
+                foreach (var (loops, color) in Analysis.Fills(analysis)) mk.Fills.Add((loops, color));
+            yield return mk;
+        }
+    }
+
+    static (Vec2 Pos, Vec2 Dir, double Length)? MidpointTangent(IReadOnlyList<Vec2> line)
+    {
+        if (line.Count < 2) return null;
+        double total = 0;
+        for (var i = 1; i < line.Count; i++) total += (line[i] - line[i - 1]).Length;
+        if (total < 1e-6) return null;
+        var half = total * 0.5;
+        double acc = 0;
+        for (var i = 1; i < line.Count; i++)
+        {
+            var seg = line[i] - line[i - 1];
+            var len = seg.Length;
+            if (acc + len >= half && len > 1e-9)
+            {
+                var t = (half - acc) / len;
+                return (line[i - 1] + seg * t, seg * (1 / len), total);
+            }
+            acc += len;
+        }
+        var last = line[^1] - line[^2];
+        return (line[^1], last.Length > 1e-9 ? last.Normalized() : new Vec2(1, 0), total);
+    }
+
+    /// <summary>The layer a hardscape's paving hatch draws on (DXF, the PDF's groups).</summary>
+    public const string HardscapeLayer = "HARDSCAPE-HATCH";
+
+    /// <summary>
+    /// A hardscape in a plan or a site plan: its top layer's material hatched over its outline (the material's surface graphics,
+    /// as a floor finish's in a room; under the model's lines) and, in its middle, its level or, on a plane, an arrow the way it
+    /// falls with its grade. A plan shows its storey's; a site plan every one.
+    /// </summary>
+    static IEnumerable<ViewMark> HardscapeMarks(ViewContext c, string? storey, TextStyle text)
+    {
+        var m = c.Model;
+        var site = SitePlans.Of(c.View) != null;
+        var hidden = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        var patterns = DraftingResources.Patterns(m);
+        var standard = MaterialStandards.Of(m);
+        var minSpacing = ViewStyles.Of(m, c.View).MinHatchSpacing;
+        foreach (var e in m.OfClass(Hardscapes.Class))
+        {
+            if (hidden.Contains(e.Id) || graphics.Hides(e) || (!site && Spatial.StoreyOf(m, e.Id)?.Id != storey) || Hardscapes.Corners(e).Count < 3) continue;
+            var top = Hardscapes.Top(e);
+            var loops = new List<IReadOnlyList<Vec2>> { top.Points };
+            var mk = new ViewMark(null) { Under = true };
+            if (Hardscapes.LayersOf(m, e).FirstOrDefault() is { } layer)
+            {
+                var material = m.Get(layer.Material);
+                var g = Lapin.Drawing.MaterialGraphics.Resolve(material, "elevation", material == null ? layer.Material : null, standard: standard);
+                if (g.Hatch is { } name && Lapin.Drawing.Hatch.HatchLibrary.Find(name, patterns) is { Solid: false } pattern
+                    && Lapin.Drawing.Hatch.HatchScale.Lay(pattern, c.Scale, g.HatchScale, g.HatchAngle, null, 40_000, null, minSpacing) is { } laid)
+                {
+                    var (segs, _) = Lapin.Drawing.Hatch.HatchFill.Segments(loops, pattern, laid);
+                    foreach (var sg in segs) mk.Line(sg.A, sg.B, HardscapeLayer, Pens.Default.Hatch, g.HatchColor ?? "#7a7670");
+                }
+            }
+            if (mk.Lines.Count > 0) yield return mk;
+            var label = new ViewMark(e.Id);
+            var mid = Polygon2.InteriorPoint(top.Points);
+            var spec = TopSurface.Read(e.Attrs, Hardscapes.Corners(e).Count);
+            if (spec.Mode == TopSurface.Plane && Math.Abs(spec.Grade) > 1e-9)
+            {
+                var dir = spec.Grade >= 0 ? spec.Down : -spec.Down;
+                var len = 6.0 * c.Mm;
+                DrawSlopeArrow(label, mid - dir * (len * 0.5), mid + dir * (len * 0.5), c.Mm, $"{Math.Abs(spec.Grade) * 100:0.0} %", text.Height, text.Font);
+                label.Text(new PenText(mid + new Vec2(0, -text.Height * c.Mm * 1.8), Standards.FormatLevel(top.At(mid), c.Book), text.Height * 0.8, 0, "middle", "middle", false, text.Font), "#000000");
+            }
+            else if (top.Planar)
+                label.Text(new PenText(mid, Standards.FormatLevel(top.At(mid), c.Book), text.Height * 0.8, 0, "middle", "middle", false, text.Font), "#000000");
+            else
+                // By its corners: each corner's level beside it.
+                foreach (var i in top.CornerIndex)
+                    label.Text(new PenText(top.Points[i] + (mid - top.Points[i]).Normalized() * (2.5 * c.Mm), Standards.FormatLevel(top.Z[i], c.Book), text.Height * 0.7, 0, "middle", "middle", false, text.Font), "#000000");
+            label.Snaps.Add(mid);
+            yield return label;
+        }
+    }
+
+    /// <summary>The layer a grading's hatch and a slope's hachures draw on (DXF, the PDF's groups).</summary>
+    public const string GradingLayer = "GRADING";
+
+    /// <summary>
+    /// A grading in a plan or a site plan: its material's surface hatch over it (grass), and on a slope the hachures of an
+    /// embankment or a cutting: ticks square across it from the top of the slope down, every 2.5 mm of the drawing, long and short
+    /// in turn (the short half as long), so the slope reads which way it falls; none where it changes from cut to fill.
+    /// </summary>
+    static IEnumerable<ViewMark> GradingMarks(ViewContext c, string? storey)
+    {
+        var m = c.Model;
+        var site = SitePlans.Of(c.View) != null;
+        var hidden = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        var patterns = DraftingResources.Patterns(m);
+        var standard = MaterialStandards.Of(m);
+        var minSpacing = ViewStyles.Of(m, c.View).MinHatchSpacing;
+        foreach (var e in m.OfClass(Gradings.Class))
+        {
+            if (hidden.Contains(e.Id) || graphics.Hides(e) || (!site && Spatial.StoreyOf(m, e.Id)?.Id != storey)) continue;
+            var s = Gradings.ShapeOf(m, e);
+            if (s.Surface == null) continue;
+            var under = new ViewMark(null) { Under = true };
+            var material = m.Get(e.Str("material") ?? "");
+            var g = Lapin.Drawing.MaterialGraphics.Resolve(material, "elevation", material == null ? Gradings.Material : null, standard: standard);
+            if (g.Hatch is { } name && Lapin.Drawing.Hatch.HatchLibrary.Find(name, patterns) is { Solid: false } pattern
+                && Lapin.Drawing.Hatch.HatchScale.Lay(pattern, c.Scale, g.HatchScale, g.HatchAngle, null, 40_000, null, minSpacing) is { } laid)
+                foreach (var area in s.Areas())
+                {
+                    var (segs, _) = Lapin.Drawing.Hatch.HatchFill.Segments([area], pattern, laid);
+                    foreach (var sg in segs) under.Line(sg.A, sg.B, GradingLayer, Pens.Default.Hatch, g.HatchColor ?? "#6b8f4e");
+                }
+            if (under.Lines.Count > 0) yield return under;
+            if (s.Strips.Count == 0) continue;
+            var ticks = new ViewMark(e.Id);
+            var spacing = 2.5 * c.Mm;
+            foreach (var st in s.Strips)
+            {
+                var n = st.Origins.Count;
+                var quads = st.Closed ? n : n - 1;
+                var carry = spacing / 2;
+                var count = 0;
+                for (var i = 0; i < quads; i++)
+                {
+                    var j = (i + 1) % n;
+                    if (st.Cut[i] != st.Cut[j]) { carry = spacing / 2; continue; }
+                    // The top of the slope: the edge over a fill, the daylight line over a cut.
+                    var (t0, b0, t1, b1) = st.Cut[i] ? (st.Ends[i].Xy, st.Origins[i].Xy, st.Ends[j].Xy, st.Origins[j].Xy) : (st.Origins[i].Xy, st.Ends[i].Xy, st.Origins[j].Xy, st.Ends[j].Xy);
+                    var (m0, m1) = ((t0 + b0) * 0.5, (t1 + b1) * 0.5);
+                    var len = (m1 - m0).Length;
+                    var at = carry;
+                    for (; at <= len; at += spacing)
+                    {
+                        var u = len < 1e-12 ? 0 : at / len;
+                        var top = t0 + (t1 - t0) * u;
+                        var bottom = b0 + (b1 - b0) * u;
+                        if ((bottom - top).Length > 1e-6)
+                            ticks.Line(top, top + (bottom - top) * (count % 2 == 0 ? 1 : 0.5), GradingLayer, Pens.Default.Seen, Gradings.LineColor);
+                        count++;
+                    }
+                    carry = at - len;
+                }
+            }
+            if (ticks.Lines.Count > 0) yield return ticks;
+        }
+    }
+
+    /// <summary>
+    /// A channel in a plan or a site plan: an arrow along it the way it falls, with its grade, on each stretch long enough for one
+    /// (every 10 m at most); its invert level at each end (IL); a gully's invert at each outlet; a low point that is no outlet ringed
+    /// in red, so standing water shows before it is built.
+    /// </summary>
+    static IEnumerable<ViewMark> ChannelMarks(ViewContext c, string? storey, TextStyle text)
+    {
+        var m = c.Model;
+        var site = SitePlans.Of(c.View) != null;
+        var hidden = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        foreach (var e in m.OfClass(Channels.Class))
+        {
+            if (hidden.Contains(e.Id) || graphics.Hides(e) || (!site && Spatial.StoreyOf(m, e.Id)?.Id != storey)) continue;
+            var l = Channels.LaidOf(m, e);
+            if (l.Stations.Count < 2) continue;
+            var mk = new ViewMark(e.Id);
+            var ch = l.Chain;
+            var half = Channels.OuterHalf(Channels.SpecOf(e), Channels.Profile(m, e, Channels.SpecOf(e)));
+            const string color = "#1f5f8b";
+            // Its fall: an arrow beside it every 10 m (one in each stretch shorter), pointing downhill, the grade over it.
+            var len = 5.0 * c.Mm;
+            var every = Math.Max(10, len * 2);
+            var count = Math.Max(1, (int)Math.Floor(l.Length / every));
+            for (var k = 0; k < count; k++)
+            {
+                var st = l.Length * (k + 0.5) / count;
+                var (a0, a1) = (Math.Max(0, st - 0.5), Math.Min(l.Length, st + 0.5));
+                var fall = (l.InvertAt(a0) - l.InvertAt(a1)) / Math.Max(1e-9, a1 - a0);
+                if (Math.Abs(fall) < 1e-6) continue;
+                var p = ch.PointAt(st);
+                var dir = ch.DirectionAt(st) * (fall > 0 ? 1 : -1);
+                var side = ch.DirectionAt(st).Perp * (half + 1.5 * c.Mm);
+                DrawSlopeArrow(mk, p + side - dir * (len * 0.5), p + side + dir * (len * 0.5), c.Mm, $"{Math.Abs(fall) * 100:0.0#} %", text.Height, text.Font);
+            }
+            // Its inverts at its ends.
+            foreach (var (st, at) in new[] { (0.0, 0), (l.Length, l.Stations.Count - 1) })
+            {
+                var p = ch.PointAt(st);
+                var d = ch.DirectionAt(st) * (st == 0 ? -1 : 1);
+                mk.Text(new PenText(p + d * (2.5 * c.Mm), $"{DrawingWords.Of("IL", c.Book.DrawingLang)} {Standards.FormatLevel(l.Invert[at], c.Book)}", text.Height * 0.8, -Standards.ReadableDeg(-Math.Atan2(d.Y, d.X) * 180 / Math.PI), "middle", "middle", false, text.Font), color);
+                mk.Snaps.Add(p);
+            }
+            // Its gullies: their invert; a low point with none ringed red.
+            foreach (var st in l.Outlets)
+            {
+                var p = ch.PointAt(st);
+                mk.Text(new PenText(p + new Vec2(0, -(half + 3 * c.Mm)), $"{DrawingWords.Of("IL", c.Book.DrawingLang)} {Standards.FormatLevel(l.InvertAt(st), c.Book)}", text.Height * 0.8, 0, "middle", "middle", false, text.Font), color);
+                mk.Snaps.Add(p);
+            }
+            foreach (var st in l.Lows.Where(s => !l.Outlets.Any(o => Math.Abs(o - s) < 0.5)))
+            {
+                var p = ch.PointAt(st);
+                var r = Math.Max(half * 1.5, 1.5 * c.Mm);
+                var ring = Enumerable.Range(0, 24).Select(i => p + new Vec2(Math.Cos(i * Math.PI / 12), Math.Sin(i * Math.PI / 12)) * r).ToList();
+                for (var i = 0; i < ring.Count; i++) mk.Line(ring[i], ring[(i + 1) % ring.Count], "LEVELS", Pens.Default.Seen, "#c0392b");
+                mk.Text(new PenText(p + new Vec2(r * 1.2, r * 0.3), $"{DrawingWords.Of("Low point", c.Book.DrawingLang)} {Standards.FormatLevel(l.InvertAt(st), c.Book)}", text.Height * 0.8, 0, "start", "bottom", false, text.Font), "#c0392b");
+            }
+            yield return mk;
+        }
+    }
+
+    static void DrawSlopeArrow(ViewMark mk, Vec2 a, Vec2 b, double mm, string label, double textHeight, string font)
+    {
+        var dir = (b - a).Normalized();
+        var perp = new Vec2(-dir.Y, dir.X);
+        var head = 1.2 * mm;
+        mk.Line(a, b, "LEVELS", Pens.Default.Seen, "#2d5a27");
+        mk.Line(b, b - dir * head + perp * (head * 0.45), "LEVELS", Pens.Default.Seen, "#2d5a27");
+        mk.Line(b, b - dir * head - perp * (head * 0.45), "LEVELS", Pens.Default.Seen, "#2d5a27");
+        var angle = -Standards.ReadableDeg(-Math.Atan2(dir.Y, dir.X) * 180 / Math.PI);
+        mk.Text(new PenText((a + b) * 0.5 + perp * (1.1 * mm), label, textHeight * 0.8, angle, "middle", "middle", true, font), "#2d5a27");
+    }
+}
+
+/// <summary>The ground's height under a point: the first terrain that reaches there, with its brush strokes (model height).</summary>
+sealed class Ground : IGround
+{
+    public double? ElevationAt(IModelView model, double x, double y)
+    {
+        return Terrains.Under(model, new Vec2(x, y)) is { } t ? Terrains.Of(t).ElevationAt(x, y) : null;
+    }
+}
+
+/// <summary>What a section can follow on the site: a path's, a retaining wall's or a ditch's axis (from the station it starts at), a site feature's line.</summary>
+sealed class CivilSectionPaths : ISectionPaths
+{
+    public FollowedPath? PathOf(IModelView m, Entity e)
+    {
+        // A tunnel lining along its curves as they are (its axis drawn through them), not their chords.
+        if (Tunnels.Is(e)) return Tunnels.FollowedPathOf(e);
+        if (Corridors.Is(e)) return new FollowedPath(Corridors.ChainOf(e).Path, CorridorSpec.Of(e).StationStart);
+        if (e.Class == SiteFeatures.Class && SiteFeatures.Kind(e) is "line" or "parcel" or "area") return new FollowedPath(SiteFeatures.Points(e).Select(p => p.Xy).ToList());
+        return null;
+    }
+}
+
+/// <summary>
+/// What an array can follow on the site (decision 481): a road's, a path's, a retaining wall's or a ditch's axis exactly,
+/// along its curves and clothoids (its alignment), from its start; a site feature's line by its points.
+/// </summary>
+sealed class CivilArrayPaths : IArrayPaths
+{
+    public ArrayPath? PathOf(IModelView m, Entity e)
+    {
+        if (Corridors.Is(e))
+        {
+            var c = Corridors.ChainOf(e);
+            if (c.Length < 1e-9) return null;
+            var axis = c.Axis(Chords.Tolerance);
+            // Its red line's height along it (T6: copies laid on the line).
+            var red = Corridors.RedLine(m, e, c);
+            return new ArrayPath(c.Length, s => (c.PointAt(c.Start + s), c.DirectionAt(c.Start + s)), axis, (axis[0] - axis[^1]).Length < 1e-6) { Height = s => red(c.Start + s) };
+        }
+        if (e.Class == SiteFeatures.Class && SiteFeatures.Kind(e) is "line" or "parcel" or "area" && SiteFeatures.Points(e).Select(p => p.Xy).ToList() is { Count: >= 2 } pts)
+            return ArrayPath.Polyline(pts);
+        // A feature line, a hardscape's perimeter, a kerb, a channel, a platform's outline (T6): their lines, with their heights.
+        if (SiteLines.Followable(e) && SiteLines.Of(m, e) is { Plan.Count: >= 2 } l)
+            return ArrayPath.Polyline(l.Plan, l.Z, l.Closed);
+        return null;
+    }
+}
+
+sealed class TerrainDatum : IStoreyDatum
+{
+    public IEnumerable<string> DatumsOf(Entity e) => Terrains.IsTerrain(e) ? ["datum"] : [];
+}

@@ -1,0 +1,164 @@
+---
+title: Studio
+order: 85
+summary: Modellér frie legemer, skitseret på enhver flade eller ethvert plan, og skub, træk, afrund, udhul, del og gentag dem i 3D.
+---
+
+## Fanen Studio
+
+Fanen **Studio** laver legemer, som ingen anden fane bygger: en bænk, et halvtag, en håndliste, et springvand, en sokkel på en facade. Hvert legeme starter fra en skitse eller en grundform. Derefter ændrer du det i 3D med trin, og hvert trin kan stadig redigeres.
+
+![Fanen Studio](shots/ribbon-studio.webp)
+
+Fanens værktøjer står i seks grupper: **Skitse** (linjer, rektangler, cirkler, **Buer** ▾, forskydning og, under dem, skitsering på en flade eller et plan, **Skitseredigering** ▾, **Arbejdsplaner** ▾ og **På flade** ▾), **Geometriske bånd** (listerne **Geometriske** ▾ og **Mål** ▾), **Legemer** (ekstrudér, fej, drej, loft, redigér skitse, **Med tykkelse** ▾ og **Grundformer** ▾), **Dele** (placering og redigering af dele), **Redigér** (skub/træk, afrunding, affasning, skal, deling, **Rækker** ▾ og **Flyt, drej, spejl** ▾) og **Boolesk**. En knap med ▾ åbner sin liste; hvert værktøj beholder sine bogstaver, og **Kommandoer…** og **Mine værktøjer** finder det som før.
+
+Et Studio-legeme har en IFC-klasse som ethvert element. Vælg den i dets egenskaber: en stang, en plade, en beklædning, et rækværk, et dæk eller en anden. Dets mængder og dets eksport følger klassen.
+
+## Hvor du skitserer
+
+Et legemes omrids tegner du med værktøjerne under **Tegn**, som lukkede polylinjer, rektangler og cirkler. Linjer og buer, der mødes ende mod ende, giver også et lukket omrids. En lukket form inde i omridset er et hul.
+
+Du kan skitsere på fire slags visninger:
+
+- **En plan** tegner i sin etages højde.
+- **Et snit** tegner på sin snitlinje, lodret.
+- **En facade** eller **et referenceplan**: se *Referenceplaner* nedenfor.
+
+## At lave et legeme
+
+- **Ekstrudér** (EXTRUDE) skubber omridset lige ud. Skriv S for begge veje fra skitsen, T for en konicitet, der hælder siderne ind, og Cut for at det skærer de elementer, du valgte før. Vil du føre det op til et andet elements flade, så brug **Op til → en flade…** i dets egenskaber, eller **Ekstrudér til flade**. Dybden, højderne og tykkelserne skrives i projektets enhed, som prompten siger (`Depth (mm)`: `2000` er 2 m).
+- **Sweep** (SWEEP) fører en profil langs en sti. TWist drejer snittet undervejs, SCale gør det større, og RIse løfter det. En cirkel, der stiger, bliver en skruelinje og går TUrns gange rundt.
+- **Overgangsform** (LOFT) forbinder profiler tegnet på forskellige visninger. Skriv S for at gå glat gennem dem. En linje valgt med rollen *skinne* bøjer den som styr.
+- **Drej** (REVOLVE) drejer en profil om en aksellinje.
+- **Grundformer** sætter med ét klik en kasse, en cylinder, en kugle, en kegle, en torus, en kile eller en pyramide. Deres mål og placering ændrer du i egenskaberne.
+
+![En håndliste ført langs en cirkel, der stiger 3 m på to omgange](shots/studio-helix.webp)
+
+Hvert legeme forbliver bundet til sin skitse. Ændr formen, og legemet følger med, med samme GlobalId. Markér et legeme for at ændre dets IFC-klasse, dets foruddefinerede type og dets type i egenskabspanelet. **Redigér skitse** åbner den visning, skitsen ligger på.
+
+Et legeme, du lige har lavet, er markeret, så det lyser op med sin skitses greb. I en plan, et snit eller en facade fyldes et legemes snit med hvidt, hvor visningen skærer det: skitsens linjer bliver en form, du kan se er massiv. Et materiale med sin egen fyldning eller skravering tegner den med den i stedet.
+
+## Ring, Kasse og Vægstrimmel
+
+Disse tre værktøjer giver en tegnet form en tykkelse i dens eget plan og derefter en højde væk fra planet:
+
+- **Ring** (<kbd>RING</kbd>) tager en cirkel, en bue eller et lukket omrids og laver en ring eller et rør. Tykkelsen ligger **indvendigt**, **udvendigt** eller i **midte** af formen.
+- **Kasse** (<kbd>BOX</kbd>) tager et rektangel, en lukket polylinje eller en cirkel og laver væggene rundt om den. En bund (**Bund**) og et låg (**Top**) er valgfrie, hver med sin egen tykkelse.
+- **Vægstrimmel** (<kbd>TWALL</kbd>) tager en linje, en polylinje eller en bue og laver en strimmel væg. Tykkelsen ligger til **venstre**, til **højre** eller i **midte**, set når man går langs linjen i den retning, du tegnede den. Hjørnerne er geringssamlede.
+
+Start værktøjet, og klik på formen. Kommandolinjen tilbyder valgmulighederne som bogstaver: <kbd>I</kbd>, <kbd>O</kbd> og <kbd>C</kbd> (eller <kbd>L</kbd>, <kbd>R</kbd> og <kbd>C</kbd>) for, hvor tykkelsen ligger, og for en kasse <kbd>B</kbd> og <kbd>T</kbd> for at slå bund og låg til eller fra. Skriv derefter tykkelsen og højden i meter, eller tryk på <kbd>Enter</kbd> for at beholde den viste værdi.
+
+**I en plan** laver værktøjerne som standard native vægge, af den vægtype, der er valgt under **Arkitektur**. En lukket form bliver til en sløjfe af vægge samlet i hjørnerne, en polylinje til en kæde af vægge, og en bue eller en cirkel til buede vægge. Hvor tykkelsen ligger, afgør, hvor væggene står: hele vægtypens tykkelse kommer på den side, du valgte. En kasses bund og låg bliver til dæk. Skriv <kbd>S</kbd>, før du vælger formen, for i stedet at lave et Studio-legeme.
+
+**I et snit, en facade eller et referenceplan** laver værktøjerne et Studio-legeme af IFC-klassen IfcWall; en kasses bund og låg er separate plader (IfcSlab). Højden går langs planets normal, mod dig; en negativ højde går væk fra dig, som med **Ekstrudér**. For at give sådan en væg en type skal du markere den og vælge eller lave en under **Type** i egenskabspanelet.
+
+![En ring af native buede vægge rundt om en cirkel, en kasse med bund og låg og en vægstrimmel i stueetagens plan](shots/studio-thick-plan.webp)
+
+Alt forbliver parametrisk. Markér legemet, og ændr dets **Tykkelse**, **Højde** og **Tykkelsen ligger** i egenskabspanelet. For en kasse sætter du flueben ved **Bund** eller **Top** og angiver deres tykkelser: Lapin tilføjer eller fjerner pladerne. En kasse med bund eller låg samles med dem i en samling (IfcElementAssembly). Træk i formens greb, eller redigér den i dens visning, og legemet bygges op igen.
+
+![En kasses egenskaber: tykkelse, højde, bund og låg](shots/studio-box-properties.webp)
+
+## Referenceplaner
+
+Et referenceplan er et plan hvor som helst i modellen, med sin egen visning. Du tegner på det med Tegn, som i et snit, og Studio laver legemer på det. Lav et fra fanen **Studio**:
+
+- **Plan fra visning** (<kbd>REFPLANE</kbd>) ligger parallelt med den plan, det snit, den facade eller det referenceplan, du har foran dig. Skriv, hvor langt det ligger mod dig (en negativ værdi går væk).
+- **Plan på flade**: Klik i 3D-visningen på en flade af et vilkårligt element. Planet ligger på fladen og vender ud fra den.
+- **Plan gennem 3 punkter**: Klik i 3D-visningen på tre punkter på modellen. Planet går gennem dem.
+
+Det nye plan åbner med det samme. Det står under **Referenceplaner** i projektbrowseren. Dets tegning er et snit på planet, set mod den side, det vender mod.
+
+I 3D-visningen tegnes hvert referenceplan som en gennemsigtig flade med dets navn, så stor som modellen er på det (eller som **Tegnet bredde (3D)** og **Tegnet højde (3D)** siger, mindst 2 × 2 m), fremhævet under markøren. Klik på den for at vælge planet, dobbeltklik for at åbne dets visning. Med planet valgt trækker du pilen i dets midte for at flytte det langs dets normal: forskydningen vises ved pilen, og det, der er tegnet på planet, følger med. **Vis → Referenceplaner** skjuler og viser fladerne; de kommer aldrig med i eksporter, renderinger eller billeder. I planer, snit og facader tegnes et plan, der skærer visningen, som en stiplet linje med dets navn hen over hele visningen: et klik vælger planet, et dobbeltklik åbner det. Et plan parallelt med visningen tegnes ikke dér (det skærer intet af den). Disse linjer er kun til skærmen: tegningsark udskriver dem aldrig.
+
+![Et referenceplan på sydfacaden med en ring tegnet på det](shots/studio-plane.webp)
+
+Markér planet i browseren for at flytte det. **Origo x**, **y** og **z** placerer det. **Vender mod** er den retning i planen, det vender mod, **Hældning**, hvor meget det læner sig bagover (ved 90° ligger det fladt og vender opad), og **Drejning i planet** drejer dets tegning om dets normal. **Flyt langs normalen…** og **Drej om lodret…** gør det samme i ét trin. Det, der er tegnet på planet, og hvert legeme lavet ud fra det, flytter med.
+
+![Et referenceplans egenskaber](shots/studio-plane-properties.webp)
+
+Snit og facader er også planer. Et legeme skitseret i et snit står på snitlinjen og følger linjen, når du flytter den. I et udfoldet snit står det på det stykke, det er tegnet på. En facade får sit eget plan, første gang du laver et legeme på den: foran modellen, med dens x, som den er tegnet nu. Ændr dens **Skitseplanets dybde** i facadens egenskaber for at flytte planet og dets legemer langs visningen.
+
+![Huset med dets Studio-legemer i 3D](shots/studio-3d.webp)
+
+I IFC er en ring, en kasses vægge og en vægstrimmel IfcWall-elementer, en kasses bund og låg IfcSlab-elementer, og en kasse med dem en IfcElementAssembly med IfcRelAggregates; deres typer skrives som IfcWallType og IfcSlabType. Hver 3D-eksport (IFC, Fragments, glTF, USD, COLLADA) skriver et Studio-legeme dér, hvor det står i modellen, uanset hvilket plan det blev skitseret på, med dets huller; en samling er en gruppeknude over sine dele. Åbnes Lapins egen IFC igen, kommer legemerne tilbage som referencer, på deres plads, med klasse, type og samling, men de kan ikke længere redigeres (deres skitser er ikke i filen). Hvert legemes historik gemmes i Lapins eget egenskabssæt, Lapin_Intent. Studio-legemer tager kun simple typer uden lag: det er den frie modellering, de er til; vægge med lag er Lapins native vægge.
+## At ændre et legeme i 3D
+
+Disse værktøjer arbejder på legemets flader og kanter, som det er bygget nu. Fladen under musen lyser op.
+
+**Skub/Træk**, **Opdel**, **Afskær** og **Flyt 3D** styres direkte på modellen. Klik på en flade, og en pil står på den: musen flytter fladen langs pilen, og det, trinnet vil lave, tegnes undervejs. Skub/Træk tegner det, den tilføjer, med grønt og det, den fjerner, med rødt. En opdeling eller en afskæring tegner sit plan med gult. Afstanden står ved pilen. Skriv en værdi for at sætte den præcist, fx 500 eller -250. Klik eller tryk på <kbd>Enter</kbd> for at anvende den, eller <kbd>Esc</kbd> for at droppe den; værktøjet forbliver aktivt til den næste flade. <kbd>Enter</kbd>, uden at noget er flyttet eller skrevet, gentager den sidste afstand. Et træk går en centimeter ad gangen, eller 10 cm med <kbd>Shift</kbd>. Højre og midterste knap drejer og flytter stadig visningen. De andre værktøjer beder om deres værdi i en lille boks ved markøren.
+
+- **Skub/Træk** (PU) flytter en flade ud, eller ind, når afstanden er negativ. På en ekstrudering ændrer enden dybden, og siden flytter skitsens kant under den. På en væg eller et andet element tilføjer et træk et legeme i fladens materiale, og et skub skærer ind i elementet.
+- **Afrund kant** (FE) afrunder kanten nærmest klikket, og **Affas kant** (CE) affaser den. Vælg *hele vejen rundt om fladen* for at tage alle fladens kanter på én gang.
+- **Skal** udhuler de valgte legemer med vægge så tykke, som du skriver. Den kan forblive lukket eller være åben i enden, ved skitsen eller i begge.
+- **Opdel** skærer et legeme i to ved et plan parallelt med den valgte flade, så langt ind i fladen som du trækker eller skriver. Begge dele beholder skitsen. **Afskær** beholder kun én side: vælg **Behold bagved** eller **Behold foran** i bjælken nederst i visningen.
+- **Række** gentager legemet på linje, og **Polær række** gentager det om en lodret akse. Med noget andet valgt (en reference, en gruppe, en væg) laver de i stedet kopier af det, som **Redigér → Række**: **På række**, et trin langs x, y og z, eller **Omkring et centrum**, den vinkel, kopierne fylder (360° fordeler dem over en hel omdrejning).
+- **Rotér 3D** drejer legemet om en kant, du vælger. **Spejl 3D** spejler det i en flades plan. **Flyt 3D** sætter pile langs x, y og z på markeringen (legemer, referencer, grupper eller ethvert element): træk i en, eller skriv en afstand for den akse, der vises ved værdien (<kbd>Tab</kbd> går til næste akse).
+
+![Skub/Træk: topfladen trukket op, det, den tilføjer, tegnet med grønt, og afstanden ved pilen](shots/studio-push-pull.webp)
+
+![Kanten afrundet: rundingen følger blokken, når dens dybde ændres](shots/studio-fillet.webp)
+
+## Tegn på en flade
+
+I 3D-visningen kan du tegne direkte på en flade og skubbe eller trække det, du har tegnet. **Studio → Skitse → På flade** ▾ har **Rektangel på flade** (FRE), **Cirkel på flade** (FCI) og **Polygon på flade** (FPL).
+
+1. Klik på en flade af et hvilket som helst element: et Studio-legeme, en væg, et dæk eller en søjle. Klikket er det første punkt: et rektangels hjørne, en cirkels centrum eller en polygons første hjørne. Fladen er omridset, mens du tegner.
+2. Flyt musen. Formen følger den på fladen, med sin størrelse ved siden af. Punkter fanger til fladens hjørner, midten af dens kanter og dens midte; ellers går de en centimeter ad gangen, eller 10 cm med <kbd>Shift</kbd>. Klik på det modsatte hjørne eller på et punkt på cirklen. Du kan også skrive størrelsen: et rektangels bredde og højde som `1200, 600`, eller en cirkels radius. En polygon tager et klik ved hvert hjørne, eller en skrevet længde i musens retning. Klik på dens første hjørne, eller tryk på <kbd>Enter</kbd> for at lukke den; <kbd>Backspace</kbd> tager det sidste hjørne tilbage.
+3. Så snart formen er lukket, står en pil på den, som med **Skub/Træk**. Træk den ud, og den bliver et legeme, der står på fladen, i fladens materiale. Skub den ind, og den bliver et snit ind i elementet: en niche, en lomme eller et hul, når den går hele vejen igennem. Klik eller tryk på <kbd>Enter</kbd> for at anvende den. <kbd>Esc</kbd> eller en afstand på 0 lader formen blive på fladen som en skitse, der kan ekstruderes senere.
+
+Formen er en skitse på et referenceplan, der ligger på fladen. Planet er opkaldt efter elementet og fladen, fx *Extrude 1, north face*, og former tegnet på samme flade deler det. 3D-visningen tegner ikke disse planer, fordi fladen allerede viser, hvor de er. Åbn et fra projektbrowseren for at ændre skitsen i 2D; legemet eller snittet følger med. **Skub/Træk** på legemets ende ændrer dets dybde. **Skub/Træk** på bunden af en lomme gør snittet dybere eller lavere i stedet for at tilføje til elementet.
+
+![Et rektangel tegnet på siden af en blok, med størrelsen ved markøren](shots/studio-on-face.webp)
+
+## Skitsér i 3D
+
+Gruppen **Skitse** på fanen **Studio** tegner linjer og former direkte i 3D-visningen, på to måder, der gemmer det samme: en skitse på fladens referenceplan, som ovenfor.
+
+**Direkte på fladen, som i SketchUp.** Uden en åben skitse tegner **Linje** (KL), **Rektangel** (KR) og **Cirkel** (KC) på fladen under markøren. Fladen lyser op, når du passerer den; i tomt rum tegner du i det aktive plans niveau. Det første klik fastlægger planet.
+
+- Markøren aflæser, hvad den er på, og siger det ved siden af sig: **Endepunkt**, **Midtpunkt**, **På kant**, **Skæring**, **På flade**. Fra det sidste punkt følger den modellens akser, der ligger på fladen, tegnet i deres farver (rød x, grøn y, blå z), og går **Parallel med kanten** eller **Vinkelret på kanten** i magenta.
+- <kbd>→</kbd> låser rød, <kbd>←</kbd> grøn, <kbd>↑</kbd> blå, <kbd>↓</kbd> retningen af den kant, der sidst blev aflæst; den samme tast slipper igen. Hold <kbd>Shift</kbd> nede for at beholde den retning, der aflæses nu.
+- Skriv en værdi når som helst, uden at klikke i et felt, og tryk på <kbd>Enter</kbd>: `1200` er det næste segments længde i den retning, musen peger (`1000<30` ved 30°), `1200,600` et rektangels bredde og højde, `300` eller `r300` en cirkels radius.
+- En linje fortsættes punkt for punkt. Tilbage på det første punkt lukker løkken, og skub/træk-pilen står straks på den; <kbd>Esc</kbd> beholder den som skitse. <kbd>Enter</kbd> eller <kbd>Esc</kbd> før da lader linjen stå åben, som en skitse på fladen. <kbd>Backspace</kbd> tager det sidste punkt tilbage. Værktøjet bliver slået til til den næste form; <kbd>Esc</kbd> uden noget tegnet afslutter det.
+
+![En linje tegnet på siden af en blok, den røde akse aflæst fra dens sidste punkt](shots/studio-sketch-3d.webp)
+
+**På et arbejdsplan, som i CAD.** **Skitse på flade** (KF) og et klik på en flade gør fladen til det aktive arbejdsplan: den lyser, og skitselinjen siger *Skitse på* fladen: den samme linje som ved hver skitse i Lapin (en etageadskillelses Rediger skitse, en dels skitse), med Tegn-værktøjerne, **Afslut skitse**, **Annuller** (det tegnede siden skitsen begyndte forsvinder, i ét fortryd-trin), **Se på plan** og **Åbn i 2D** (planets egen visning, samme skitse). **Skitse på plan** gør det samme med det referenceplan, du har valgt. Mens det er aktivt, starter **Linje**, **Rektangel**, **Cirkel** kommandolinjens egne LINE, RECTANGLE og CIRCLE på det, og hver **Tegn**-kommando, du skriver, virker på det i planets egne koordinater, med objektfangst, ortho og sporing som i en plan, fladens kanter iblandt. **Afslut skitse** (KE, eller <kbd>Enter</kbd>, når ingen kommando kører) svejser de tegnede linjer sammen og sætter skub/træk-pilen på den lukkede form, der blev tegnet sidst; <kbd>Esc</kbd> forlader skitsen, og det, du tegnede, bliver. **Se på planet** (KP) drejer visningen vinkelret på planet. På en flade løber planets x fra venstre mod højre, som du ser fladen udefra, vandret, og dens y op ad fladen (på en topflade er x mod øst og y mod nord), så `@1500,0` går mod højre, og de skrevne mål læses ens på begge måder.
+
+De to buer gør hver én ting, med skitse eller uden: **Bue med 2 punkter** (KA) er SketchUps (nedenfor), **Bue med 3 punkter** kører kommandolinjens ARC gennem tre punkter, på arbejdsplanet, når et er aktivt, ellers i etagens niveau.
+
+![Skitse på flade: oversiden af en blok oplyst som arbejdsplan, et rektangel tegnet på den med kommandolinjen](shots/studio-sketch-plane.webp)
+
+**Linjer deler flader.** En linje tegnet på tværs af en flade, fra kant til kant (eller en lukket løkke af linjer og buer inden i den), deler den i områder. Fladen lyser op område for område under markøren, og **Skub/Træk** på et område skubber eller trækker kun det område: et legeme for sig selv på fladen eller en udskæring i den. Linjer, der stopper før en kant, deler intet. En lukket løkke tegnet inden i en flade (eller et område) er et hul i den, som i SketchUp: **Skub/Træk** på fladen omkring den lader løkken ligge, og løkken skubbes eller trækkes for sig.
+
+- **Bue med 2 punkter** (KA) tegner på fladen under markøren, som i SketchUp: klik på start, på slut og derefter på, hvor meget den buer (eller skriv korden, derefter buen).
+- **Forskyd** (KO) klikker på en flade eller et område af den og tegner dens kontur igen indad eller udad gennem markøren eller med den afstand, du skriver; den lukkede form får straks skub/træk-pilen.
+- Med en åben skitse kører **Forskyd**, **Trim**, **Forlæng** og **Afrunding** kommandolinjens egne OFFSET, TRIM, EXTEND og FILLET på arbejdsplanet.
+- En form tegnet på et referenceplan og valgt i 3D-visningen viser sine punkter dér. Træk i et: det flytter sig på planet med skitseværktøjernes fangst, og legemet lavet af skitsen følger med.
+- Begge måder fanger også kanterne på andre elementer, der ligger i planet, f.eks. siden af en nabobloks side i flugt med fladen.
+
+![En linje på tværs af siden af en blok deler den: området under den trækkes ud for sig](shots/studio-sketch-region.webp)
+
+**Målebånd, hjælpelinjer og Følg mig.**
+
+- **Målebånd** (KM) måler og efterlader hjælpelinjer, som i SketchUp. Klik på en kant, flyt væk fra den og klik: en hjælpelinje løber parallelt med kanten gennem det punkt eller i den afstand, du skriver. Klik i stedet på et punkt, og det andet klik viser afstanden og efterlader et hjælpepunkt der. Hjælpelinjer er stiplede, begge måder at skitsere på fanger til dem (og til, hvor de krydser fladen), de gemmes med projektet, og de eksporteres eller udskrives aldrig. **Slet hjælpelinjer** fjerner dem alle.
+- **Følg mig** (FM) fører en flade langs en bane, hvor den står: klik på fladen (eller på et område af den delt af linjer), derefter på banen, enten en tegnet linje, polylinje, bue eller cirkel, eller en anden flade, hvis kanter den følger rundt, f.eks. en overside til en gesims. Hjørner gæres. Fladen bliver en skitse på sit plan, og resultatet er ét Studio-legeme, der følger begge skitser.
+- **SketchUp-genveje** slår SketchUps enkeltbogstavstaster til i 3D-visningen, for denne computer: <kbd>L</kbd> linje, <kbd>R</kbd> rektangel, <kbd>C</kbd> cirkel, <kbd>A</kbd> bue, <kbd>P</kbd> skub/træk, <kbd>F</kbd> forskyd, <kbd>T</kbd> målebånd, <kbd>M</kbd> flyt, <kbd>E</kbd> slet, <kbd>Mellemrum</kbd> markér. De er slået fra som standard, fordi de ville tage pladsen fra Lapins tobogstavsgenveje, der begynder med de bogstaver i 3D-visningen; tobogstavsgenvejene og kommandolinjen virker som før alle andre steder.
+
+![En hjælpelinje i en skrevet afstand fra blokkens kant og en gesims ført rundt om oversiden med Følg mig](shots/studio-sketch-follow.webp)
+
+## Trinene
+
+Et Studio-legemes egenskaber viser dets trin i rækkefølge. Hvert trin kan slås fra, flyttes tidligere eller senere, ændres eller fjernes. Ændr skitsen, og hvert trin udføres igen på det nye legeme. Et trin, der ikke længere finder sin flade eller kant, siger det under **Problemer**.
+
+![En cylinder udhulet til et rør og gentaget tre gange: dens to trin i dens egenskaber](shots/studio-steps.webp)
+
+En polylinjes egenskaber viser dens sider. Skriv en sides længde, og dens ende flytter sig langs den. Siderne efter følger med op til den næste side, der løber samme vej, så et rektangel forbliver et rektangel. Et legeme tegnet på den følger også med.
+
+## Mesh fra andre programmer
+
+**Filer → Importér mesh (OBJ, STL, glTF)…** henter et mesh ind som referencer, du kan se og fange til. En OBJ- eller STL-fil siger hverken sin enhed eller hvilken akse der vender op, så Lapin spørger. En reference flyttes, drejes, spejles og kopieres, som den er, som ethvert element. For at ændre dens form, vælg den og klik på **Gør til Studio-legeme**. Så tager den skub/træk, afrundinger, boolske operationer og de andre trin. Det samme værktøj virker på vægge, dæk og elementer fra IFC-filer.
+
+## Boolske operationer
+
+**Fratræk**, **Forén** og **Skær** kombinerer vilkårlige elementer, det først valgte er målet. Værktøjerne kan stadig redigeres, og resultatet følger dem. **Vis operander** viser en forenings skjulte værktøjer, så du kan redigere dem. **Fjern operation** skiller elementerne ad igen.

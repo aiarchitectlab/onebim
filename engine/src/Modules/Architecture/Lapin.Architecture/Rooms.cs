@@ -1,0 +1,630 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Drawing.Views;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Architecture;
+
+/// <summary>
+/// Rooms (IfcSpace, docs/rooms.md): an area of a storey with a name, a number,
+/// a function and a department. Placed by a click inside walls, a room keeps
+/// the point (<c>seed</c>) and finds its outline from the walls, curtain walls
+/// and columns around it each time it is built (<see cref="RoomBounds"/>), so
+/// it follows them; when nothing closes round its point any more it keeps the
+/// outline it last stored and says so. Drawn as an outline, a room keeps it.
+/// Its body (the outline up the room's height) is what IFC gets; plans draw a
+/// room by its colour fill and its stamp, never as a body, and the 3D view
+/// leaves rooms out until its graphics show them.
+/// </summary>
+public static class Rooms
+{
+    public const string Class = IfcClass.Space;
+    public const string Color = "#9ec5e8";
+
+    /// <summary>The functions offered first (any text is taken).</summary>
+    public static readonly string[] Functions = ["Living", "Bedroom", "Kitchen", "Dining", "Bath", "WC", "Circulation", "Storage", "Technical", "Office", "Balcony", "Garage"];
+
+    /// <summary>A room's outline as built: the outer loop, its islands, and whether it is the stored one because nothing closes round its point.</summary>
+    public sealed record Outline(IReadOnlyList<Vec2> Outer, IReadOnlyList<IReadOnlyList<Vec2>> Islands, bool Lost)
+    {
+        /// <summary>A drawn outline with curved edges (decision 589): its area and perimeter worked out exactly, its arcs as arcs; <see cref="Outer"/> is laid in chords.</summary>
+        public double? ExactArea { get; init; }
+        public double? ExactPerimeter { get; init; }
+        public double GrossArea => ExactArea ?? Math.Abs(Polygon2.SignedArea(Outer));
+        public double NetArea => GrossArea - Islands.Sum(i => Math.Abs(Polygon2.SignedArea(i)));
+        public double Perimeter => ExactPerimeter ?? Polygon2.Perimeter(Outer);
+        public double NetPerimeter => Perimeter + Islands.Sum(Polygon2.Perimeter);
+        public IReadOnlyList<IReadOnlyList<Vec2>> Loops => [Outer, .. Islands];
+
+        /// <summary>Whether a point is in the room: in its outline, not in an island.</summary>
+        public bool Holds(Vec2 p) => Polygon2.Contains(Outer, p) && !Islands.Any(i => Polygon2.Contains(i, p));
+    }
+
+    // ─── Attributes ──────────────────────────────────────────────────────
+
+    static Vec2? Pt(JsonNode? n) => n is JsonArray { Count: >= 2 } a && Json.Number(a[0]) is { } x && Json.Number(a[1]) is { } y ? new Vec2(x, y) : null;
+    static IReadOnlyList<Vec2> Loop(JsonNode? n) => n is JsonArray arr ? arr.Select(Pt).OfType<Vec2>().ToList() : [];
+    static JsonArray LoopsJson(IEnumerable<IReadOnlyList<Vec2>> loops) => new(loops.Select(l => (JsonNode)SectionPaths.PointsJson(l)).ToArray());
+
+    public static Vec2? Seed(Entity room) => Pt(room.Attrs["seed"]);
+    public static Vec2? StampAt(Entity room) => Pt(room.Attrs["stampAt"]);
+
+    /// <summary>The outline the room stores: drawn, or the last one found from its walls.</summary>
+    public static Outline? Stored(Entity room)
+    {
+        var outer = Loop(room.Attrs["contour"]);
+        if (outer.Count < 3) return null;
+        var islands = room.Attrs["islands"] is JsonArray isl ? isl.Select(Loop).Where(l => l.Count >= 3).ToList() : [];
+        // A drawn room's edges may be arcs (decision 589): laid in chords by the one rule, measured exactly.
+        if (Curved(room))
+        {
+            var (rises, el) = (ArcOutline.RisesOf(room), EllipseEdge.Of(room));
+            return new Outline(ArcOutline.Points(outer, rises, null, el), islands, false) { ExactArea = Math.Abs(ArcOutline.SignedArea(outer, rises, el)), ExactPerimeter = ArcOutline.Perimeter(outer, rises, el) };
+        }
+        return new Outline(outer, islands, false);
+    }
+
+    /// <summary>
+    /// Whether a drawn room's edges are curved: arcs (decision 589) or along an ellipse (audit S4); false when every edge is straight
+    /// or the room follows its walls.
+    /// </summary>
+    public static bool Curved(Entity room) => !room.Bool("auto") && (ArcOutline.RisesOf(room) != null || EllipseEdge.Of(room) != null);
+
+    /// <summary>
+    /// The room's outline now: found round its point from the walls (a room
+    /// placed by a click), else the one it stores (drawn, or the last found,
+    /// then <see cref="Outline.Lost"/>).
+    /// </summary>
+    public static Outline? Live(Entity room, IModelView m, IServices? services)
+    {
+        var stored = Stored(room);
+        if (!room.Bool("auto") || Seed(room) is not { } seed || services == null || Spatial.StoreyOf(m, room.Id) is not { } storey) return stored;
+        var (region, _) = RoomBounds.At(m, services, storey.Id, seed);
+        if (region != null) return new Outline(region.Outer, region.Islands, false);
+        return stored == null ? null : stored with { Lost = true };
+    }
+
+    /// <summary>The outline a built geometry carries (its plan items), when it has one.</summary>
+    public static Outline? OfGeometry(ElementGeometry? g)
+    {
+        if (g?.Plan is not { } plan || plan.FirstOrDefault(p => p.Kind == "room") is not { } outer) return null;
+        return new Outline(outer.Points, plan.Where(p => p.Kind == "roomIsland").Select(p => p.Points).ToList(), g.Diagnostics?.Any(d => d.StartsWith(LostNote, StringComparison.Ordinal)) == true);
+    }
+
+    /// <summary>The room's outline as its geometry has it (the cache the views use), else as it stores it.</summary>
+    public static Outline? Of(Entity room, IModelView m, Func<string, ElementGeometry?>? geometry) =>
+        Curved(room) ? Stored(room) : OfGeometry(geometry?.Invoke(room.Id)) ?? Stored(room);
+
+    /// <summary>The room's height: its own, else its storey's, else 3 m.</summary>
+    public static double HeightOf(Entity room, IModelView m)
+    {
+        if (room.NumOrNull("height") is { } h && h > 0) return h;
+        return Spatial.StoreyOf(m, room.Id)?.NumOrNull("height") is { } sh && sh > 0 ? sh : 3.0;
+    }
+
+    const string LostNote = "Nothing closes round the room's point";
+
+    // ─── Geometry and quantities ─────────────────────────────────────────
+
+    /// <summary>The room's body (its outline up its height, from its storey's level and its base offset above it), its outline and its stamp's point as plan items.</summary>
+    public static ElementGeometry? Geometry(Entity room, IModelView m, IServices services)
+    {
+        var o = Live(room, m, services);
+        if (o == null) return new ElementGeometry([], Diagnostics: ["The room has no outline: place it inside walls, or draw it."]);
+        var z = Spatial.Base(m, room);
+        var h = HeightOf(room, m);
+        var solid = Prism.Extrude(o.Outer.Select(p => p.At(z)).ToArray(), o.Islands.Select(i => (IReadOnlyList<Vec3>)i.Select(p => p.At(z)).ToArray()).ToList(), new Vec3(0, 0, h), "room");
+        var plan = new List<PlanItem> { new("room", true, o.Outer) };
+        plan.AddRange(o.Islands.Select(i => new PlanItem("roomIsland", true, i)));
+        plan.Add(new PlanItem("roomStamp", false, [StampPoint(room, o)]));
+        var diagnostics = o.Lost ? new[] { $"{LostNote} any more: it keeps the outline it had. Close it with walls, move its point (or redraw it)." } : null;
+        return new ElementGeometry(solid == null ? [] : [new GeometryPart("Room", Color, solid, Key: "room")], plan, [.. o.Outer], diagnostics);
+    }
+
+    /// <summary>
+    /// A room as it is measured (forum topic 82): <see cref="Gross"/> the outline between the walls' faces, <see cref="Net"/> the
+    /// same to the finished face of its finish's walls (the finish at the floor taken in along every edge, out round every island;
+    /// across a door's gap the face runs on, so a threshold is the floor finish's, not the room's); the room's height, and the
+    /// finished ceiling's over the finished floor when its finish has a ceiling. With no finish, net is the outline as before.
+    /// </summary>
+    public sealed record RoomMeasures(Outline Gross, Outline Net, double Height, double? FinishedHeight, double? FloorFinish)
+    {
+        /// <summary>The floor area to the finishes, the islands out: what the stamp, the schedule and the usable area read.</summary>
+        public double NetArea => Net.NetArea;
+        public double GrossArea => Gross.GrossArea;
+        /// <summary>The outline's perimeter to the finishes (the islands' left out).</summary>
+        public double Perimeter => Net.Perimeter;
+        public double NetPerimeter => Net.NetPerimeter;
+        public double ClearHeight => FinishedHeight ?? Height;
+        public double NetVolume => NetArea * ClearHeight;
+        public double GrossVolume => GrossArea * Height;
+    }
+
+    /// <summary>A room's floor area to its finishes, as its geometry has its outline (none: 0).</summary>
+    public static double NetAreaOf(Entity room, IModelView m, Func<string, ElementGeometry?>? geometry) =>
+        Of(room, m, geometry) is { } o ? MeasuresOf(room, o, m).NetArea : 0;
+
+    /// <summary>The room measured now, its finish read from the model on every ask (a finish laid, changed or taken off counts at once).</summary>
+    public static RoomMeasures MeasuresOf(Entity room, Outline o, IModelView m)
+    {
+        var f = RoomFinishes.FinishedOf(m, room, o);
+        return new RoomMeasures(o, f?.Outline ?? o, HeightOf(room, m), f?.CeilingHeight, f?.FloorThickness);
+    }
+
+    /// <summary>
+    /// IFC's base quantities of a space: the net ones (floor area without the islands, perimeter with them, volume) to its
+    /// finishes, the gross ones (floor area, perimeter, volume) and the height to its walls; a finished room adds its
+    /// finished ceiling's and floor's heights (FinishCeilingHeight, FinishFloorHeight).
+    /// </summary>
+    public static IEnumerable<QuantitySet> Quantities(Entity room, ElementGeometry? g, IModelView m)
+    {
+        if ((Curved(room) ? Stored(room) : OfGeometry(g) ?? Stored(room)) is not { } o) yield break;
+        var x = MeasuresOf(room, o, m);
+        var q = new List<Quantity>
+        {
+            new("NetFloorArea", x.NetArea, "AREA", "Net floor area"),
+            new("GrossFloorArea", x.GrossArea, "AREA", "Gross floor area"),
+            new("GrossPerimeter", o.Perimeter, "LENGTH", "Perimeter"),
+            new("NetPerimeter", x.NetPerimeter, "LENGTH", "Net perimeter"),
+            new("Height", x.Height, "LENGTH", "Height"),
+        };
+        if (x.FinishedHeight is { } fh) q.Add(new("FinishCeilingHeight", fh, "LENGTH", "Finished ceiling height"));
+        if (x.FloorFinish is { } ff) q.Add(new("FinishFloorHeight", ff, "LENGTH", "Floor finish"));
+        q.Add(new("NetVolume", x.NetVolume, "VOLUME", "Net volume"));
+        q.Add(new("GrossVolume", x.GrossVolume, "VOLUME", "Gross volume"));
+        yield return new QuantitySet("Qto_SpaceBaseQuantities", q);
+    }
+
+    /// <summary>
+    /// Where the stamp goes: where the user put it, else the outline's centre
+    /// when it is in the room, else the middle of the longest run across the
+    /// room through that centre, else the room's point.
+    /// </summary>
+    public static Vec2 StampPoint(Entity room, Outline o)
+    {
+        if (StampAt(room) is { } at) return at;
+        var c = Polygon2.Centroid(o.Outer);
+        if (o.Holds(c)) return c;
+        // The longest stretch of the room along the horizontal line through the centre.
+        var rings = o.Loops.Select(l => l.ToArray()).ToList();
+        var minX = o.Outer.Min(p => p.X) - 1; var maxX = o.Outer.Max(p => p.X) + 1;
+        var spans = new List<(double, double)>();
+        Polygon2.InsideIntervals(rings, new Vec2(minX, c.Y), new Vec2(maxX, c.Y), 0, 1, spans);
+        if (spans.Count > 0)
+        {
+            var (t0, t1) = spans.MaxBy(s => s.Item2 - s.Item1);
+            return new Vec2(minX + (maxX - minX) * (t0 + t1) / 2, c.Y);
+        }
+        return Seed(room) ?? o.Outer[0];
+    }
+
+    // ─── Making them ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A drawn outline written into a room's attributes: its corners and, when the command gives them (or the room had them and
+    /// only its corners moved), its edges' rises (decision 589, <see cref="ArcOutline"/>).
+    /// </summary>
+    static void SetDrawn(JsonObject attrs, JsonObject a, double[]? was, Entity? wasRoom = null)
+    {
+        var pts = Args.Points(a);
+        if (ArcOutline.RisesArg(a["arcs"], pts.Count, was) is { } rises)
+        {
+            var (c, r) = ArcOutline.Check(pts, rises, "A room");
+            attrs["contour"] = SectionPaths.PointsJson(c);
+            ArcOutline.Write(attrs, r);
+        }
+        else
+        {
+            attrs["contour"] = SectionPaths.PointsJson(a[EllipseEdge.Key] != null ? ArcOutline.Check(pts, null, "A room").Corners : CheckOutline(pts));
+            attrs.Remove(ArcOutline.Key);
+        }
+        // Its elliptical edges (audit S4).
+        Slabs.SetEllipses(attrs, a, wasRoom);
+    }
+
+    /// <summary>A drawn outline: three distinct corners or more, counter-clockwise; refused when it encloses nothing.</summary>
+    public static IReadOnlyList<Vec2> CheckOutline(IReadOnlyList<Vec2> pts)
+    {
+        var clean = new List<Vec2>();
+        foreach (var p in pts)
+            if (clean.Count == 0 || (p - clean[^1]).Length > 1e-6) clean.Add(p);
+        if (clean.Count > 1 && (clean[0] - clean[^1]).Length <= 1e-6) clean.RemoveAt(clean.Count - 1);
+        if (clean.Count < 3) throw new CommandException("A room's outline needs at least three corners.");
+        if (Math.Abs(Polygon2.SignedArea(clean)) < 1e-4) throw new CommandException("The room's outline encloses nothing.");
+        return Polygon2.EnsureCcw(clean).ToList();
+    }
+
+    /// <summary>The next free number on a storey: its place among the storeys, then two digits (101, 102… on the second storey from the bottom).</summary>
+    public static string NextNumber(IModelView m, string storeyId)
+    {
+        var storeys = Spatial.Storeys(m).ToList();
+        var prefix = Math.Max(0, storeys.FindIndex(s => s.Id == storeyId)).ToString(CultureInfo.InvariantCulture);
+        var taken = m.OfClass(Class).Select(r => r.Str("number")).OfType<string>().ToHashSet(StringComparer.OrdinalIgnoreCase);
+        for (var n = 1; ; n++)
+        {
+            var candidate = prefix + n.ToString("00", CultureInfo.InvariantCulture);
+            if (!taken.Contains(candidate)) return candidate;
+        }
+    }
+
+    /// <summary>The room already standing at a point of a storey (as the views have it), if any.</summary>
+    static Entity? RoomAt(ICommandContext ctx, string storeyId, Vec2 p, string? except = null) =>
+        ctx.Model.OfClass(Class).FirstOrDefault(r => r.Id != except && Spatial.StoreyOf(ctx.Model, r.Id)?.Id == storeyId
+            && (OfGeometry(ctx.Query.Geometry(r.Id)) ?? Stored(r)) is { } o && o.Holds(p));
+
+    /// <summary>The region round a point of a storey, refused with the reason when there is none or a room has it already.</summary>
+    static FreeRegion Region(ICommandContext ctx, string storeyId, Vec2 p, string? except = null)
+    {
+        if (RoomAt(ctx, storeyId, p, except) is { } there) throw new CommandException($"There is a room here already: „{there.Name}” ({there.Str("number")}).");
+        var (region, problem) = RoomBounds.At(ctx.Model, ctx.Services, storeyId, p);
+        return region ?? throw new CommandException(problem ?? "No room can be placed there.");
+    }
+
+    public static Entity Add(ICommandContext ctx, JsonObject a)
+    {
+        var storeyId = (string?)a["storeyId"] ?? Spatial.Storeys(ctx.Model).FirstOrDefault()?.Id ?? throw new CommandException("The project has no storey.");
+        Spatial.Require(ctx.Model, storeyId, IfcClass.BuildingStorey);
+        var attrs = new JsonObject();
+        if (a["points"] != null || a["x1"] != null)
+        {
+            SetDrawn(attrs, a, null);
+            attrs["auto"] = false;
+        }
+        else
+        {
+            var p = Args.Point(a, "x", "y");
+            var region = Region(ctx, storeyId, p);
+            attrs["auto"] = true;
+            attrs["seed"] = new JsonArray(p.X, p.Y);
+            attrs["contour"] = SectionPaths.PointsJson(region.Outer);
+            if (region.Islands.Count > 0) attrs["islands"] = LoopsJson(region.Islands);
+        }
+        attrs["number"] = ((string?)a["number"])?.Trim() is { Length: > 0 } num ? num : NextNumber(ctx.Model, storeyId);
+        foreach (var k in new[] { "function", "department", "finishFloor" })
+            if (((string?)a[k])?.Trim() is { Length: > 0 } v) attrs[k] = v;
+        if (Json.Number(a["height"]) is { } h && h > 0) attrs["height"] = h;
+        var name = ((string?)a["name"])?.Trim() is { Length: > 0 } n ? n : (string?)attrs["function"] ?? "Room";
+        var room = new Entity(ctx.NewId(), Class, name, attrs);
+        ctx.Add(room);
+        Spatial.Contain(ctx, storeyId, room.Id);
+        return room;
+    }
+
+    /// <summary>The name a room has while no one has named it: its function, else "Room".</summary>
+    public static string DefaultName(string? function) => string.IsNullOrWhiteSpace(function) ? "Room" : function.Trim();
+
+    /// <summary>Whether the room's name is still the one it was given (its function's, or "Room"): it then follows its function.</summary>
+    public static bool Unnamed(Entity room, string? function) =>
+        room.Name == "Room" || string.Equals(room.Name, DefaultName(function), StringComparison.Ordinal);
+
+    /// <summary>The fields a room's schedule writes back into it, by its column: number, name, function, department, height (metres; empty: the storey's).</summary>
+    public static readonly IReadOnlyDictionary<string, string> Written = new Dictionary<string, string>
+    {
+        ["Number"] = "number", ["Name"] = "name", ["Function"] = "function", ["Department"] = "department", ["Floor finish"] = "finishFloor", ["Height (m)"] = "height",
+    };
+
+    /// <summary>
+    /// One of a room's fields set (null or empty clears it): its name (empty:
+    /// as its function), its number, function, department, floor finish or
+    /// height. A room no one has named takes its new function's name.
+    /// </summary>
+    public static void Set(ICommandContext ctx, Entity room, string field, string? text)
+    {
+        var value = text?.Trim() ?? "";
+        if (field == "name") { ctx.Replace(room.With(name: value.Length > 0 ? value : DefaultName(room.Str("function")))); return; }
+        var attrs = room.CloneAttrs();
+        if (field == "height")
+        {
+            if (value.Length == 0) attrs.Remove("height");
+            else if (double.TryParse(value.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out var h) && h > 0) attrs["height"] = h;
+            else throw new CommandException($"„{value}” is not a height in metres.");
+        }
+        else if (field is "number" or "function" or "department" or "finishFloor")
+        {
+            if (value.Length == 0) { if (field == "number") throw new CommandException("A room keeps a number."); attrs.Remove(field); }
+            else attrs[field] = value;
+        }
+        else throw new CommandException($"A room has no field „{field}” to set.");
+        ctx.Replace(room.With(attrs: attrs));
+        if (field == "function") Renamed(ctx, room, ctx.Model.Get(room.Id)!);
+    }
+
+    /// <summary>A room whose function changed and that no one has named takes its new function's name.</summary>
+    public static void Renamed(ICommandContext ctx, Entity before, Entity after)
+    {
+        var (was, now) = (before.Str("function"), after.Str("function"));
+        if (was == now || !Unnamed(before, was)) return;
+        if (DefaultName(now) is var name && name != after.Name) ctx.Replace(after.With(name: name));
+    }
+
+    /// <summary>
+    /// A room's outline or stamp changed: a drawn outline (it keeps it), a new
+    /// point to find its outline round, the stamp moved (or put back with
+    /// <c>stamp: null</c>).
+    /// </summary>
+    public static void Update(ICommandContext ctx, Entity room, JsonObject a)
+    {
+        var attrs = room.CloneAttrs();
+        var storeyId = Spatial.StoreyOf(ctx.Model, room.Id)?.Id ?? throw new CommandException("The room stands on no storey.");
+        if (a["points"] != null || a["x1"] != null)
+        {
+            SetDrawn(attrs, a, ArcOutline.RisesOf(room), room);
+            attrs["auto"] = false;
+            attrs.Remove("seed");
+            attrs.Remove("islands");
+        }
+        else if (a["x"] != null || a["y"] != null)
+        {
+            var p = Args.Point(a, "x", "y");
+            var region = Region(ctx, storeyId, p, room.Id);
+            attrs["auto"] = true;
+            attrs["seed"] = new JsonArray(p.X, p.Y);
+            attrs.Remove(ArcOutline.Key);
+            attrs.Remove(EllipseEdge.Key);
+            attrs["contour"] = SectionPaths.PointsJson(region.Outer);
+            if (region.Islands.Count > 0) attrs["islands"] = LoopsJson(region.Islands); else attrs.Remove("islands");
+        }
+        if (a["stampX"] != null || a["stampY"] != null) attrs["stampAt"] = new JsonArray(Args.Number(a, "stampX"), Args.Number(a, "stampY"));
+        else if (a.ContainsKey("stamp") && a["stamp"] == null) attrs.Remove("stampAt");
+        ctx.Replace(room.With(attrs: attrs));
+    }
+
+    /// <summary>The outlines found from the walls stored on the rooms placed by a click (what they keep should their walls go): how many, and how many found nothing round their point.</summary>
+    public static (int Stored, int Lost) Store(ICommandContext ctx, IEnumerable<Entity> rooms)
+    {
+        var (stored, lost) = (0, 0);
+        foreach (var room in rooms.ToList())
+        {
+            if (!room.Bool("auto") || Seed(room) is not { } seed || Spatial.StoreyOf(ctx.Model, room.Id) is not { } storey) continue;
+            var (region, _) = RoomBounds.At(ctx.Model, ctx.Services, storey.Id, seed);
+            if (region == null) { lost++; continue; }
+            var attrs = room.CloneAttrs();
+            attrs["contour"] = SectionPaths.PointsJson(region.Outer);
+            if (region.Islands.Count > 0) attrs["islands"] = LoopsJson(region.Islands); else attrs.Remove("islands");
+            if (attrs.ToJsonString() != room.Attrs.ToJsonString()) { ctx.Replace(room.With(attrs: attrs)); stored++; }
+        }
+        return (stored, lost);
+    }
+
+    // ─── In plans ────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// An area as a stamp writes it: square metres to the hundredth, or square feet to the tenth in an imperial project; to
+    /// the project's <paramref name="step"/> when it rounds its areas (report #76, decision 471).
+    /// </summary>
+    public static string FormatArea(double m2, string units, double? step = null) => AreaRounding.Text(m2, step, units);
+
+    static string FormatLength(double m, string units) => units is "ft-in" or "in" ? Standards.FormatImperial(m, units == "ft-in", 2) : m.ToString("0.00", CultureInfo.InvariantCulture) + " m";
+
+    /// <summary>What a stamp's template can read of a room besides its attributes: {area}, {grossArea}, {perimeter}, {height}, {volume}; the area, perimeter and volume to its finishes.</summary>
+    public static Dictionary<string, string> Values(Entity room, Outline o, IModelView m, string units, double? areaStep = null)
+    {
+        var x = MeasuresOf(room, o, m);
+        return new()
+        {
+            ["area"] = FormatArea(x.NetArea, units, areaStep),
+            ["grossArea"] = FormatArea(x.GrossArea, units, areaStep),
+            ["perimeter"] = FormatLength(x.Perimeter, units),
+            ["height"] = FormatLength(x.Height, units),
+            ["volume"] = units is "ft-in" or "in" ? (x.NetVolume * 35.314666721).ToString("0.0", CultureInfo.InvariantCulture) + " ft³" : x.NetVolume.ToString("0.00", CultureInfo.InvariantCulture) + " m³",
+        };
+    }
+
+    /// <summary>
+    /// A plan's rooms: on its storey, each filled as the view's colour scheme
+    /// (or the room's own colour) says, under the walls, with its stamp over
+    /// them: the room's tag type's lines (name, number, area by default),
+    /// centred on its stamp point. A click on the stamp picks the room. A room
+    /// with a finish has its floor's hatch over its fill (decision 299; its
+    /// ceiling's in a plan seen from below), unless the room, the view's style
+    /// or the finish element's visibility says not.
+    /// </summary>
+    public static IEnumerable<ViewMark> Marks(ViewContext c)
+    {
+        if (c.Kind != "plan") yield break;
+        var m = c.Model;
+        var storeyId = c.View.Str("storeyId");
+        var hiddenElements = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        var scheme = ColorSchemes.OfView(m, c.View);
+        var patterns = DraftingResources.Patterns(m);
+        var type = Standards.TagTypeOf(c.Book, null, Class) is { Shape: "room" } t ? t : Standards.DefaultRoomTag;
+        var style = Standards.TextOf(c.Book, type.TextStyle);
+        // The finishes' hatches (decision 299): the floor's, or the ceiling's in a reflected ceiling plan; not on a site plan.
+        var finishPart = c.View.Str("look") == "up" ? "ceiling" : "floor";
+        var finishes = ViewStyles.Of(m, c.View).FinishHatch && c.View.Str("site") == null;
+        foreach (var room in m.OfClass(Class))
+        {
+            if (hiddenElements.Contains(room.Id) || graphics.Hides(room) || Spatial.StoreyOf(m, room.Id)?.Id != storeyId) continue;
+            if (Of(room, m, c.Geometry) is not { } o) continue;
+            if (scheme != null && ColorSchemes.LookOf(scheme, room) is { } look && Fill(c, o, look, patterns) is { } fill) yield return fill;
+            if (finishes && FinishHatchMark(c, room, o, finishPart, patterns, hiddenElements, graphics) is { } fh) yield return fh;
+            // A tag rule of the rooms' that holds on this one gives its stamp (issue #72): a room's type of stamp, else the rooms' own.
+            if (TagRules.RuleType(m, c.Book, room) is { Shape: "room" } ruled) yield return Stamp(c, room, o, ruled, Standards.TextOf(c.Book, ruled.TextStyle));
+            else yield return Stamp(c, room, o, type, style);
+        }
+    }
+
+    /// <summary>A room's fill and hatch, under the model's pens; null when it has neither.</summary>
+    static ViewMark? Fill(ViewContext c, Outline o, ColorSchemes.Look look, IReadOnlyList<HatchPattern> patterns)
+    {
+        var mark = new ViewMark(null) { Under = true };
+        var loops = o.Loops;
+        if (look.Color != null) mark.Fills.Add((loops, look.Color));
+        if (look.Hatch != null && HatchLibrary.Find(look.Hatch, patterns) is { } pattern)
+        {
+            if (pattern.Solid) mark.Fills.Add((loops, look.HatchColor));
+            else
+            {
+                var (segs, _) = HatchFill.Segments(loops, pattern, new HatchOptions(HatchScale.Factor(pattern, c.Scale, look.HatchScale), 0, null, 40_000));
+                foreach (var s in segs) mark.Line(s.A, s.B, "ROOM-HATCH", Pens.Default.Hatch, look.HatchColor);
+            }
+        }
+        return mark.Fills.Count > 0 || mark.Lines.Count > 0 ? mark : null;
+    }
+
+    /// <summary>
+    /// A room's finish hatched over its floor (or its ceiling) in plan, lines only, under the model's pens and over the room's
+    /// fill; null when the room has no such finish, says not (<c>finishHatch</c> false), or its finish element is hidden.
+    /// </summary>
+    static ViewMark? FinishHatchMark(ViewContext c, Entity room, Outline o, string part, IReadOnlyList<HatchPattern> patterns, HashSet<string> hidden, VisibilityGraphics graphics)
+    {
+        if (room.Attrs["finishHatch"] is JsonValue on && on.TryGetValue<bool>(out var shows) && !shows) return null;
+        var m = c.Model;
+        if (m.OfClass(RoomFinishes.Class).FirstOrDefault(e => e.Str("roomId") == room.Id && e.Str("part") == part) is not { } finish
+            || hidden.Contains(finish.Id) || graphics.Hides(finish)) return null;
+        if (RoomFinishes.SpecOf(m, finish) is not { } spec || RoomFinishes.HatchOf(m, spec, part) is not { } h
+            || HatchLibrary.Find(h.Pattern, patterns) is not { Solid: false } pattern) return null;
+        var mark = new ViewMark(null) { Under = true };
+        var minSpacing = ViewStyles.Of(m, c.View).MinHatchSpacing;
+        foreach (var loops in RoomFinishes.PlanRegions(m, room, o, spec, part))
+        {
+            // Paper or real size (decision 679: tiles their own size); a real-size pattern too dense for the view's style is not drawn.
+            if (HatchScale.Lay(pattern, c.Scale, h.Scale, h.Angle, null, 40_000, null, minSpacing) is not { } laid) continue;
+            var (segs, _) = HatchFill.Segments(loops, pattern, laid);
+            foreach (var s in segs) mark.Line(s.A, s.B, FinishLayer, Pens.Default.Hatch, h.Color);
+        }
+        return mark.Lines.Count > 0 ? mark : null;
+    }
+
+    /// <summary>The layer the finishes' plan hatches draw on (DXF, the PDF's groups).</summary>
+    public const string FinishLayer = "FINISH-HATCH";
+
+    static ViewMark Stamp(ViewContext c, Entity room, Outline o, TagType type, TextStyle style)
+    {
+        var at = StampPoint(room, o);
+        var values = Values(room, o, c.Model, c.Book.Units, c.Book.AreaRounding);
+        // A stamp drawn by a symbol of the user's (decision 552): the symbol at the stamp's point, its texts the room's fields.
+        if (type.Symbol is { } symbolId && TagSymbols.Lay(c, symbolId, at, 0, room, values) is { } laid)
+        {
+            var drawn = new ViewMark(room.Id);
+            TagSymbols.Into(c, drawn, laid, at, 0, "ROOM-TAG", o.Lost ? "#c0392b" : style.Color ?? "#000000");
+            drawn.Snaps.Add(at);
+            return drawn;
+        }
+        var lines = TagText.Lines(type.Written, c.Model, room, values, c.Book.Units);
+        var h = style.Height * c.Mm;
+        var step = h * 1.5;
+        var color = o.Lost ? "#c0392b" : style.Color ?? "#000000";
+        var mark = new ViewMark(room.Id);
+        var top = at.Y + step * (lines.Count - 1) / 2;
+        var width = 0.0;
+        for (var i = 0; i < lines.Count; i++)
+        {
+            var y = top - step * i;
+            mark.Text(new PenText(new Vec2(at.X, y), lines[i], style.Height, 0, "middle", "middle", style.Bold || i == 0, style.Font, style.Italic), color);
+            var w = lines[i].Length * h * 0.6;
+            width = Math.Max(width, w);
+            mark.Line(new Vec2(at.X - w / 2, y), new Vec2(at.X + w / 2, y), "PICK", 0);
+        }
+        // What a click takes: the box round the text.
+        var (x0, x1, y0, y1) = (at.X - width / 2 - h * 0.3, at.X + width / 2 + h * 0.3, top - step * (lines.Count - 1) - h * 0.7, top + h * 0.7);
+        mark.Polyline([new(x0, y0), new(x1, y0), new(x1, y1), new(x0, y1)], true, "PICK", 0);
+        mark.Snaps.Add(at);
+        return mark;
+    }
+
+    /// <summary>
+    /// The boxes the rooms' stamps take in a plan (in model units), as <see cref="Marks"/> draws them: what other marks keep clear
+    /// of (a floor's slope arrows). A stamp drawn by a symbol: a box of its lines' size round its point.
+    /// </summary>
+    public static List<(Vec2 Min, Vec2 Max)> StampBoxes(ViewContext c)
+    {
+        var o = new List<(Vec2, Vec2)>();
+        if (c.Kind != "plan") return o;
+        var m = c.Model;
+        var storeyId = c.View.Str("storeyId");
+        var hidden = (c.View.Attrs["hiddenElements"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        var graphics = VisibilityGraphics.Of(m, c.View);
+        var type = Standards.TagTypeOf(c.Book, null, Class) is { Shape: "room" } t ? t : Standards.DefaultRoomTag;
+        foreach (var room in m.OfClass(Class))
+        {
+            if (hidden.Contains(room.Id) || graphics.Hides(room) || Spatial.StoreyOf(m, room.Id)?.Id != storeyId) continue;
+            if (Of(room, m, c.Geometry) is not { } outline) continue;
+            var own = TagRules.RuleType(m, c.Book, room) is { Shape: "room" } ruled ? ruled : type;
+            var style = Standards.TextOf(c.Book, own.TextStyle);
+            var at = StampPoint(room, outline);
+            var lines = TagText.Lines(own.Written, m, room, Values(room, outline, m, c.Book.Units, c.Book.AreaRounding), c.Book.Units);
+            var h = style.Height * c.Mm;
+            var step = h * 1.5;
+            var width = lines.Count == 0 ? 4 * h : lines.Max(l => l.Length * h * 0.6);
+            var top = at.Y + step * (Math.Max(lines.Count, 1) - 1) / 2;
+            o.Add((new Vec2(at.X - width / 2 - h * 0.3, top - step * (Math.Max(lines.Count, 1) - 1) - h * 0.7), new Vec2(at.X + width / 2 + h * 0.3, top + h * 0.7)));
+        }
+        return o;
+    }
+}
+
+/// <summary>
+/// The room schedule: every room with its storey, number, name, function, department, net area, perimeter, height and
+/// volume (the area, perimeter and volume to its finishes), and the total area. A project that rounds its areas (decision 471) shows each room's to its step and totals what
+/// the rows show (SFS 5139 rounds each room), so the column adds up; the volume stays the exact area times the height.
+/// </summary>
+public sealed class RoomSchedule : IScheduleSource
+{
+    public string Kind => "rooms";
+    public string Label => "Room schedule";
+
+    public ScheduleGrid Grid(IQueryContext q)
+    {
+        var m = q.Model;
+        var storeys = Spatial.Storeys(m).Select((s, i) => (s.Id, i)).ToDictionary(x => x.Id, x => x.i);
+        var rows = new List<IReadOnlyList<string>>();
+        var keys = new List<string?>();
+        double total = 0;
+        string N(double v) => v.ToString("0.00", CultureInfo.InvariantCulture);
+        var step = DraftingResources.Book(m).AreaRounding;
+        string A(double v) => AreaRounding.Text(v, step, "m", withUnit: false);
+        var units = DraftingResources.Book(m).Units;
+        var rooms = m.OfClass(Rooms.Class).ToList();
+        // The rooms' own parameters, a column each after the measures, formulas worked out as their stamps write them (decision 550).
+        var own = rooms.SelectMany(r => r.Attrs["params"] is JsonArray l ? l.OfType<JsonObject>() : [])
+            .Where(p => Params.SetOf(p) == null).Select(p => ((string?)p["name"])?.Trim()).OfType<string>().Where(n => n.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        foreach (var r in rooms
+                     .Select(r => (Room: r, Storey: Spatial.StoreyOf(m, r.Id)))
+                     .OrderBy(x => x.Storey == null ? int.MaxValue : storeys.GetValueOrDefault(x.Storey.Id))
+                     .ThenBy(x => x.Room.Str("number") ?? "", StringComparer.OrdinalIgnoreCase))
+        {
+            var h = Rooms.HeightOf(r.Room, m);
+            string[] named = [r.Storey?.Name ?? "", r.Room.Str("number") ?? "", r.Room.Name, r.Room.Str("function") ?? "", r.Room.Str("department") ?? ""];
+            string[] parameters = [.. own.Select(n => TagText.Value(m, r.Room, n, null, units))];
+            // A room without an outline yet (a space imported without a shape) is listed, unmeasured.
+            keys.Add(r.Room.Id);
+            if (Rooms.Of(r.Room, m, q.Geometry) is not { } o) { rows.Add([.. named, "", "", N(h), "", .. parameters]); continue; }
+            var x = Rooms.MeasuresOf(r.Room, o, m);
+            total += AreaRounding.Shown(x.NetArea, step);
+            rows.Add([.. named, A(x.NetArea), N(x.Perimeter), N(h), N(x.NetVolume), .. parameters]);
+        }
+        if (rows.Count > 0) { rows.Add(["Total", "", "", "", "", A(total), "", "", "", .. own.Select(_ => "")]); keys.Add(null); }
+        return new ScheduleGrid(Label, ["Storey", "Number", "Name", "Function", "Department", "Area (m²)", "Perimeter (m)", "Height (m)", "Volume (m³)", .. own], rows, keys);
+    }
+
+    /// <summary>A value typed in the schedule goes into the room: its number, name, function, department or height.</summary>
+    public bool Write(ICommandContext ctx, string key, string column, string? text)
+    {
+        if (!Rooms.Written.TryGetValue(column, out var field) || ctx.Model.Get(key) is not { Class: Rooms.Class } room) return false;
+        Rooms.Set(ctx, room, field, text);
+        return true;
+    }
+}
+
+/// <summary>A room's function changed in its properties: no one having named it, it takes the function's name.</summary>
+sealed class RoomUpdate : IElementUpdate
+{
+    public void Updated(ICommandContext ctx, Entity before, Entity after)
+    {
+        if (after.Class == Rooms.Class) Rooms.Renamed(ctx, before, after);
+    }
+}
+
+/// <summary>Rooms kept as "Room" although they have a function (before rooms took their function's name): named after it.</summary>
+public sealed class RoomNameUpgrade : IProjectUpgrade
+{
+    public (IReadOnlyList<Entity> Entities, IReadOnlyList<Relation> Relations) Upgrade(IReadOnlyList<Entity> entities, IReadOnlyList<Relation> relations) =>
+        (entities.Select(e => e.Class == Rooms.Class && e.Name == "Room" && !string.IsNullOrWhiteSpace(e.Str("function")) ? e.With(name: Rooms.DefaultName(e.Str("function"))) : e).ToList(), relations);
+}

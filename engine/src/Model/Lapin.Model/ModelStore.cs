@@ -1,0 +1,241 @@
+namespace Lapin.Model;
+
+/// <summary>Read access to the model.</summary>
+public interface IModelView
+{
+    Entity? Get(string id);
+    Relation? GetRelation(string id);
+    /// <summary>Every entity, in creation order.</summary>
+    IEnumerable<Entity> Entities { get; }
+    /// <summary>Every entity in no particular order: for a question whose answer does not depend on it, without sorting them all.</summary>
+    IEnumerable<Entity> AnyOrder => Entities;
+    IEnumerable<Relation> Relations { get; }
+    IEnumerable<Entity> OfClass(string @class);
+    /// <summary>The relationships <paramref name="id"/> takes part in, relating or related, in creation order.</summary>
+    IEnumerable<Relation> RelationsOf(string id, string? relationClass = null);
+    /// <summary>The relationships <paramref name="id"/> is related by (among their related, not relating), in creation order: an element's storey's, its type's.</summary>
+    IEnumerable<Relation> RelatedBy(string id, string? relationClass = null) => RelationsOf(id, relationClass).Where(r => RelatedSets.Has(r, id));
+    /// <summary>Position in the document: creation order, where "older" decides.</summary>
+    int Order(string id);
+    /// <summary>Changes with every edit: what a derived value is cached against.</summary>
+    long Revision { get; }
+}
+
+/// <summary>
+/// Whether a relationship relates an id, without walking its list each time: a storey of 20,000 elements asked
+/// for each of them was quadratic (a Fragments import of 20,650 items spent 88 s there). A relationship is
+/// immutable, so the set made for it once stays true.
+/// </summary>
+public static class RelatedSets
+{
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Relation, HashSet<string>> _sets = [];
+
+    public static bool Has(Relation r, string id)
+    {
+        if (r.Related.Count < 32) return r.Related.Contains(id);
+        return _sets.GetValue(r, x => [.. x.Related]).Contains(id);
+    }
+}
+
+public static class ModelViewExtensions
+{
+    /// <summary>The entity relating <paramref name="id"/> through a relationship of <paramref name="relationClass"/>: a wall's storey, its type.</summary>
+    public static Entity? RelatingOf(this IModelView m, string id, string relationClass) =>
+        m.RelatedBy(id, relationClass).Select(r => m.Get(r.Relating)).FirstOrDefault(e => e != null);
+
+    /// <summary>The entities <paramref name="id"/> relates through relationships of <paramref name="relationClass"/>, in order: a storey's elements.</summary>
+    public static IEnumerable<Entity> RelatedOf(this IModelView m, string id, string relationClass) =>
+        m.RelationsOf(id, relationClass).Where(r => r.Relating == id).SelectMany(r => r.Related).Select(m.Get).OfType<Entity>();
+
+    /// <summary>The relationship of <paramref name="relationClass"/> that <paramref name="id"/> is related by, if any.</summary>
+    public static Relation? RelationRelating(this IModelView m, string id, string relationClass) =>
+        m.RelatedBy(id, relationClass).FirstOrDefault();
+}
+
+/// <summary>
+/// The model in memory: entities and relationships by id, in creation order,
+/// with an index of the relationships each entity takes part in. Changed only
+/// through a <see cref="History"/>, which records every change for undo.
+/// </summary>
+public sealed class ModelStore : IModelView
+{
+    readonly Dictionary<string, Entity> _entities = [];
+    readonly Dictionary<string, Relation> _relations = [];
+    readonly Dictionary<string, int> _order = [];
+    readonly Dictionary<string, HashSet<string>> _byClass = [];
+    readonly Dictionary<string, HashSet<string>> _touching = [];
+    // Each id's relationships where it is among the related: a storey's containment holds every element on it, too long to search for each one.
+    readonly Dictionary<string, HashSet<string>> _relatedIn = [];
+    int _next;
+    // Per class, the sum of a mix of its entities' versions: the same whatever their order, and back to what it was when an undo puts the entities back.
+    readonly Dictionary<string, (ulong A, ulong B)> _classStamp = [];
+    // Per cell of PlaceCells, the elements in it.
+    readonly Dictionary<string, HashSet<string>> _inCell = [];
+    static readonly System.Runtime.CompilerServices.ConditionalWeakTable<Relation, object> _relationVersions = [];
+    static long _relationVersion;
+
+    public long Revision { get; private set; }
+
+    /// <summary>A 64-bit mixer (the finaliser of splitmix64): a bijection, so unlike numbers stay unlike.</summary>
+    public static ulong Mix(ulong v)
+    {
+        v += 0x9E3779B97F4A7C15UL;
+        v = (v ^ (v >> 30)) * 0xBF58476D1CE4E5B9UL;
+        v = (v ^ (v >> 27)) * 0x94D049BB133111EBUL;
+        return v ^ (v >> 31);
+    }
+
+    /// <summary>A second mixer, independent of <see cref="Mix"/>: a stamp is two sums, one of each.</summary>
+    public static ulong Mix2(ulong v) => Mix(v ^ 0xD6E8FEB86659FD93UL) * 0xFF51AFD7ED558CCDUL + 0x2545F4914F6CDD1DUL;
+
+    static ulong VersionOf(Relation r) => (ulong)(long)_relationVersions.GetValue(r, _ => Interlocked.Increment(ref _relationVersion));
+
+    /// <summary>
+    /// What one thing a build read stands for right now, as a stamp that is the same exactly when the read would give the same:
+    /// an entity's (or relationship's) version, 0 when it is not there; <c>rel:id</c> the relationships it takes part in; <c>class:X</c>
+    /// and <c>cut:X</c> the class's entities; <c>place:X:i,j</c> the class's elements in a cell (<see cref="PlaceCells"/>). Two sums of mixed unique versions under independent mixers (128 bits, with every
+    /// key's own hash going in, in <c>Session.StampOf</c>), so two different states give the same stamp only by a 2^-128 coincidence
+    /// (a test checks that an edit, an undo and a redo each give the stamp they should). Null for a key that stands for something else (a derived cell, the whole model): those builds are not kept.
+    /// </summary>
+    public (ulong A, ulong B)? ReadStamp(string key)
+    {
+        if (key.StartsWith("rel:", StringComparison.Ordinal))
+        {
+            var id = key[4..];
+            ulong a = 7, b = 7, n = 0;
+            if (_touching.TryGetValue(id, out var touching)) foreach (var r in touching) { var v = VersionOf(_relations[r]); a += Mix(v); b += Mix2(v); n++; }
+            if (_relatedIn.TryGetValue(id, out var related)) foreach (var r in related) { var v = VersionOf(_relations[r]) + (1UL << 62); a += Mix(v); b += Mix2(v); n++; }
+            return (a, b + n);
+        }
+        // Its layers' extents (forum topic 89): its class's stamp with its types' (a type's extents are its elements' defaults).
+        if (key.StartsWith("extents:", StringComparison.Ordinal))
+        {
+            var cls = key[8..];
+            var (a, b) = _classStamp.GetValueOrDefault(cls);
+            var (ta, tb) = _classStamp.GetValueOrDefault(cls + "Type");
+            return (a + Mix(ta), b + Mix2(tb));
+        }
+        // An element's own cut priority: told by its class's stamp, as the class's listing.
+        if (key.StartsWith("class:", StringComparison.Ordinal) || key.StartsWith("cut:", StringComparison.Ordinal))
+            return key == "class:*" ? null : _classStamp.GetValueOrDefault(key[(key.IndexOf(':') + 1)..]);
+        // The elements along an axis lying in a cell (PlaceCells), kept under the cell's own key.
+        if (PlaceCells.IsKey(key)) return _classStamp.GetValueOrDefault(key);
+        if (key.Contains(':')) return null;
+        if (_entities.TryGetValue(key, out var e)) return ((ulong)e.Version, Mix2((ulong)e.Version));
+        if (_relations.TryGetValue(key, out var rel)) { var v = VersionOf(rel) + (1UL << 62); return (v, Mix2(v)); }
+        return (0, 0);
+    }
+
+    public Entity? Get(string id) => _entities.GetValueOrDefault(id);
+    public Relation? GetRelation(string id) => _relations.GetValueOrDefault(id);
+    public IEnumerable<Entity> Entities => _entities.Values.OrderBy(e => _order[e.Id]);
+    public IEnumerable<Entity> AnyOrder => _entities.Values;
+    public IEnumerable<Relation> Relations => _relations.Values.OrderBy(r => _order[r.Id]);
+    public int EntityCount => _entities.Count;
+    void Stamp(string cls, Entity e, int sign)
+    {
+        var (a, b) = _classStamp.GetValueOrDefault(cls);
+        var (x, y) = (Mix((ulong)e.Version), Mix2((ulong)e.Version));
+        _classStamp[cls] = sign > 0 ? (a + x, b + y) : (a - x, b - y);
+        // Where an element along an axis lies (PlaceCells): each of its cells' stamps, a sum over where its elements are (not their
+        // versions: a name changed leaves them), and the cell's elements.
+        var placed = false;
+        ulong h = 0;
+        foreach (var cell in PlaceCells.Of(e))
+        {
+            if (!placed) { h = PlaceCells.Hash(e); placed = true; }
+            var (px, py) = (Mix(h), Mix2(h));
+            var (ca, cb) = _classStamp.GetValueOrDefault(cell);
+            if (!_inCell.TryGetValue(cell, out var ids)) _inCell[cell] = ids = [];
+            if (sign > 0) { _classStamp[cell] = (ca + px, cb + py); ids.Add(e.Id); continue; }
+            ids.Remove(e.Id);
+            if (ids.Count == 0) { _inCell.Remove(cell); _classStamp.Remove(cell); }
+            else _classStamp[cell] = (ca - px, cb - py);
+        }
+    }
+
+    /// <summary>The ids of the elements in a cell (<see cref="PlaceCells"/>), in no order.</summary>
+    public IReadOnlyCollection<string> InCell(string cell) => _inCell.TryGetValue(cell, out var ids) ? ids : [];
+
+    /// <summary>Whether the class has any entity, without sorting them.</summary>
+    public bool HasClass(string @class) => _byClass.TryGetValue(@class, out var ids) && ids.Count > 0;
+    /// <summary>How many entities the class has, without sorting them.</summary>
+    public int CountOf(string @class) => _byClass.TryGetValue(@class, out var ids) ? ids.Count : 0;
+    public int RelationCount => _relations.Count;
+
+    public IEnumerable<Entity> OfClass(string @class) =>
+        _byClass.TryGetValue(@class, out var ids) ? ids.Select(id => _entities[id]).OrderBy(e => _order[e.Id]) : [];
+
+    public IEnumerable<Relation> RelationsOf(string id, string? relationClass = null) =>
+        _touching.TryGetValue(id, out var ids)
+            ? ids.Select(r => _relations[r]).Where(r => relationClass == null || r.Class == relationClass).OrderBy(r => _order[r.Id])
+            : [];
+
+    public IEnumerable<Relation> RelatedBy(string id, string? relationClass = null) =>
+        _relatedIn.TryGetValue(id, out var ids)
+            ? ids.Select(r => _relations[r]).Where(r => relationClass == null || r.Class == relationClass).OrderBy(r => _order[r.Id])
+            : [];
+
+    public int Order(string id) => _order.GetValueOrDefault(id, int.MaxValue);
+    internal int? OrderOf(string id) => _order.TryGetValue(id, out var o) ? o : null;
+
+    internal void Put(Entity e, int? order = null)
+    {
+        if (_entities.TryGetValue(e.Id, out var old)) { _byClass[old.Class].Remove(e.Id); Stamp(old.Class, old, -1); }
+        _entities[e.Id] = e;
+        Stamp(e.Class, e, +1);
+        Place(e.Id, order);
+        (_byClass.TryGetValue(e.Class, out var set) ? set : _byClass[e.Class] = []).Add(e.Id);
+        Revision++;
+    }
+
+    internal void Delete(string id)
+    {
+        if (!_entities.Remove(id, out var e)) return;
+        Stamp(e.Class, e, -1);
+        _byClass[e.Class].Remove(id);
+        _order.Remove(id);
+        Revision++;
+    }
+
+    internal void Put(Relation r, int? order = null)
+    {
+        if (_relations.TryGetValue(r.Id, out var old)) Unindex(old);
+        _relations[r.Id] = r;
+        Place(r.Id, order);
+        foreach (var id in r.Related.Prepend(r.Relating))
+            (_touching.TryGetValue(id, out var set) ? set : _touching[id] = []).Add(r.Id);
+        foreach (var id in r.Related)
+            (_relatedIn.TryGetValue(id, out var set) ? set : _relatedIn[id] = []).Add(r.Id);
+        Revision++;
+    }
+
+    internal void DeleteRelation(string id)
+    {
+        if (!_relations.Remove(id, out var r)) return;
+        Unindex(r);
+        _order.Remove(id);
+        Revision++;
+    }
+
+    void Unindex(Relation r)
+    {
+        foreach (var id in r.Related.Prepend(r.Relating))
+            if (_touching.TryGetValue(id, out var set)) { set.Remove(r.Id); if (set.Count == 0) _touching.Remove(id); }
+        foreach (var id in r.Related)
+            if (_relatedIn.TryGetValue(id, out var set)) { set.Remove(r.Id); if (set.Count == 0) _relatedIn.Remove(id); }
+    }
+
+    void Place(string id, int? order)
+    {
+        if (order is { } o) { _order[id] = o; _next = Math.Max(_next, o + 1); }
+        else if (!_order.ContainsKey(id)) _order[id] = _next++;
+    }
+
+    internal void Clear()
+    {
+        _entities.Clear(); _relations.Clear(); _order.Clear(); _byClass.Clear(); _touching.Clear(); _relatedIn.Clear(); _classStamp.Clear(); _inCell.Clear();
+        _next = 0;
+        Revision++;
+    }
+}

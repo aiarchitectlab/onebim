@@ -1,0 +1,15 @@
+<Project>
+  <!-- Common to every Lapin engine project. -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <!-- Where every module lands after a build, ready for the host to load and a product build to ship. -->
+    <LapinModulesDir>$(MSBuildThisFileDirectory)artifacts/modules/</LapinModulesDir>
+    <!-- The geometry kernel (B-rep) and the booleans (manifold), taken from BubbleBIM Pro on 25.10.2026. -->
+    <LapinGeometryDir>$(MSBuildThisFileDirectory)src/Geometry/</LapinGeometryDir>
+  </PropertyGroup>
+</Project>

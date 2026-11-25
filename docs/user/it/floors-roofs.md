@@ -1,0 +1,135 @@
+---
+title: Solai e tetti
+order: 40
+summary: Disegna solai e tetti dal loro contorno, scegli la forma e i bordi di un tetto e taglia le aperture.
+---
+
+## Solai
+
+Scegli **Architettura → Solaio** (<kbd>SB</kbd>), poi fai clic sugli angoli del suo contorno. Chiudi il contorno sul primo punto, oppure premi <kbd>Enter</kbd>. Anche un solaio è fatto di strati, impostati in **Architettura → Tipi di solaio**. Uno strato di un tipo di solaio può avere spessore 0 (un’impermeabilizzazione, la pittura): non costruisce nulla, è disegnato come una linea nelle sezioni ed è misurato sulla superficie del solaio.
+
+In **Tipi di solaio** ogni strato ha una **Priorità** (da 0 a 100) e una **Categoria**, come gli strati di un tipo di muro. Uno strato di muro che scende nel solaio (**Nei solai** in **Tipi di muro**) attraversa gli strati del solaio di priorità inferiore e si ferma sul primo di priorità uguale o maggiore. Vuota, la priorità è quella del materiale in **Gestisci → Ordine di taglio**, altrimenti 50 per il nucleo e 0 per gli altri strati. Uno strato marcato **Finitura** se ne va quando una vista tralascia le finiture dei solai.
+
+Per cambiare il contorno, seleziona il solaio e trascinane gli angoli. Per aggiungere un angolo, tieni premuto <kbd>Ctrl/⌘</kbd> e fai clic sul piccolo rombo a metà di un lato, oppure fai clic destro sul solaio selezionato vicino a un lato e scegli **Aggiungi un angolo qui**: il nuovo angolo va dove hai fatto clic. Per toglierne uno, fai <kbd>Ctrl/⌘</kbd>-clic su di esso, oppure clic destro e scegli **Rimuovi angolo** (un contorno mantiene almeno tre angoli). Ogni modifica è un solo passo di annullamento, e lo stesso vale per fori nel solaio, tetti, locali e balconi. **Foro nel solaio** (<kbd>SH</kbd>) taglia un foro in un solaio, per una scala o un cavedio.
+
+Per ingrandire o ridurre tutto il contorno in una volta, ogni lato della stessa distanza (l'*Offset all edges* di Archicad), tieni premuto <kbd>Shift</kbd> e trascina il rombo a metà di un lato qualsiasi: il contorno segue il cursore in tempo reale, in pianta o in 3D, e la distanza si può scrivere mentre trascini (<kbd>Invio</kbd> la fissa). Oppure fai clic destro sul solaio selezionato, scegli **Sfalsa contorno…** e scrivi la distanza: positiva va verso l'esterno, negativa verso l'interno. I lati rettilinei restano paralleli e si incontrano di nuovo ai loro angoli; un lato curvo resta un arco attorno al proprio centro, e dove un arco incontra un altro lato in un angolo, l'ingrandimento arrotonda quell'angolo. Uno sfalsamento che farebbe sparire un lato o intersecare il contorno con se stesso viene rifiutato, con il motivo accanto al cursore. Funziona su solai, fori nel solaio, controsoffitti, tetti (ogni lato mantiene la sua regola di gronda o timpano), locali e balconi, e su più elementi selezionati insieme; ognuno è un solo passo di annullamento.
+
+![Il contorno di un solaio sfalsato trascinando con Shift il centro di un lato](shots/floor-offset-outline.webp)
+
+### Lati curvi, raccordi e solai rotondi
+
+La barra dello strumento **Solaio**, nella riga di comando, disegna il contorno come **Poligono** (cliccandone gli angoli), **Rettangolo** (due angoli opposti), **Cerchio** (il centro, poi un punto su di esso) o **Dentro i muri** (un clic dentro i muri che lo racchiudono; il solaio arriva alle loro facce). In un poligono, **Linee (Spazio)** diventa **Archi (Spazio)**: i lati successivi sono archi, ognuno tangente al lato precedente, finché non premi di nuovo <kbd>Spazio</kbd>. **Foro nel solaio** e **Controsoffitto** hanno la stessa barra, senza **Dentro i muri**.
+
+![Lo strumento Solaio che disegna un cerchio accanto a un solaio](shots/floor-shapes.webp)
+
+La stessa barra serve tutti gli strumenti di contorno (solaio, foro nel solaio, controsoffitto, foro nel contorno, locale e balcone per contorno, piattaforma, lotto), e tre delle sue scelte prendono l’intero contorno con un clic: **Inside walls** (i muri che si chiudono attorno al punto), **From drawn shape** (la più piccola forma disegnata chiusa attorno al punto: una polilinea chiusa, un rettangolo o un cerchio, che resta tondo) e **From room** (il locale attorno al punto, con i suoi bordi curvi).
+
+![La barra degli strumenti di contorno, con From drawn shape scelto](shots/outline-sources.webp)
+
+Per solaio, foro nel solaio, controsoffitto e locale per contorno la barra offre anche **Ellipse**: il centro, l’estremo di un semiasse, poi l’altro. I bordi del contorno seguono la vera ellisse (quattro quarti), misurati esattamente; un angolo spostato fuori dall’ellisse rende dritti i suoi due bordi, e un angolo vicino a un bordo ellittico non si raccorda. L’IFC la porta come IfcEllipse. **From drawn shape** prende allo stesso modo un’ellisse disegnata. Un foro proprio di un solaio o di un controsoffitto (**Hole in the outline**) accetta anche un’ellisse. Spostare l’intero contorno (Maiusc-trascina, **Offset outline…**) fa di un lato ellittico la vera curva a quella distanza, in brevi lati dritti (la curva a distanza da un’ellisse non è un’ellisse); verso l’interno si ferma prima che la curva si ripieghi nella curvatura più stretta dell’ellisse.
+
+![Un solaio ellittico disegnato accanto a un’ellisse disegnata](shots/ellipse-floor.webp)
+
+Qualsiasi lato di un solaio, di un foro nel solaio o di un controsoffitto può essere curvo. Fai clic destro sul solaio selezionato vicino a un lato e scegli **Rendi arco**: il lato si incurva verso l'esterno di un ottavo della sua lunghezza e al centro dell'arco compare una maniglia rotonda. Trascinala per curvare l'arco attraverso il punto voluto (il rombo, ora al centro della corda, sposta ancora il lato). **Rendi diritto** lo riporta a linea. Un angolo tra due lati diritti si può raccordare o smussare: fai clic destro su di esso e scegli **Raccorda l'angolo…** (digita il raggio) o **Smussa l'angolo…** (digita di quanto arretra lungo ogni lato). L'angolo diventa due, dove l'arco o lo smusso incontrano i lati; un raggio troppo grande per i lati viene rifiutato. Ognuno è un solo passo di annullamento.
+
+![Un solaio con un lato curvo e un angolo raccordato](shots/floor-curved-edge.webp)
+
+Il solaio è costruito lungo i suoi archi, nessuna corda a più di 1 mm da essi, in 3D, piante e sezioni; area e perimetro sono misurati sugli archi veri. Uno strato che va oltre un lato curvo (vedi [Estensioni degli strati](walls.md#layer-extents)) segue l'arco. Anche un foro può avere lati curvi, e un solaio curvo può avere fori. In IFC il solaio porta il suo contorno con gli archi veri come impronta (una IfcIndexedPolyCurve con segmenti d'arco), accanto al suo corpo. Le coperture mantengono lati diritti, perché le loro regole dei lati (gronda, timpano) si impostano per lato diritto.
+
+Un solaio o un controsoffitto può avere **fori propri**: isole ritagliate dal suo contorno, parte dell’elemento, non aperture a sé. Scegli **Hole in the outline** nello strumento **Opening** (sotto *In a floor*) e disegnalo dentro il solaio (o il solaio o controsoffitto selezionato) con la stessa barra: un poligono i cui bordi possono essere archi, un rettangolo o un cerchio. Selezionato, il solaio mostra angoli e bordi di ogni foro come maniglie, con lo stesso clic destro (**Make arc**, **Fillet corner…**, **Chamfer corner…**); la croce al centro di un foro lo sposta, e il suo clic destro offre **Remove hole**. Il solaio è costruito attorno ai fori e la sua area li esclude, misurati sui veri archi; un foro deve stare dentro il contorno, separato dagli altri, e un contorno cambiato in modo da non contenerlo più è rifiutato. In **Edit sketch** i fori sono anch’essi anelli dello schizzo: disegna un altro anello chiuso all’interno e **Finish sketch** lo rende un foro (l’anello più grande è il contorno). In IFC i fori sono altre curve dell’impronta del solaio, riletti come fori. Una piattaforma (**Site → Hole in platform**) accetta fori allo stesso modo: il terreno nel foro mantiene le sue quote.
+
+![Un solaio con un foro rettangolare e uno tondo nel proprio contorno, selezionato](shots/floor-holes.webp)
+
+#### Modifica schizzo
+
+Per più di un angolo o di un arco, fai clic destro sul solaio selezionato (o foro nel solaio, o controsoffitto) e scegli **Modifica schizzo** (anche **Studio → Modifica schizzo**). Il suo contorno si apre come schizzo su una pianta propria, una linea o un arco per lato, gli angoli tenuti insieme, il solaio stesso nascosto lì; una barra sopra la pianta dice di chi è lo schizzo. Disegna e modifica con la scheda **Disegno** (Linea, Arco, Raccordo, Taglia, Estendi, Offset…) e vincola e quota con **Studio → Vincoli** (vedi [Vincoli dello schizzo](sketch-constraints.md)): cambi una quota e il contorno la segue. **Termina schizzo** lo riscrive nel solaio in un solo passo di annullamento, e il solaio mantiene la sua identità (il suo GlobalId); **Annulla** lascia il solaio com'era. Lo schizzo deve essere un solo contorno chiuso (lati estremo con estremo, o un cerchio da solo); altrimenti Termina dice cosa è aperto.
+
+![Il contorno di un solaio modificato come schizzo: un raccordo e una quota](shots/floor-sketch-edit.webp)
+
+Lo schizzo, con vincoli e quote, resta sul solaio (va in IFC con l'intento progettuale del solaio, in Lapin_Intent), così **Modifica schizzo** lo riapre come l'hai lasciato. Se nel frattempo il contorno è stato cambiato con le maniglie, lo schizzo riparte dal contorno com'è, senza i suoi vincoli. Un solaio riconosciuto da un file IFC riceve uno schizzo solo quando lo modifichi; uno tenuto come riferimento non si modifica così.
+
+![Il solaio dopo Termina schizzo](shots/floor-sketch-done.webp)
+
+Un solaio disegnato fuori dai muri, davanti a una porta, è un portico. Per i gradini che vi salgono, vedi [Scale](stairs.md).
+
+Uno strato di un solaio può anche andare oltre il suo contorno, o fermarsi prima, tutto intorno o a un bordo, digitato nelle sue proprietà o trascinato in pianta o in sezione con **Modifica strati**, e un tipo di solaio può dare ai suoi solai i loro prolungamenti: vedete [Prolungamenti degli strati](walls.md#prolungamenti-degli-strati). I tetti non hanno ancora una stratigrafia (manto, soletta e orditura sono parti proprie), quindi non hanno prolungamenti degli strati.
+
+**Modifica → Dividi elemento** su un solaio o un controsoffitto chiede due punti di una linea di divisione: la linea prosegue oltre di essi e deve incrociare il contorno esattamente due volte. Il solaio diventa due solai; la parte cliccata mantiene l’id (GlobalId in IFC), gli archi sui bordi restano archi (un arco tagliato resta un arco) e un’apertura del solaio va con la parte in cui si trova. Un’apertura che la linea attraversa viene rifiutata. **Modifica → Taglia/estendi elementi** accetta un limite retto (un muro, una trave o una linea disegnata) e taglia lì il solaio o il controsoffitto, mantenendo il lato cliccato.
+
+![Un solaio con un bordo curvo diviso da una linea: la parte a destra selezionata](shots/floor-split.webp)
+
+I fori propri di un solaio vanno alla parte in cui cadono; uno strato che supera un bordo curvo continua a farlo su entrambe le parti; la griglia di un controsoffitto resta dov’era, ogni apparecchio o diffusore nella parte in cui cade la sua cella. Un solaio con un bordo ellittico non viene tagliato da una linea.
+
+Una **copertura** si divide e si taglia allo stesso modo. Ogni parte mantiene le regole dei suoi bordi (gronda o timpano, pendenza, sporgenza), e il taglio è un timpano senza sporgenza; il taglio è consentito solo dove lascia la copertura com’era, con le falde di ogni parte dove stavano quelle della copertura, come attraverso il colmo di una copertura a due falde o lungo di esso. Altrove viene rifiutato (*would change its slopes*): le falde di una parte salirebbero a nuovi colmi. Finestre da tetto, abbaini e pluviali vanno alla loro parte. Una copertura a botte non viene tagliata.
+
+![Una copertura a due falde divisa attraverso il colmo: due coperture, le stesse falde](shots/roof-split.webp)
+
+## Tetti
+
+Scegli **Architettura → Tetto** (<kbd>RF</kbd>) e fai clic sul contorno dei muri sottostanti. Lapin costruisce il tetto su quel contorno, alla sommità del suo livello.
+
+![Una casa con un tetto a due falde nella vista 3D](shots/house-3d.webp)
+
+Seleziona il tetto per modificarlo nel pannello Proprietà:
+
+- **Forma.** A padiglione, a due falde, a una falda, a mansarda, a botte o piano. Un tetto a botte è una volta curva tra due timpani; **Volta a botte: freccia in chiave** stabilisce quanto sale in chiave, al massimo metà della sua luce.
+- **Pendenza e sporto** per l’intero tetto.
+- **Direzione del colmo (a due falde, a una falda)**: auto, x o y. Il colmo di un tetto a una falda è il suo lato alto: su x scende verso −y, su y verso −x; **Una falda: inverti la pendenza** lo fa scendere dall’altra parte.
+- **Ogni bordo** con il proprio tipo (gronda o timpano), pendenza e sporto. Una mansarda con bordi a timpano è un tetto alla olandese (gambrel).
+- **Stile.** Gli stili di tetto danno un intero aspetto con una sola scelta: la copertura, le gronde, le grondaie e i pluviali.
+- **Materiale del manto.** Il manto di copertura è di un materiale del progetto, per impostazione quello del manto scelto (Clay tile, Metal sheet, Slate…), creato nel colore del manto la prima volta che un tetto ne ha bisogno. Sceglietene un altro nelle proprietà o in **Copertura e smaltimento acque** del configuratore; cambiando il manto cambia anche lui, a meno che non ne abbiate scelto uno. Prospetti e sezioni retinano il manto secondo quel materiale (coppi, scandole e ardesia a corsi orizzontali, lamiera a giunti verticali, se non gli date un retino **Elevation** proprio), una sezione disegna il manto tagliato con il retino di sezione del materiale, e l’IFC, il computo e il preventivo elencano il manto sotto il suo materiale.
+- **Spessore del manto.** Vuoto, il manto è spesso quanto quello del catalogo (una membrana 2 cm, la lamiera 3 cm, le tegole 5 cm…); scrivine uno per dargli il suo. Un tetto importato da un altro programma mantiene quello del file.
+- **Solaio.** Un tetto piano, una volta a botte e un tetto con **Structure** none hanno un solaio sotto il manto, una parte a sé: **Materiale del solaio** (per impostazione Reinforced concrete, creato la prima volta che un tetto ne ha bisogno) e **Spessore del solaio** (per impostazione 16 cm), nelle proprietà o in **Orditura** nel configuratore. Il manto vi poggia sopra, quindi il tetto resta spesso quanto i due insieme. Una sezione disegna due fasce, ciascuna tratteggiata secondo il suo materiale; le finestre da tetto attraversano entrambe; un muro agganciato a un tetto piano sale fino all’intradosso del solaio; l’IFC scrive solaio e manto come due solette di copertura dei loro materiali, e il computo e la stima misurano il solaio (superficie e volume) e il manto (superficie), ciascuno sotto il suo materiale. Le proprietà mostrano questi due campi solo su un tetto senza orditura, e i campi dei travetti (sezioni, interasse, classe, arcarecci, teste) solo su uno con orditura; un campo proprio di una sola forma (quello della mansarda, la freccia della volta, l'inversione del tetto a una falda) compare solo su quella forma.
+
+![Le proprietà di un tetto](shots/roof-properties.webp)
+
+![Un tetto piano in sezione: il solaio in calcestruzzo e il manto sopra, ciascuno tratteggiato secondo il suo materiale](shots/roof-deck-section.webp)
+
+**Configuratore del tetto** (il pulsante accanto allo stile, oppure **Architettura → Configuratore del tetto** con un tetto selezionato) riunisce tutto in un unico posto: gli stili a sinistra, poi la forma e i suoi bordi, la copertura e lo smaltimento delle acque, l’orditura e le aperture, sopra una pianta del tetto (fai clic su un bordo per renderlo auto, gronda o timpano) e, per l’orditura, una sezione trasversale al colmo con la capriata o la coppia di puntoni al centro. Scegli uno stile da cui partire e modifica a mano qualsiasi campo; **Applica** ne fa un unico passo da annullare. **Salva come stile…** conserva il tetto così come è configurato come stile del progetto, elencato sotto **Progetto** sopra quelli del catalogo (e nell’elenco del pannello Proprietà) per altri tetti e per quelli nuovi; **Aggiorna lo stile** vi salva di nuovo le modifiche, e tutti i tetti di quello stile si adeguano. Uno stile del progetto si può rinominare o eliminare; i suoi tetti mantengono il loro aspetto.
+
+![Il configuratore del tetto](shots/roof-configurator.webp)
+
+**Grondaie e pluviali.** In **Copertura e smaltimento acque** del configuratore, la grondaia prende la sua dimensione, quanto sporge dalla gronda e quanto pende sotto la copertura, la sua pendenza verso gli scarichi (mm/m) e i suoi tappi di testata; la tabella dei bordi attiva o disattiva la grondaia di ogni gronda. I pluviali nascono come parte del tetto, uno ogni 10 m; **Rendili modificabili** li trasforma in elementi, e **Architettura → Pluviale** ne aggiunge uno con un clic su una grondaia. La maniglia di un pluviale lo fa scorrere solo lungo la sua grondaia; le sue proprietà impostano il diametro, il gomito di scarico al piede e il percorso, una catena di segmenti ciascuno con la sua lunghezza e il suo angolo dalla verticale (verso il muro), l’ultimo fino a terra. In IFC una grondaia è un IfcPipeSegment GUTTER e un pluviale un segmento rigido chiamato Downpipe.
+
+I muri sul livello del tetto si fermano sotto di esso e salgono da soli fino ai suoi timpani, anche sotto un tetto curvo. Un muro su un altro livello segue il tetto dopo **Architettura → Collega al tetto** (<kbd>AR</kbd>): seleziona i muri, poi fai clic sul tetto. Lo stesso strumento accetta qualsiasi altro corpo sopra i muri: un solido di Studio, una soletta, una trave, un elemento importato da IFC. I muri salgono fino al suo intradosso e vengono tagliati lungo di esso, qualunque sia la sua forma. **Scollega dal tetto** lo annulla.
+
+**Finestra da tetto** e **Abbaino** aggiungono aperture a un tetto: fai clic su una falda. Appartengono al tetto. Seleziona il tetto, e ognuno mostra le sue maniglie in pianta. Trascina la maniglia al centro per spostarlo sul tetto. Trascina le maniglie dei bordi o degli angoli di una finestra da tetto per ridimensionarla sulla falda (il bordo opposto resta dov'è; puoi digitare la lunghezza mentre trascini). La larghezza corre lungo la gronda e la lunghezza su per la falda, misurata sulla falda. Un abbaino ha una maniglia su ogni lato per la sua larghezza. Una modifica che non ci starebbe sul tetto è rifiutata. Per toglierlo, fai clic destro su una sua maniglia e scegli **Rimuovi finestra da tetto** (o **Rimuovi abbaino**), premi **Canc** con il cursore sopra la sua maniglia, oppure fai **Ctrl/⌘-clic** sulla maniglia al centro. Anche le proprietà del tetto li elencano: scrivi lì larghezza e lunghezza di una finestra, oppure fai clic su **×** per toglierla. Il tetto di un abbaino è coperto con il materiale del manto e misurato con esso: le quantità del tetto danno a parte il **manto degli abbaini** (l'area delle sue falde, il numero di abbaini), così il computo per materiale, il preventivo e un'attività di programma sul manto contano le falde del tetto (meno i tagli degli abbaini) e i tetti degli abbaini, ognuno una volta.
+
+![La maniglia di una finestra da tetto sul tetto selezionato](shots/roof-window-grip.webp)
+
+### Orditura in legno
+
+**Struttura** stabilisce come è realizzata l’orditura del tetto:
+
+- **rafters**: puntoni su arcarecci, con una trave di colmo.
+- **collar**: coppie di puntoni con una catena alta orizzontale a **Catene alte: frazione dell’altezza** (due terzi per impostazione predefinita), senza arcarecci.
+- **trusses**: capriate prefabbricate lungo il colmo principale, all’**Interasse dei puntoni**: correnti superiori sulle falde, un corrente inferiore sui dormienti, aste di parete a W (una capriata a una falda su un tetto a una falda). Le testate di un tetto a padiglione mantengono i loro puntoni.
+- **nessuno**: un tavolato, senza legname.
+
+**Puntoni e correnti** accetta le vecchie sezioni in cm o quelle nordiche in mm (da 45×95 a 45×245); con esse vanno **Aste di parete delle capriate** e **Classe di resistenza del legno** (da C14 a C30, lamellare). I puntoni appoggiano sul dormiente con un intaglio a bocca di lupo (**Appoggio dei puntoni sul dormiente**) e terminano in gronda con un taglio a piombo o a squadra (**Terminazione dei puntoni in gronda**). Gli stili **Swedish truss roof** e **Nordic collar-tie roof** portano con sé la loro orditura.
+
+Ogni elemento è una parte a sé: l’abaco **Roof timber** li elenca come distinta di taglio (elemento, sezione, classe, lunghezza, pezzi, volume), e in IFC ciascuno è un IfcMember del suo tipo, ogni capriata un IfcElementAssembly.
+
+## Controsoffitti
+
+**Interni → Controsoffitto** (<kbd>CG</kbd>) disegna un controsoffitto su un contorno di cui fai clic sugli angoli; **Controsoffitto in un locale** riempie il locale su cui fai clic, seguendone il contorno. Un controsoffitto è sospeso alla sua **Altezza** sopra il piano (2700 mm, a meno che tu non la cambi nelle sue proprietà).
+
+Il suo tipo, in **Interni → Tipi di controsoffitto**, imposta il **Sistema**: **Quadrotti su orditura a vista** (larghezza, lunghezza e spessore del quadrotto, larghezza in vista, altezza e rotazione dell’orditura, pendini fino alla struttura con il loro interasse) oppure **Cartongesso, continuo**. L’orditura è centrata sul controsoffitto, così i quadrotti tagliati ai bordi risultano uguali.
+
+**Pannello luminoso** e **Diffusore d’aria** ne mettono uno nella cella su cui fai clic; fai di nuovo clic sulla cella con l’altro strumento per cambiarlo. Nel pannello Proprietà, **Distribuisci** mette pannelli luminosi o diffusori d’aria ogni tot celle, e **Svuota** li toglie. Gli abachi contano i quadrotti interi, i pannelli luminosi e i diffusori, e il controsoffitto va in IFC come un IfcCovering di tipo CEILING.
+
+![Le proprietà di un controsoffitto: il suo tipo, l’altezza e i corpi installati](shots/ceiling-properties.webp)
+
+![Controsoffitti a quadrotti con pannelli luminosi e diffusori d’aria, in 3D](shots/ceilings-3d.webp)
+
+## Battiscopa
+
+**Interni → Battiscopa nel locale** (<kbd>SK</kbd>) posa un battiscopa tutt’intorno al locale cliccato, lungo le facce dei muri, interrotto a ogni porta (qualsiasi apertura che scende fino al pavimento); un clic tra muri senza locale li segue allo stesso modo. Il battiscopa di un locale segue il locale: sposta un muro o una porta e il battiscopa va con loro. **Battiscopa** ne disegna uno lungo una linea cliccata sulla faccia di un muro (Invio termina); il battiscopa va dal lato opposto al muro, e **Cambia lato** nelle sue proprietà lo gira.
+
+Il suo tipo, in **Interni → Tipi di battiscopa**, fissa il **Profilo** — **Liscio (squadrato)**, **Smussato (MDF)**, **Sagomato (legno)**, **Con sguscia (metallo)**, **Bordo a matita** o **Bordo arrotondato**, disegnato accanto in scala —, l’**Altezza** (da 40 a 300 mm), lo **Spessore** (da 5 a 40 mm), il **Materiale** e il suo colore. **Dalla libreria** porta nel progetto tipi già pronti: MDF 80 bevelled, Oak 70 moulded, Tile 80 flush, Aluminium 60 cove, Pencil 50 e Bullnose 70. Finché uno strumento battiscopa è attivo, il pannello delle proprietà mostra il tipo che posa, da scegliere prima del clic.
+
+Nelle sue proprietà un battiscopa ha il suo tipo, un **Offset di base** sopra il pavimento e **Interrotto alle porte** (disattivato, passa davanti). **Abaco dei battiscopa** (o **Battiscopa** nell’elenco dei nuovi abachi del browser di progetto) li elenca per tipo con i pezzi e la lunghezza, senza i vuoti delle porte. Il battiscopa è tagliato a 45° negli angoli; una pianta ne disegna il bordo anteriore, e un battiscopa va in IFC come un IfcCovering di tipo SKIRTINGBOARD, di un IfcCoveringType dello stesso tipo.
+
+![I tipi di battiscopa: il profilo disegnato in scala, la libreria](shots/skirting-types.webp)
+
+![Le proprietà di un battiscopa: il suo tipo, l’offset di base e i vuoti alle porte](shots/skirting-properties.webp)

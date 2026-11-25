@@ -1,0 +1,173 @@
+---
+title: Import und Export
+order: 110
+summary: Tauschen Sie das Modell als IFC aus, holen Sie DXF-Zeichnungen herein, verknüpfen Sie Dateien und exportieren Sie 3D-Modelle für Rendering und AR.
+---
+
+Alles, was hinein- oder hinausgeht, finden Sie im Menü **Datei**.
+
+![Das Menü Datei](shots/file-menu.webp)
+
+## IFC und Fragments
+
+**IFC oder Fragments exportieren…** schreibt das Modell als IFC. Jede Wand, Decke, Tür und jedes Dach ist ein echtes IFC-Element mit seinen Schichten, seinem Typ und seinen Eigenschaften, sodass sich die Datei in anderen BIM-Werkzeugen als Modell öffnet. Türen und Fenster geben an, wie sie sich öffnen: den Anschlag jedes Tür- und Fensterflügels, in welche Richtung er aufschlägt, und die Felder, so wie IFC sie definiert, damit andere Programme dieselben Aufschläge zeichnen.
+
+Der Export fragt nach dem Schema (**IFC4**, überall lesbar, oder **IFC4X3**), dem Detail (Teile als eigene Elemente oder ein Körper je Element), der Bauphase und danach, wie die Körper geschrieben werden. **Geometrie** ist ein **facettiertes B-Rep** (exakt, was andere Programme meist erwarten) oder **Flächenmengen**: dieselben Flächen in einer viel kleineren Datei. **Vereinfachen** schreibt weniger Dreiecke, wo ein Körper ein feines Netz ist, etwa die Kanäle und Rohre aus der Datei eines anderen Programms, nie weiter von ihm entfernt als die **Toleranz**, die Sie eingeben (anfangs 2 mm). Körper, die Lapin selbst baut (Wände, Decken, Türen), behalten ihre exakten Flächen, und Vereinfachen ändert nur die Form eines Körpers, nie seine Eigenschaften.
+
+![IFC exportieren](shots/export-ifc.webp)
+
+Träger, Stützen und Stahlprofile werden über ihr parametrisches Profil geschrieben, benannt und mit seinen mechanischen Werten ([Profilbibliotheken](profiles.md)).
+
+**IFC importieren…** liest die IFC-Datei eines anderen Programms. Bevor etwas hereinkommt, liest Lapin die Datei und zeigt, was sie enthält: ihre Elemente nach Disziplin (Architektur, Tragwerk, TGA, Möbel und Ausstattung, Gelände), jede Disziplin nach Art mit der jeweiligen Anzahl, und ihre Geschosse mit der Anzahl der Elemente auf jedem. Deaktivieren Sie, was Sie nicht brauchen, zum Beispiel TGA und Möbel, wenn Sie am Tragwerk arbeiten, oder behalten Sie nur die Geschosse, an denen Sie arbeiten. **Wie** holt die erkannten Elemente als Lapin-Elemente, alle als Referenzen oder verknüpft herein. Während die Datei gelesen und importiert wird, zeigt Lapin, was es gerade tut und wie weit es ist; eine große Datei braucht eine Weile.
+
+![IFC importieren](shots/import-ifc.webp)
+
+Manche Dateien enthalten neben dem Modell auch 2D: Grundrisssymbole, Grundflächen, Schraffuren und Texte, die für ein Element gezeichnet sind, oder Elemente, die nur in 2D gezeichnet sind (Linien, Texte, Symbole ohne Körper). Hat eine Datei solche, zählt der Dialog sie unter **In 2D gezeichnet**. Entfernen Sie den Haken bei **das eigene 2D der Elemente**, zeichnet der Grundriss diese Elemente durch ihren Schnitt, wie die von Lapin; entfernen Sie ihn bei **nur in 2D gezeichnete Elemente**, bleiben diese draußen. Beides kommt herein, solange Sie den Haken nicht entfernen.
+
+![In 2D gezeichnet](shots/import-ifc-2d.webp)
+
+**Bereinigung und Optimierung** enthält die Regeln des Imports, für jede Datei dieselben, als Ihre eigenen für den nächsten Import gemerkt. **Einen wiederholten Körper einmal behalten** (aktiv, solange Sie den Haken nicht entfernen) behält einen Körper, den die Datei unter anderen Namen wiederholt (eine Schraube, ein Flansch, eine Halterung), einmal; seine Elemente teilen ihn, nichts geht verloren. Die anderen lassen, wenn angehakt, weg, was ein anderes Programm mitgebracht hat: **flache Körper** (in Dreiecke verwandelte Texte, Linien und Schraffuren), **Elemente, die weiter vom Rest entfernt sind** als der eingegebene Abstand (die Texte einer Zeichnung, ein Schriftfeld), **Duplikate** am selben Ort und **als Objekte geschriebene Anschlüsse und Öffnungen**. **Netze vereinfachen** schreibt weniger Dreiecke innerhalb der eingegebenen Toleranz; **als Text geschriebene Zahlen lesen** macht aus `DoubleLength:0,01` 0,01 m und aus `1.15395 kg` eine Masse (eine ganze Zahl allein, ein Code, bleibt Text). Unter **Was übernommen wird** zeigt **Eigenschaftssätze** die Sätze der Datei mit der Anzahl ihrer Elemente; die **technischen** (die Transformation von Navisworks, interne IDs, Geometriestatistiken) bleiben draußen, solange Sie sie nicht anhaken. Die Meldung des Imports sagt, was jede Regel getan hat.
+
+![Bereinigung und Optimierung](shots/import-ifc-rules.webp)
+
+Was die Datei platziert, kommt als eine Gruppe mit ihrem Namen, die Sie öffnen und aufräumen können, oder lose, wenn Sie **Als eine Gruppe** abwählen (siehe [Gruppen und Aufräumen](groups.md)).
+
+**Geschosse.** Die Geschosse eines Imports sind die der Datei: Sie ersetzen die Ihres Projekts. Jedes Geschoss der Datei kommt mit seinem Namen, seiner GlobalId und seiner Höhe, wie die Datei sie angibt, gelesen in der Einheit der Datei (Millimeter oder Meter). Ein Geschoss Ihres Projekts auf der Höhe eines Geschosses der Datei (auf 5 cm genau) wird mit ihm zusammengelegt: seine Elemente bleiben, wo sie sind, und seine Ansichten, sein Grundriss und was darauf gezeichnet ist, gehen auf das Geschoss der Datei über, das den Namen aus der Datei behält. Ein Geschoss von Ihnen auf keiner Höhe der Datei wird entfernt, wenn es nichts enthält (kein Element, nichts auf seinem Grundriss gezeichnet), und seine Ansichten gehen auf das nächstgelegene Geschoss der Datei über; eines, das etwas enthält, bleibt, und die Meldung des Imports sagt, welches. So machen Fundamente, Erdgeschoss und Obergeschoss eines neuen Projekts den Geschossen der Datei Platz. Das alles ist zusammen mit dem Import ein Rückgängig-Schritt. Eine verknüpfte Datei behält ihre Geschosse für sich und ändert keines von Ihren. Ist der Import fertig, rahmt die 3D-Ansicht das Modell ein, außer Sie haben die Kamera bewegt, während es hereinkam.
+
+**Alles bearbeitbar**, eine Wahl unter **Wie**, geht weiter als die Erkennung: was eine Referenz bliebe, wird ein Studio-Körper aus seinen eigenen Dreiecken, dasselbe Element mit seiner Klasse, seinen Eigenschaften, seinem Geschoss und seiner Gruppe, auf das Drücken/Ziehen, Rundungen und boolesche Operationen sofort wirken (siehe [Studio](studio.md)). Ein Körper mit mehr als 5.000 Dreiecken, etwa eine fein vernetzte Pumpe oder ein Formstück, bleibt eine Referenz; die Meldung des Imports sagt, wie viele und warum. **Fragments importieren…** hat dasselbe **Wie**: eine Fragments-Datei enthält nur Dreiecke, und doch werden ihre Wände (mit Türen und Fenstern), Decken und Stützen daraus als Lapin-Elemente erkannt, der Rest bleibt Referenz oder wird mit **Alles bearbeitbar** zum Studio-Körper. Elemente einer IFC-Datei, die die Erkennung nicht aus der Datei lesen konnte (eine Wand mit in den Körper geschnittenen Öffnungen), werden auch aus ihren Dreiecken versucht. **Netz importieren** fragt **Als: bearbeitbar**. Früher importierte Referenzen wandelt Ändern → **In nativ umwandeln** (NV) um: erkannt, wo es geht, der Rest Studio-Körper; eine gewählte Gruppe steht für ihre Mitglieder. Eine früher importierte Referenz wird einzeln mit Studio → **Zu Studio-Körper machen** bearbeitbar; sie bleibt in ihrer Gruppe und auf ihrem Geschoss.
+
+Lapin erkennt Wände, Decken, Stützen, Träger, Fundamente, Türen und Fenster und wandelt sie in Lapin-Elemente um, die Sie bearbeiten können. Was es nicht erkennen kann, kommt als Referenz herein, gezeichnet, wie die Datei sie gibt: Ihre Form lässt sich nicht bearbeiten, aber sie wird wie jedes Element verschoben, gedreht, gespiegelt, kopiert und angeordnet. Ein Element wird nur dann ein Lapin-Element, wenn es das der Datei ist: Lapin misst jedes erkannte Element am Körper, den die Datei ihm gibt, und eines, das um mehr als 1 mm oder 0,5 % seines Volumens abweicht (eine Stütze, deren Kopf die Datei schräg schneidet, ein Wandende, das die Datei abtreppt, die ein Lapin-Element gerade machen würde), kommt als die Referenz herein, die es war; die Meldung des Imports sagt, wie viele und warum. Türen und Fenster öffnen sich nach dem Import so, wie die Datei es angibt: ihr Anschlag, die Seite, zu der sie aufgehen, und bei Fenstern, wie sich jeder Flügel öffnet. Ein Flachdach aus einem anderen Programm wird zu einem Lapin-Dach, wenn sein IfcRoof aus zwei oder mehr übereinanderliegenden Platten besteht, oder aus einem Körper mit einem Schichtenaufbau: die oberste Platte (oder Schicht) ist die Deckung mit ihrem Material und ihrer Dicke, die darunter die Tragschale, aus dem Material der dicksten; der Umriss ist der der Tragschale, ohne Überstand, an ihrer Unterseite. Ein geneigtes Dach oder eines aus einer Platte ohne Schichten bleibt, wie es kam. Erkannte Elemente bekommen nur, was die Datei hat: keine Stürze, Fensterbänke, Schwellen oder Laibungen von Lapin, und jede Öffnung hat die Größe aus der Datei; schalten Sie sie in den Typen der Elemente ein, wenn Sie sie möchten.
+
+Bekleidungen, die ein anderes Programm als eigene Wände exportiert hat (ein 2,5-cm-Putz auf der Fassade, ein Innenputz), werden eine Schicht der Wand, die sie bedecken, wenn sie an ihrer Fläche anliegen, so hoch wie sie und an ihr entlang: Die Wand erhält einen Typ mit dieser Schicht (*Masonry 350 + Lime render*), ihre eigenen Schichten bleiben, wo sie waren, und die Meldung des Imports sagt, wie viele. Eine Bekleidung mit Abstand zur Wand, oder eine über nur einen Teil von ihr, bleibt eine dünne Wand. Eine Stütze, die die Datei als Körper mit schräg geschnittenem Kopf gibt (unter einem geneigten Träger oder Dach), kommt als Stütze mit ihrem Querschnitt herein, bis zu ihrem höchsten Punkt.
+
+**Importierte Typen zuordnen** (Verwalten) listet die Typen, die ein Import angelegt hat (Wand-, Decken-, Tür-, Fenster-, Stützen-, Träger- und Fundamenttypen), jeden mit seiner Datei und der Zahl seiner Elemente. Wählen Sie unter **Wird zu** einen projekteigenen Typ derselben Art und drücken Sie **Zuordnen**: Seine Elemente erhalten den Typ des Projekts, eine Wand behält ihren Kern, wo er war, und der importierte Typ entfällt. Mit **Merken** erhält ein späterer Import eines Typs dieser Art und dieses Namens sofort den des Projekts, und seine Meldung sagt es. Die gemerkten Zuordnungen stehen im Dialog, jede mit **Vergessen**.
+
+![Importierte Typen zuordnen](shots/map-types.webp)
+
+Die Räume der Datei (aus Revit, ArchiCAD und anderen) kommen als Lapin-Räume herein, jeder auf seiner eigenen Ebene, mit Umriss, Nummer, Name, Höhe, Funktion, Abteilung und Bodenbelag: siehe [Räume und Raumfarben](rooms.md#raume-aus-einer-ifc-datei). Alles, was ein importiertes Element in der Datei hatte (seine Eigenschaftssätze und Mengen), bleibt erhalten und wird in seinen Eigenschaften unter **IFC-Eigenschaften** angezeigt. Eine Referenz verlässt **IFC exportieren…** so, wie sie hereinkam: mit derselben GlobalId, Klasse und denselben Attributen (Beschreibung, Kennzeichen, vordefinierter Typ), ihren Eigenschafts- und Mengensätzen mit jedem Wert im Typ der Datei, und mit ihrem Typ, Material, ihren Anschlüssen, Verbindungen und ihrem System, jeweils mit ihrer GlobalId. Holen Sie nur die Haustechnik einer Datei herein und exportieren Sie sie, enthält die neue Datei sie vollständig.
+
+**Fragments importieren…** öffnet dasselbe Fenster für eine `.frag`-Datei von That Open: ihre Elemente nach Disziplin und Art, ihre Geschosse und **Als eine Gruppe**. Eine aus genau diesem Projekt exportierte Datei bringt nichts Neues, wenn sie wieder hineinimportiert wird: Ihre Elemente sind schon da.
+
+![Fragments importieren](shots/import-frag.webp)
+
+**Fragments importieren…** holt eine `.frag`-Datei herein: jedes Element mit Geometrie wird eine Referenz, gezeichnet aus seinem Körper, in der Klasse, die die Datei nennt, auf dem Geschoss, auf das die Datei es stellt (die Geschosse der Datei ersetzen Ihre: siehe **Geschosse** oben), mit den Attributen der Datei unter **IFC-Eigenschaften**. Elemente mit demselben Körper (dieselbe Form an vielen Stellen) teilen ihn. Dieselbe Datei erneut importiert aktualisiert, was sie zuvor brachte. Was aus ihren Dreiecken erkannt wird, bestimmt **Wie**, wie oben. Seine Eigenschafts- und Mengensätze, sein Typ und seine Materialien kommen mit den Attributen; Glas bleibt durchsichtig; eine vom Konverter von That Open erzeugte Datei landet dort, wo ihr IFC sie hinsetzen würde, und ihre Flächen mit Löchern (eine Wand um ihr Fenster) behalten sie.
+
+**IFC oder Fragments exportieren…** schreibt das Modell als IFC oder als Fragments, ausgewählt wie ein Import: die Elemente nach Disziplin und Art, die Geschosse, die Phase und nur, was die 3D-Ansicht zeigt. IFC geht in IFC4 oder IFC4X3 hinaus, die Teile eines geschichteten Elements darunter oder je ein Körper; Fragments ab dem Projektbasispunkt, dem internen Ursprung oder dem Vermessungspunkt. Eine Fragments-Datei trägt, was ein IFC-Viewer zeigt: den Typ jedes Elements, seine Mengen, Ihre Parameter, seine Materialien und die Kartenkoordinaten, so wie der Konverter von That Open sie schreibt.
+
+Eine Referenz behält die Öffnungen, die ihre Datei in sie geschnitten hat, mit den Türen und Fenstern darin: **IFC oder Fragments exportieren…** schreibt sie mit den GlobalIds der Datei zurück, und eine verschobene, gedrehte, gespiegelte oder kopierte Referenz nimmt ihre Türen und Fenster mit (eine Kopie erhält eigene Öffnungen, gefüllt mit Kopien davon). Wird eine Referenz gelöscht, gehen die Türen und Fenster darin mit, wie bei einer Lapin-Wand; eine allein gelöschte oder weggeschobene Tür lässt die Öffnung leer.
+
+Auf dem Desktop schreibt **Bonsai-Zeichenstile** neben die IFC ein Stylesheet (`name.css`) und seine Schraffuren (`name-patterns.svg`) für Bonsai (BlenderBIM), dessen Pläne mit CSS gestaltet werden: Schnittschraffur, Füllung und Ansichtsschraffur jedes Materials, die Schnitt- und Ansichtslinien Ihrer Objektstile und der Text Ihrer Zeichenstandards. Die IFC nennt beide Dateien, sodass ein Plan, den Sie daraus in Bonsai anlegen, sie übernimmt.
+
+![IFC oder Fragments exportieren](shots/export-exchange.webp)
+
+### SDNF (Stahlbau-Detaillierung)
+
+SDNF, das Steel Detailing Neutral File, ist das Textformat, in dem Stahlbau-Detailprogramme eine Konstruktion austauschen (Tekla Structures, Advance Steel, SDS2, ProStructures, E3D): jedes Bauteil eine Linie mit seinem Profil, seiner Stahlgüte, dem Punkt des Querschnitts, durch den die Linie läuft, und seiner Drehung; Bleche; Achsen. Lapin schreibt Version 3.0 und liest 3.0 und 2.0, in Editionen mit dem Stahlbaumodul.
+
+**IFC, Fragments oder BOS exportieren…** mit **SDNF** angekreuzt schreibt die Stützen und Träger (aus jedem Material) und die Stahlbauteile der gewählten Geschosse und Arten, die Bleche ihrer Anschlüsse und die Achsen, in Millimetern. Jedes Bauteil behält den Namen seines Profils (IPE 300, HEA 240, ein Profil Ihrer eigenen Bibliothek), seine Güte und eine an seine Id gebundene Nummer, damit die Datei zurückkommen kann. Gekrümmte Träger gehen als gekrümmte Bauteile hinaus, die Löcher der Bleche und Bauteile als Löcher, darunter die Schrauben- und Ankerlöcher der Anschlüsse.
+
+![SDNF exportieren](shots/export-sdnf.webp)
+
+**SDNF importieren…** bringt eine Datei als Lapins eigene Elemente herein, in einem Schritt, den Sie rückgängig machen können: eine senkrechte Stütze als Stütze, ein waagerechter Träger als Träger, alles andere (ein Verband, ein Sparren, ein schräges Bauteil) als Stahlbauteil, jedes auf seinem Geschoss, sein Profil aus den Profilen des Projekts und Lapins Bibliothek; Bleche und Achsen kommen mit. Ein Profil, das keine Bibliothek hat (W12X50, wenn Sie keine AISC-Tabelle haben), behält seinen Namen auf einem Platzhalterquerschnitt und wird aufgelistet, bis Sie seinem Typ ein Profil geben. Eine Datei, die Lapin geschrieben hat, oder dieselbe Datei erneut, nachdem der Detaillierer sie geändert hat, aktualisiert die Elemente, aus denen sie kam, statt neue hinzuzufügen. Ein waagerechtes gekrümmtes Bauteil kommt als gekrümmter Träger herein (eines, das sich in einer anderen Ebene wölbt, wird ausgelassen und genannt); Löcher werden in die Bleche und Bauteile geschnitten, durch die sie gehen, und ersetzt statt verdoppelt, wenn die Datei erneut kommt. SDNF enthält keine Schrauben, also kommen nur ihre Löcher; Gelenke an den Enden und Lasten werden nicht übernommen.
+
+![Die aus SDNF zurückgelesene Halle](shots/import-sdnf-3d.webp)
+
+## JG Structures (Tragwerksberechnung)
+
+**JG Structures exportieren (JSON)…** schreibt das statische Analysemodell des Projekts in die Austauschdatei von JG Structures, einem Programm zur Tragwerksberechnung: eine JSON-Datei nach dessen Vertrag (Version 1.0.0). Lapin leitet das Modell aus dem Gezeichneten ab. Stützen, Träger und Stahlstäbe werden Stäbe auf ihren Achsen; tragende Wände (Pset_WallCommon.LoadBearing an der Wand oder ihrem Typ) und Decken werden Schalen in der Mitte ihrer tragenden Schicht, ohne Beläge. Sie teilen ihre Knoten: Ein Träger, der eine Decke trägt, liegt in der Mittelebene der Decke, Stützen- und Wandenden treffen den Träger oder die Decke an Kopf und Fuß, die Ecken einer Decke rücken auf die Stützen und Wände darunter, und die Decke wird entlang der Träger geteilt, die sie kreuzen. Die Füße von Stützen und Wänden auf einem Fundament sind eingespannt; ein Stahlstützenfuß ist gelenkig oder eingespannt, wie sein Anschluss sagt.
+
+Wählen Sie die Geschosse, die Bauteilarten und die Einheiten: die Zentimeter und Kilopond des Vertrags oder SI (Meter und Kilonewton). Materialien nehmen ihre Werte aus ihren Daten (Verwalten → Materialien, Pset_MaterialMechanical in Pascal) oder aus der Festigkeitsklasse im Namen, C25/30 oder S355, nach den Eurocodes; Fläche, Trägheitsmomente, Widerstandsmomente und Torsionskonstante eines Querschnitts werden aus seiner Geometrie berechnet. Was Lapin nicht weiß, bleibt in der Datei leer (null), nie 0. Vor dem Export zählt der Bericht, was hineingeht, prüft die Datei gegen die Regeln des Vertrags und listet, was einer Berechnung noch fehlt: ein Material ohne Klasse, eine Stütze, die auf nichts steht.
+
+Wo sich Bauteile nicht auf ihren Achsen treffen (eine Pfette auf einem Riegel, ein Wandriegel an einer Stütze, ein Verband an seinem Knotenblech, Sparren auf der Fußpfette), setzt Lapin den Knoten auf das tragende Bauteil und behält den Abstand als Endversatz des Stabs, so dass auch die Sekundärkonstruktion einer Halle verbunden ist. Wände behalten ihre Türen, Fenster und Öffnungen, Decken ihre Öffnungen: Da die Schalen des Vertrags keine Löcher haben, werden sie um sie herum in Stücke geteilt, und eine L-förmige Decke entlang der Unterzüge in konvexe Stücke. Eine Wand unter einem Dach reicht bis zu ihm, und das Dach wird mit exportiert: seine Dachplatte als Schalen, oder Sparren, Pfetten und Fußpfetten eines Holzdachstuhls als Stäbe seiner Festigkeitsklasse (C24 nach EN 338). Winkel und andere unsymmetrische Querschnitte werden in ihren Hauptachsen angegeben. **Fußpunkte auf Fundamenten** legt fest, wie die Fußpunkte von Stützen und Wänden auf einem Fundament gehalten werden: eingespannt (Standard) oder gelenkig. Ein Stahlstützenfuß behält seinen eigenen Anschluss.
+
+![JG Structures exportieren](shots/export-jg.webp)
+
+## Eine IFC-Datei optimieren
+
+**IFC optimieren…** (im Menü Datei oder auf dem Startbildschirm: es muss kein Projekt offen sein) erstellt eine leichtere Kopie einer oder mehrerer IFC-Dateien, ohne zu ändern, was sie aussagen. Die Kopie behält jede GlobalId, jeden Namen, Eigenschaftssatz, jede Menge, jeden Typ, jedes Material und jede Beziehung genau so, wie die Datei sie geschrieben hat, auch ihren Kopf; nichts von Lapin wird hinzugefügt. Nur die Geometrie ändert sich: Netze (Flächensätze, facettierte B-Reps aus ebenen Flächen) werden bereinigt (doppelte Punkte verschweißt, entartete und wiederholte Dreiecke und ungenutzte Koordinaten entfernt) und vereinfacht, nie weiter vom Original entfernt als die **Genauigkeit** (Schnell 5 mm, Ausgewogen 1 mm, Genau 0,1 mm oder Ihre eigene), in beide Richtungen gemessen; gleiche Körper werden einmal geschrieben und von ihren Produkten geteilt; und was nichts referenziert (ungenutzte Punkte, Stile, leere Darstellungen), entfällt. Extrusionen, boolesche Körper und andere exakte Körper bleiben, wie sie sind. Gerundete Koordinaten, B-Reps als Flächensätze (nur IFC4 und IFC4X3) und ein gezipptes `.ifczip` gibt es, wenn Sie sie wollen.
+
+![IFC optimieren](shots/optimize-ifc.webp)
+
+Die Kopie wird neben das Original geschrieben oder in einen Ordner Ihrer Wahl, unter dem Namen des Originals mit einer **Endung** (zu Beginn `.optimized`): aus `haus.ifc` wird `haus.optimized.ifc`. Das Original wird nie geschrieben, und wenn die Kopie schon da ist, fragt Lapin, bevor es sie ersetzt. Für jede Datei nennt der Bericht Größe, Entitäten und Dreiecke vorher und nachher, die geteilten Körper, die entfernten verwaisten Entitäten, die größte gemessene Abweichung und die Dauer; **Ordner öffnen** zeigt die Kopie, **In Lapin öffnen** öffnet sie in einem anderen Fenster. Im Browser wird die Kopie heruntergeladen. Eine Datei, die schon im Projekt ist, behält ihren Rückweg: **Quelldatei optimieren…** an der Gruppe einer importierten IFC (in ihren Eigenschaften) oder an einer Verknüpfung (Verwalten → Verknüpfungen) tut dasselbe mit der Datei, aus der sie kam, solange diese noch auf der Festplatte liegt.
+
+![Der Bericht](shots/optimize-ifc-report.webp)
+
+## DXF und DWG
+
+**DXF importieren…** holt eine CAD-Zeichnung in die vorne liegende Ansicht, mit ihren Layern, Schraffuren, Texten und Bemaßungen. Sie kommt als Zeichnung herein, an der Sie fangen und die Sie bearbeiten können. Um eine DWG zu verwenden, speichern Sie sie zuerst in Ihrem CAD-Programm als DXF (AutoCAD, BricsCAD oder DraftSight: **Save As → DXF**). Ein PDF oder ein Bild kommt zum Nachzeichnen mit **Datei → PDF oder Bild importieren…** oder **Zeichnen → PDF oder Bild** herein: die Linien eines Vektor-PDF als Zeichnung im Maßstab, in dem es gezeichnet wurde, seine Bilder und jedes PNG oder JPEG als durchscheinende Bilder (siehe [Zeichnen](drafting.md)). In einem Grundriss legt **Platziert: nach den Kartenkoordinaten** eine Zeichnung in echten Koordinaten (einen Katasterplan in Stereo 70) dorthin, wo die Karte sie hinlegt (siehe [Das Gelände und seine Daten](site.md)).
+
+Die Zeichnung liegt auch in der **3D-Ansicht**, auf der Ebene der Ansicht, in die sie kam: in einem Grundriss auf der Höhe seines Geschosses, in einem Schnitt oder einer Ansicht auf deren Ebene, in den Farben ihrer Layer, ihre Schraffuren blass, als dünne Linien, die das Modell nie verdecken. Ein in **Zeichnen → Layer** ausgeschalteter Layer bleibt auch in 3D aus. **Ansicht → DXF in 3D** (auch in **Ansicht → Ansichtseinstellungen** einer 3D-Ansicht) zeigt oder verbirgt alle Importe; ein einzelner Import wird mit **In 3D** in den Eigenschaften einer seiner Formen geschaltet, ein verknüpftes DXF mit **3D** in **Verwalten → Verknüpfungen**. Wer in 3D auf dieser Höhe zeichnet, mit den Werkzeugen von Zeichnen oder der Skizze von Studio, fängt an seinen Linien, sodass Sie es in 3D nachzeichnen können wie im Grundriss. Linien, denen die Datei Höhen gab, stehen wie bisher auf diesen Höhen im Raum.
+
+![Ein Lageplan-DXF in der 3D-Ansicht, auf der Höhe des Erdgeschosses](shots/dxf-3d.webp)
+
+Eine importierte DXF gehört zum Projekt: **File → Save** speichert sie in der `.lapin`-Datei mit ihren Layern, Schraffuren, Texten und jeder Gruppe, die Sie daraus gemacht haben, und beim erneuten Öffnen des Projekts ist sie da, auf dem Grundriss des Geschosses. Die Grundrissansicht, in die sie kam, ist von da an der Grundriss des Geschosses, den der Projektbrowser zeigt, und was vorher auf dem Geschoss gezeichnet war, kommt auf sie. Lapin fragt vor dem Schließen nach, wenn ungespeicherte Änderungen vorliegen. Soll die Zeichnung eine eigene Datei bleiben, aktivieren Sie im Importdialog **As a link**: Sie bleibt verknüpft, schreibgeschützt, und **Manage → Links** lädt sie neu, wenn sich die Datei ändert.
+
+## Verknüpfungen
+
+**IFC verknüpfen…** hält eine andere Datei verknüpft, statt sie zu importieren. Sie ist schreibgeschützt und wird neu geladen, wenn sie sich ändert. Das funktioniert auch für eine DXF-Datei. **Verwalten → Verknüpfungen** zeigt die Verknüpfungen an, lädt sie neu, wandelt sie um oder entfernt sie. Ein verknüpftes DXF liegt in 3D wie ein importiertes; sein Feld **3D** in **Verwalten → Verknüpfungen** schaltet das aus. **Sichtbarkeit / Grafiken** (<kbd>VV</kbd>) blendet eine Verknüpfung aus, zeigt sie halbtonig oder gibt ihr eigene Kategorien, in nur einer Ansicht (*Schnitte, Ansichten und 3D*, Sichtbarkeit / Grafiken).
+
+Eine verknüpfte IFC behält, was ihre Datei über die Materialien ihrer Bauteile sagt. Wände, Decken und Dächer mit Schichtaufbauten werden auch als Referenzen in ihren Schichten gezeichnet, sodass ein Ingenieur die Bekleidungen der Architekturverknüpfung ausblendet (**Wände ▸ Bekleidungen**, **Decken ▸ Bekleidungen**) und ein Tragwerksstil nur ihre Kerne zeichnet; die Stäbe eines verknüpften Tragwerksmodells gehören zur Kategorie **Bewehrung**, die jede 3D-Ansicht weglässt, bis sie eingeblendet wird. Eine mit einer älteren Version erstellte Verknüpfung erhält die Schichten ihrer Wände beim Neuladen (die der Decken sofort).
+
+## Punktwolken
+
+**File → Link point cloud…** verknüpft einen Laserscan oder eine Photogrammetrie-Wolke, nur in offenen Formaten: **LAS** (1.0–1.4, alle Punktformate), **LAZ** (komprimiertes LAS), **E57**, **PLY** (ASCII und binär) und Punkte als Text, **XYZ**, **PTS** und **CSV**. Proprietäre Formate (RCP und RCS von Autodesk ReCap, FLS von FARO, LGS von Leica) werden nicht gelesen: den Scan zuerst aus seinem Programm als E57 oder LAS exportieren.
+
+Lapin fragt, wo die Wolke steht und in welcher Einheit:
+
+- **nach den Kartenkoordinaten des Projekts**: x und y der Datei sind Rechts- und Hochwert, über den Vermessungspunkt und den Winkel nach Norden aus **Manage → Location** platziert, ihre Höhen über der Höhe des Vermessungspunkts. Lapin schlägt es vor, wenn die Datei ein Koordinatensystem nennt oder ihre Koordinaten weit von null liegen und das Projekt einen Standort hat;
+- **Ursprung auf Ursprung**: der Ursprung der Datei auf dem des Projekts;
+- **zentriert auf den Projektursprung**: ihre Mitte auf dem Ursprung, ihr tiefster Punkt auf ±0.00;
+- **ihre Einheit**: wie die Datei sagt (LAS und E57 sagen es), sonst Meter; Zentimeter, Millimeter, Fuß, US-Vermessungsfuß und Zoll werden angeboten. Ist die Wolke für ein Gebäude oder ein Gelände unwahrscheinlich groß (unter 20 cm oder über 50 km) oder nennt die Datei eine andere Einheit, warnt Lapin.
+
+Die Wolke bleibt in ihrer Datei. Sie wird nicht ins Projekt kopiert: das Projekt behält nur die Verknüpfung (den Pfad der Datei, wo die Wolke steht, wie sie gezeichnet wird). Lapin indiziert sie einmal, im Hintergrund, in einen Octree aus Kacheln in seinem eigenen Ordner auf diesem Computer (nicht neben dem Projekt), und **Manage → Links** zeigt, wie weit es ist. Danach lädt die 3D-Ansicht die Kacheln, die die Kamera braucht, die nahen zuerst und feiner, je näher man kommt, innerhalb eines Punktebudgets nach **View → Display quality** (1,5, 3 oder 6 Millionen gleichzeitig gezeichnete Punkte), sodass ein Scan von hundert Millionen Punkten so flüssig dreht wie ein kleiner.
+
+![Ein Scan des Hauses als Punktwolke verknüpft, in der 3D-Ansicht](shots/point-cloud-3d.webp)
+
+In **Manage → Links** hat eine Wolke ihre eigene Zeile: ihre Punkte, wie weit ihr Index ist, **Shown**, **Halftone**, **3D**, was ihre Punkte färbt (**RGB**, **Intensity**, **Elevation** oder **Classification**, nach den ASPRS-Klassen: Boden, Vegetation, Gebäude, Wasser…) und die **Size** eines Punkts in Pixeln. Der Pin-Knopf platziert sie neu (nach der Karte, Ursprung auf Ursprung oder zentriert, ihre Einheit, entlang x, y und z verschoben, gedreht); der Knopf zum Neuladen liest ihre Datei erneut und indiziert sie nur dann neu, wenn sie sich geändert hat. **Unlink** entfernt die Verknüpfung; der Index bleibt in Lapins Ordner und dient der Wolke wieder, wenn sie erneut verknüpft wird.
+
+![Manage → Links mit einer Punktwolke](shots/point-cloud-links.webp)
+
+Eine Wolke wird nicht mit dem Modell exportiert: IFC und Fragments tragen das Modell, nicht den Scan, und **Export 3D…** nimmt nur auf Wunsch eine Stichprobe als Punkte in GLB und glTF. Grundrisse, Schnitte und Ansichten zeichnen sie auch (*Schnitte, Ansichten und 3D*, Punktwolken in Ansichten). Im Browser kann eine Wolke von bis zu 160 MB verknüpft werden; sie wird in der Seite indiziert und muss nach dem Neuladen der Seite erneut verknüpft werden. Größere Wolken brauchen die Desktop-App.
+
+## 3D-Modelle
+
+**3D-Export (glTF, USD, DAE)…** schreibt das Modell als Oberflächen für Rendering, Visualisierung und Augmented Reality (AR):
+
+| Format | Für |
+|---|---|
+| GLB, glTF | Blender, three.js, Web-Viewer. Die eigenen Bilder Ihrer Materialien sind enthalten. |
+| USDZ | Apples AR Quick Look, Reality Composer, Omniverse. Bilder enthalten. |
+| USDA | OpenUSD als Text, eine Datei. |
+| DAE | COLLADA, für SketchUp und ältere Werkzeuge. |
+| OBJ + MTL | Eine .zip für Twinmotion, Lumion, 3ds Max und jeden Renderer. Mit Bildern. |
+
+**Netz importieren (OBJ, STL, glTF)…** holt ein Netz aus einem anderen 3D-Programm (OBJ, STL, glTF oder GLB) als Referenzen auf das aktive Geschoss. glTF nennt seine Einheit und welche Achse oben ist; bei OBJ und STL fragt Lapin. Ein so geholtes Möbelstück oder Dekor wird wie jedes Element platziert: **Verschieben**, **Kopieren**, **Drehen**, **Spiegeln** und **Reihe** unter Ändern, **3D verschieben** in Studio für seine Höhe. Seine Kopien teilen sich seine Dreiecke, eine Stuhlreihe wiegt also so viel wie ein Stuhl. **Zu Studio-Körper machen** in Studio macht die Form einer Referenz bearbeitbar (siehe [Studio](studio.md)).
+
+![Sechs Stühle aus einer OBJ-Datei um einen Tisch, mit Ändern → Reihe erzeugt](shots/reference-array.webp)
+
+![3D exportieren](shots/export-3d.webp)
+
+Sie wählen, was exportiert wird, welche Bauphase und den Ursprung. **Was** ist **alles** oder das Modell, **wie die Ansicht es zeigt**: die vorne liegende 3D-Ansicht, ohne ihre ausgeblendeten Elemente und Kategorien und ohne die Geschosse, die sie nicht zeigt, mit den Schichten, die sie zeigt (ohne Bekleidungen oder nur die Kerne). Wenn diese Ansicht geschnitten ist (der Schnitt über den angezeigten Geschossen, ein in 3D gezeigter Schnitt, der Schnittbereich), schneidet **Schnitt** auch den Export dort und schließt jeden Schnitt in seinen Materialien, sodass die Datei wie der Bildschirm aussieht. Eine 3D-Ansicht, die etwas weglässt, wird so exportiert, wie sie es zeigt, sofern Sie nichts anderes wählen. Jedes Element behält seine IFC-Klasse, seinen Typ und seine GlobalId. Um das Modell selbst statt seiner Oberflächen auszutauschen, verwenden Sie **IFC exportieren…**.
+
+## Lapin für den Browser
+
+**Datei → Lapin für den Browser (.html)…** schreibt das Projekt als Webseite, eine einzige .html-Datei, die Sie an jeden schicken können. Sie öffnet sich per Doppelklick in jedem Browser (Chrome, Edge, Safari, Firefox), auf jedem Computer, ohne Internet und ohne etwas zu installieren:
+
+- **3D**: das Modell, wie es die 3D-Ansicht zeigt. Ziehen Sie, um es zu drehen, ziehen Sie mit der rechten Taste, um es zu verschieben, das Rad zoomt; **Einpassen** zeigt es ganz. Wählen Sie ein Geschoss allein oder mit denen darunter; klicken Sie ein Element an, um es auszuwählen (Umschalt fügt zur Auswahl hinzu), und **Isolieren** oder **Ausblenden** Sie es; **Alles zeigen** bringt alles zurück.
+- **Zeichnungen**: die Grundrisse, Schnitte, Ansichten und Pläne, die Sie angehakt haben, gezeichnet, wie Lapin sie druckt, bei jedem Zoom scharf. Ziehen zum Verschieben, das Rad zum Zoomen, **Drucken** druckt die angezeigte Zeichnung. Klicken Sie ein Element in einer Zeichnung an, um es auszuwählen: Es ist dasselbe Element wie in 3D.
+- **Kostenberechnung**, wenn das Projekt eine hat: ihre Kapitel und Positionen, die Summen, als *Richtwert* gekennzeichnet, wenn Lapins eigene grobe Werte verwendet werden. Klicken Sie auf die Überschrift einer Spalte, um zu sortieren, tippen Sie in **Filter**, um eine Position zu finden, klicken Sie eine Position an, um ihre Elemente auszuwählen.
+- **Eigenschaften**: das, was ausgewählt ist, mit Klasse, Typ, Geschoss, Material, seinen Eigenschaften und Mengen.
+
+![Datei → Lapin für den Browser](shots/html-export-dialog.webp)
+
+Im Dialog wählen Sie, welche Zeichnungen hineinkommen (standardmäßig jede, die ein Element des Modells zeigt; ein Grundriss nur mit Achsen oder Markierungen steht ohne Häkchen in der Liste, mit *(kein Element)*, und kommt hinein, wenn Sie ihn ankreuzen), das 3D-Modell, die Kostenberechnung und **das Projekt selbst**. Die Seite zeigt ihre Größe, bevor sie geschrieben wird. Die Seite spricht die Sprache, die Lapin beim Export spricht.
+
+![Die Seite in einem Browser: das 3D-Modell](shots/html-export-3d.webp)
+
+![Ein Grundriss in der Seite, eine angeklickte Wand zeigt ihre Eigenschaften](shots/html-export-drawing.webp)
+
+![Die Kostenberechnung in der Seite](shots/html-export-costs.webp)
+
+Mit dem Projekt darin ist die Seite zugleich das Projekt: **Datei → Öffnen** in Lapin nimmt die .html und öffnet das darin enthaltene Projekt, ungespeichert; **Speichern** fragt, wo es als .lapin abgelegt werden soll, und schreibt nie über die Seite. Ohne das Projekt zeigt die Seite nur das Modell, und Lapin öffnet sie nicht. Eine Webseite, die Lapin nicht geschrieben hat, wird abgelehnt.
+
+Die Seite ist eine Momentaufnahme: Sie zeigt das Projekt zum Zeitpunkt des Exports, und nichts, was ein Leser darin tut, ändert das Projekt. Sie ist so groß wie ihre Teile: das Projekt, das 3D-Modell (etwa so groß wie ein GLB-Export) und die Zeichnungen, dazu etwa 0,6 MB für den Viewer selbst.

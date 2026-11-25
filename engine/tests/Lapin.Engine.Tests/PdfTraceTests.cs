@@ -1,0 +1,199 @@
+using System.Text;
+using System.Text.Json.Nodes;
+using Lapin.Architecture;
+using Lapin.Drafting;
+using Lapin.Drawing;
+using Lapin.Drawing.Export;
+using Lapin.Drawing.Views;
+using Lapin.Geometry;
+using Lapin.Platform;
+using Lapin.Platform.Cde.PdfRemarks;
+using Drafts = Lapin.Drafting.Cad.Drafts;
+using ViewImages = Lapin.Drafting.Cad.ViewImages;
+
+namespace Lapin.Engine.Tests;
+
+/// <summary>
+/// Pictures and PDFs to trace over (a tester's wish, #89, decision 371): a PDF page's lines read back from Lapin's own PDF and
+/// laid into a plan at the drawing's scale as one group, its picture as an image under them; an image placed and scaled true.
+/// </summary>
+public class PdfTraceTests
+{
+    static Fixture F() => new(new ArchitectureModule(), new DraftingModule());
+    static string Plan(Fixture f) => (string)f.Run("view.create", new JsonObject { ["kind"] = "plan", ["storeyId"] = f.Storey })!["id"]!;
+
+    /// <summary>A 2 × 2 picture as a PNG.</summary>
+    static byte[] Png() => PdfImport.Png([255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255], 2, 2, 3);
+
+    /// <summary>An A4 landscape page with a 100 × 50 mm rectangle 20 mm in from its bottom-left corner and a 60 × 30 mm picture.</summary>
+    static byte[] Pdf()
+    {
+        var pen = new Pen("CUT", "#000000", 0.35, null, null);
+        Vec2 P(double x, double y) => new(x, 210 - y);
+        Vec2[] r = [P(20, 20), P(120, 20), P(120, 70), P(20, 70)];
+        for (var i = 0; i < 4; i++) pen.Segments.Add((r[i], r[(i + 1) % 4]));
+        var pic = new Pen("IMAGE", null, 0, null, null);
+        pic.Images.Add(new PenImage("img", [P(150, 100), P(210, 100), P(210, 130), P(150, 130)]));
+        return PdfWriter.Write([new PaperPage(297, 210, [pic, pen])], id => id == "img" ? Png() : null);
+    }
+
+    [Fact]
+    public void A_pdf_page_is_read_back_as_its_lines_and_its_picture()
+    {
+        var page = PdfImport.Read(Pdf(), 0);
+        Assert.Equal(297, page.Width * 25.4 / 72, 0);
+        var pts = page.Paths.SelectMany(p => p.Points).Select(p => p * (25.4 / 72)).ToList();
+        Assert.Contains(pts, p => Math.Abs(p.X - 20) < 0.5 && Math.Abs(p.Y - 20) < 0.5);
+        Assert.Contains(pts, p => Math.Abs(p.X - 120) < 0.5 && Math.Abs(p.Y - 70) < 0.5);
+        var pic = Assert.Single(page.Pictures);
+        Assert.Equal(60, (pic.Corners[1] - pic.Corners[0]).Length * 25.4 / 72, 0);
+        Assert.Equal(2, pic.PixelWidth);
+    }
+
+    [Fact]
+    public void A_pdf_comes_into_a_plan_at_its_drawing_scale_as_one_group()
+    {
+        var f = F();
+        var plan = Plan(f);
+        var r = (JsonObject)f.Run("drafting.importPdf", new JsonObject
+        {
+            ["viewId"] = plan, ["name"] = "survey.pdf", ["data"] = Convert.ToBase64String(Pdf()), ["scale"] = 100, ["at"] = new JsonArray(5, 5),
+        })!;
+        Assert.True((int)r["lines"]! >= 1);
+        Assert.Equal(1, (int)r["pictures"]!);
+        // 100 mm of paper at 1:100 is 10 m; the page's corner at (5, 5), the rectangle 2 m in from it.
+        var pts = Drafts.On(f.Model, plan).SelectMany(e => Drafts.ShapeOf(e) switch { Drafting.Cad.Polyline p => p.Pts, Drafting.Cad.Line l => [l.A, l.B], _ => [] }).ToList();
+        Assert.Contains(pts, p => Math.Abs(p.X - 7) < 0.05 && Math.Abs(p.Y - 7) < 0.05);
+        Assert.Contains(pts, p => Math.Abs(p.X - 17) < 0.05 && Math.Abs(p.Y - 12) < 0.05);
+        var image = Assert.Single(ViewImages.On(f.Model, plan));
+        Assert.Equal(6, image.Num("width"), 2);
+        Assert.Equal(3, image.Num("height"), 2);
+        // One group, named after the file: moved as one.
+        var group = f.Model.Get((string)r["groupId"]!)!;
+        Assert.Equal("survey", group.Name);
+        f.Run("element.transform", new JsonObject { ["ids"] = new JsonArray(group.Id), ["op"] = "move", ["by"] = new JsonArray(10, 0) });
+        Assert.Equal(15 + 15, ViewImages.On(f.Model, plan).Single().Num("x"), 1);
+    }
+
+    [Fact]
+    public void An_image_is_placed_by_its_pixels_aspect_and_scaled_true_by_two_points()
+    {
+        var f = F();
+        var plan = Plan(f);
+        var id = (string)f.Run("drafting.placeImage", new JsonObject { ["viewId"] = plan, ["name"] = "photo.png", ["data"] = Convert.ToBase64String(Png()), ["width"] = 4, ["at"] = new JsonArray(1, 1) })!["id"]!;
+        var e = f.Model.Get(id)!;
+        Assert.Equal(4, e.Num("height"), 6);
+        // Two points 2 m apart on it are really 3 m apart: it grows by 1.5 about the first.
+        f.Run("drafting.calibrateImage", new JsonObject { ["id"] = id, ["a"] = new JsonArray(1, 1), ["b"] = new JsonArray(3, 1), ["length"] = 3 });
+        e = f.Model.Get(id)!;
+        Assert.Equal(6, e.Num("width"), 6);
+        Assert.Equal(1, e.Num("x"), 6);
+        // The view draws it, under all, by its corners.
+        var r = Views.Render(f.Session.Reader, Views.Find(f.Model, plan)!);
+        Assert.Contains(r.Marks, m => m.Owner == id && m.Images.Count == 1);
+        Assert.ThrowsAny<Exception>(() => f.Run("drafting.placeImage", new JsonObject { ["viewId"] = plan, ["name"] = "x.txt", ["data"] = Convert.ToBase64String(Encoding.UTF8.GetBytes("hello")) }));
+    }
+
+    static List<Vec2> DraftPoints(Fixture f, string plan) =>
+        Drafts.On(f.Model, plan).SelectMany(e => Drafts.ShapeOf(e) switch { Drafting.Cad.Polyline p => p.Pts, Drafting.Cad.Line l => [l.A, l.B], _ => [] }).ToList();
+
+    [Fact]
+    public void A_pdf_group_is_scaled_true_by_two_points_as_one_undo_step()
+    {
+        // Forum 143: a PDF (its lines and its pictures, one group) scaled to a known distance as simply as an image.
+        var f = F();
+        var plan = Plan(f);
+        var r = (JsonObject)f.Run("drafting.importPdf", new JsonObject
+        {
+            ["viewId"] = plan, ["name"] = "survey.pdf", ["data"] = Convert.ToBase64String(Pdf()), ["scale"] = 100, ["at"] = new JsonArray(5, 5),
+        })!;
+        var groupId = (string)r["groupId"]!;
+        var members = Groups.MembersOf(f.Model, groupId).ToHashSet();
+        var image = ViewImages.On(f.Model, plan).Single();
+        Assert.Equal(20, image.Num("x"), 1);
+        // The rectangle's bottom edge, (7, 7) to (17, 7), 10 m apart, is really 20 m long: the whole doubles about (7, 7).
+        var k = (double)f.Run("drafting.calibrateImage", new JsonObject { ["id"] = groupId, ["a"] = new JsonArray(7, 7), ["b"] = new JsonArray(17, 7), ["length"] = 20 })!["factor"]!;
+        Assert.Equal(2, k, 6);
+        var pts = DraftPoints(f, plan);
+        Assert.Contains(pts, p => Math.Abs(p.X - 7) < 0.05 && Math.Abs(p.Y - 7) < 0.05);
+        Assert.Contains(pts, p => Math.Abs(p.X - 27) < 0.05 && Math.Abs(p.Y - 17) < 0.05);
+        Assert.DoesNotContain(pts, p => Math.Abs(p.X - 17) < 0.05 && Math.Abs(p.Y - 12) < 0.05);
+        image = ViewImages.On(f.Model, plan).Single();
+        Assert.Equal(7 + (20 - 7) * 2, image.Num("x"), 1);
+        Assert.Equal(12, image.Num("width"), 2);
+        Assert.Equal(6, image.Num("height"), 2);
+        // Nothing was made or lost: the same ids, the same group.
+        Assert.Equal(members, Groups.MembersOf(f.Model, groupId).ToHashSet());
+        // One undo step puts it all back.
+        f.Session.Undo();
+        Assert.Contains(DraftPoints(f, plan), p => Math.Abs(p.X - 17) < 0.05 && Math.Abs(p.Y - 12) < 0.05);
+        Assert.Equal(6, ViewImages.On(f.Model, plan).Single().Num("width"), 2);
+    }
+
+    [Fact]
+    public void A_scaled_group_keeps_its_turned_images_turn_and_refuses_what_it_cannot_scale()
+    {
+        var f = F();
+        var plan = Plan(f);
+        var id = (string)f.Run("drafting.placeImage", new JsonObject { ["viewId"] = plan, ["name"] = "p.png", ["data"] = Convert.ToBase64String(Png()), ["width"] = 4, ["at"] = new JsonArray(2, 0), ["rotation"] = 30 })!["id"]!;
+        var line = (string)f.Run("drafting.draw", new JsonObject { ["viewId"] = plan, ["shape"] = new JsonObject { ["type"] = "line", ["a"] = new JsonArray(0, 0), ["b"] = new JsonArray(4, 0) } })!["ids"]![0]!;
+        var group = (string)f.Run("group.create", new JsonObject { ["ids"] = new JsonArray(id, line) })!["id"]!;
+        f.Run("drafting.calibrateImage", new JsonObject { ["id"] = group, ["a"] = new JsonArray(0, 0), ["b"] = new JsonArray(4, 0), ["length"] = 2 });
+        var e = f.Model.Get(id)!;
+        Assert.Equal(1, e.Num("x"), 6);
+        Assert.Equal(2, e.Num("width"), 6);
+        Assert.Equal(30, e.Num("rotation"), 6);
+        Assert.Contains(DraftPoints(f, plan), p => Math.Abs(p.X - 2) < 1e-6 && Math.Abs(p.Y) < 1e-6);
+        // Not an image nor a group of drafting: refused.
+        Assert.ThrowsAny<Exception>(() => f.Run("drafting.calibrateImage", new JsonObject { ["id"] = line, ["a"] = new JsonArray(0, 0), ["b"] = new JsonArray(1, 0), ["length"] = 2 }));
+    }
+
+    /// <summary>The picture's top-left corner must be upper-left of its bottom-left one, and its right edge to the right (a PenImage's order: top left, top right, bottom right, bottom left).</summary>
+    static void AssertUpright(PenImage img, double turnDeg = 0)
+    {
+        var (tl, tr, br, bl) = (img.Corners[0], img.Corners[1], img.Corners[2], img.Corners[3]);
+        var (u, v) = (tr - tl, tl - bl);
+        var r = turnDeg * Math.PI / 180;
+        // The reading direction is the image's turn; its up is that turned a quarter (never the mirror of it).
+        Assert.True(Math.Abs(u.Normalized().X - Math.Cos(r)) < 1e-6 && Math.Abs(u.Normalized().Y - Math.Sin(r)) < 1e-6);
+        Assert.True(Math.Abs(v.Normalized().X + Math.Sin(r)) < 1e-6 && Math.Abs(v.Normalized().Y - Math.Cos(r)) < 1e-6);
+        Assert.True(Math.Abs((br - bl).X - u.X) < 1e-6 && Math.Abs((br - bl).Y - u.Y) < 1e-6);
+    }
+
+    [Fact]
+    public void An_image_is_drawn_upright_not_mirrored_in_a_plan_and_in_a_section_looking_either_way()
+    {
+        // Decision 428 (report #120): the corners went to the drawing from the bottom left, the order a PenImage reads from the top left.
+        var f = F();
+        f.Wall(0, 0, 10, 0);
+        var views = new List<string> { Plan(f) };
+        // Sections drawn from either end look towards +Y and −Y; elevations east and west, towards −X and +X.
+        views.Add((string)f.Run("view.create", new JsonObject { ["kind"] = "section", ["start"] = new JsonArray(0, 2), ["end"] = new JsonArray(10, 2) })!["id"]!);
+        views.Add((string)f.Run("view.create", new JsonObject { ["kind"] = "section", ["start"] = new JsonArray(10, 2), ["end"] = new JsonArray(0, 2) })!["id"]!);
+        foreach (var d in new[] { "east", "west" }) views.Add((string)f.Run("view.create", new JsonObject { ["kind"] = "elevation", ["direction"] = d })!["id"]!);
+        foreach (var view in views)
+        {
+            foreach (var turn in new[] { 0.0, 30 })
+            {
+                var id = (string)f.Run("drafting.placeImage", new JsonObject { ["viewId"] = view, ["name"] = "p.png", ["data"] = Convert.ToBase64String(Png()), ["width"] = 4, ["at"] = new JsonArray(1, 1), ["rotation"] = turn })!["id"]!;
+                var mark = Views.Render(f.Session.Reader, Views.Find(f.Model, view)!).Marks.Single(m => m.Owner == id);
+                AssertUpright(mark.Images.Single(), turn);
+                f.Run("element.delete", new JsonObject { ["ids"] = new JsonArray(id) });
+            }
+        }
+    }
+
+    [Fact]
+    public void A_pdfs_picture_comes_in_upright()
+    {
+        var f = F();
+        var plan = Plan(f);
+        f.Run("drafting.importPdf", new JsonObject { ["viewId"] = plan, ["name"] = "s.pdf", ["data"] = Convert.ToBase64String(Pdf()), ["scale"] = 100 });
+        var e = ViewImages.On(f.Model, plan).Single();
+        Assert.Equal(0, e.Num("rotation"), 6);
+        var mark = Views.Render(f.Session.Reader, Views.Find(f.Model, plan)!).Marks.Single(m => m.Owner == e.Id);
+        AssertUpright(mark.Images.Single());
+        // The PDF's picture lies right of and below the rectangle, as the page was laid out.
+        Assert.True(e.Num("x") > 10);
+    }
+}

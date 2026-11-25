@@ -1,0 +1,115 @@
+/** The analysis as the interface holds it: the last run, what is shown of it (the case, the quantity, the scale) and the answers the engine gave for that. Results are derived, never saved: a change to the model makes them stale. */
+
+import { create } from 'zustand';
+import { engine, useSession } from '../../engine/session';
+import { useUi } from '../../app/store';
+import { pickArgs, pickFrom, validPick, type DiagramDto, type Pick, type Quantity, type ResultsDto, type RunDto } from './results';
+import { isReinforcement, type ContoursDto, type ShellQuantity } from './shells';
+
+export interface ResultsState {
+  run: RunDto | null;
+  /** The engine's refusal of the run (a bar with no material, say), exactly as it said it. */
+  error: string | null;
+  running: boolean;
+  /** The model the run was made on; another one means the results are stale. */
+  at: unknown;
+  stale: boolean;
+  /** The diagrams are drawn in the 3D view. */
+  show: boolean;
+  pick: Pick | null;
+  quantity: Quantity;
+  /** The diagram's scale as a multiple of the engine's default. */
+  mult: number;
+  reactions: boolean;
+  results: ResultsDto | null;
+  diagram: DiagramDto | null;
+  /** The quantity contoured on the slabs and walls analysed as shells (null: none). */
+  shellQuantity: ShellQuantity | null;
+  contours: ContoursDto | null;
+  /** The run was made with the seismic parameters given: the seismic envelope can be picked (S3). */
+  seismic: boolean;
+}
+
+export const useResults = create<ResultsState>(() => ({
+  run: null, error: null, running: false, at: null, stale: false, show: false, pick: null, quantity: 'Mz', mult: 1, reactions: true, results: null, diagram: null,
+  shellQuantity: 'my', contours: null, seismic: false,
+}));
+
+const set = useResults.setState;
+let ticket = 0;
+let baseScale: { key: string; scale: number } | null = null;
+
+const ask = <T,>(name: string, args: Record<string, unknown>) => engine.call<T>('doc.query', { name, args });
+
+/** The results and the diagram of what is picked, asked again (the newest answer only counts). */
+export async function refresh(): Promise<void> {
+  const s = useResults.getState();
+  if (!s.run || !s.run.ok || !s.pick) { set({ results: null, diagram: null, contours: null }); return; }
+  const mine = ++ticket;
+  const key = `${s.pick.kind}:${s.pick.key}:${s.quantity}`;
+  const scale = baseScale?.key === key && s.mult !== 1 ? baseScale.scale * s.mult : undefined;
+  const shells = !!s.run.shells && s.shellQuantity !== null;
+  try {
+    const [results, diagram, contours] = await Promise.all([
+      ask<ResultsDto>('analysis.results', pickArgs(s.pick)),
+      ask<DiagramDto>('analysis.diagram', { ...pickArgs(s.pick), quantity: s.quantity, ...(scale ? { scale } : {}) }),
+      shells ? ask<ContoursDto>('analysis.contours', { ...(isReinforcement(s.shellQuantity) ? { envelope: 'uls' } : pickArgs(s.pick)), quantity: s.shellQuantity }).catch((e) => { if (isReinforcement(s.shellQuantity)) return null; throw e; }) : Promise.resolve(null),
+    ]);
+    if (mine !== ticket || useResults.getState().stale) return;
+    if (scale === undefined) baseScale = { key, scale: diagram.scale };
+    set({ results, diagram, contours, error: null });
+  } catch (e) {
+    if (mine === ticket) set({ results: null, diagram: null, contours: null, error: e instanceof Error ? e.message : String(e) });
+  }
+}
+
+/** Runs the analysis on the model as it is; `open` shows the Results dialog. */
+export async function runAnalysis(open = true): Promise<void> {
+  if (useResults.getState().running) return;
+  set({ running: true, error: null });
+  const at = useSession.getState().nodes;
+  try {
+    const run = await ask<RunDto>('analysis.run', {});
+    const seismic = (await ask<{ given?: boolean }>('analysis.seismicOptions', {}).catch(() => null))?.given === true;
+    const pick = validPick(run, useResults.getState().pick, seismic);
+    baseScale = null;
+    // The model may have changed while the run was going: what it worked out is then stale from the start.
+    const stale = useSession.getState().nodes !== at;
+    set({ run, seismic, running: false, at, stale, pick, mult: 1, show: run.ok, results: null, diagram: null });
+    if (open) useUi.setState({ dialog: 'analysisResults' });
+    await refresh();
+  } catch (e) {
+    set({ run: null, running: false, error: e instanceof Error ? e.message : String(e), results: null, diagram: null, contours: null, show: false });
+    if (open) useUi.setState({ dialog: 'analysisResults' });
+  }
+}
+
+export const setPick = (p: Pick | string | null): void => {
+  const pick = typeof p === 'string' ? pickFrom(p) : p;
+  if (!pick) return;
+  baseScale = null;
+  set({ pick, mult: 1 });
+  void refresh();
+};
+export const setQuantity = (quantity: Quantity): void => { baseScale = null; set({ quantity, mult: 1 }); void refresh(); };
+/** The quantity contoured on the shells; null takes the contours off. */
+export const setShellQuantity = (shellQuantity: ShellQuantity | null): void => { set({ shellQuantity, contours: shellQuantity ? useResults.getState().contours : null }); void refresh(); };
+let slide: ReturnType<typeof setTimeout> | undefined;
+export const setMult = (mult: number): void => {
+  set({ mult });
+  clearTimeout(slide);
+  slide = setTimeout(() => void refresh(), 120);
+};
+export const setReactions = (reactions: boolean): void => set({ reactions });
+/** Takes the diagrams off the view (the run is kept). */
+export const hideDiagrams = (): void => set({ show: false });
+export const showDiagrams = (): void => set({ show: true });
+export const clearResults = (): void => { ticket++; baseScale = null; set({ run: null, results: null, diagram: null, contours: null, show: false, stale: false, error: null, at: null }); };
+
+/** A change to the model makes what was worked out stale: the drawing goes, the card offers Run again. */
+export function markStale(nodes: unknown): void {
+  const s = useResults.getState();
+  if (!s.run || s.stale || s.at === nodes) return;
+  ticket++;
+  set({ stale: true, results: null, diagram: null, contours: null });
+}

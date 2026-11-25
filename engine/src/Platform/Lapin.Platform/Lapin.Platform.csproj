@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    The platform every Lapin product has: the module contract and loader, the
+    spatial structure and materials, the session (commands, undo, diffs) and
+    the geometry pipeline (on the BubbleBIM Pro kernel). It knows no module.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="../../Model/Lapin.Model/Lapin.Model.csproj" />
+    <ProjectReference Include="../Lapin.Drawing/Lapin.Drawing.csproj" />
+    <!-- Point clouds: their readers and octree (docs/point-clouds.md). -->
+    <ProjectReference Include="../Lapin.PointClouds/Lapin.PointClouds.csproj" />
+    <ProjectReference Include="$(LapinGeometryDir)Lapin.Geometry/Lapin.Geometry.csproj" />
+    <!-- Booleans by manifold (Apache-2.0), its native library beside the engine. -->
+    <ProjectReference Include="$(LapinGeometryDir)Lapin.Booleans/Lapin.Booleans.csproj" />
+    <!-- IFC 4.3 alignments: roads' and modules' axes, and the curve segments the IFC export writes (IIfcAlignments). -->
+    <ProjectReference Include="$(LapinGeometryDir)Lapin.Alignments/Lapin.Alignments.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The documents' built-in templates (docs/plan-documents.md), read by DocumentTemplates. -->
+    <EmbeddedResource Include="Documents/Templates/*.json" LogicalName="Lapin.Platform.Documents.Templates.%(Filename)%(Extension)" />
+  </ItemGroup>
+</Project>

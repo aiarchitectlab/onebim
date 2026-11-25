@@ -1,0 +1,276 @@
+/**
+ * Rebar 2D (docs/plan-rebar.md): reinforcement drawn on views as parametric bar shapes bent at the Eurocode radius,
+ * stirrups distributed along a path with zones, marks and labels, the bar bending schedule; a section across a beam
+ * or a column at a click, inset beside it in the same view, with the context round it.
+ */
+
+import { Crosshair, Grid3x3, Rows3, FileDown, Minus, Scissors, Settings2, Shapes, Slice, Square, Table2, Ruler } from 'lucide-react';
+import { SectionIcon } from '../../icons';
+import type { Grip, GripView, LapinModule, ToolDef, Vec2 } from '../../platform/module';
+import type { NodeDto } from '../../engine/protocol';
+import { axisGrips, pt } from '../../viewport/gripKit';
+import { notify, useUi } from '../../app/store';
+import { execute } from '../../engine/session';
+import { activate } from '../../platform/modules';
+import { RebarRunSection, RebarSection } from './RebarSection';
+import { RebarSetSection } from './RebarSetSection';
+import { SetToolOptions } from './SetTool';
+import { setArgs, useSetOptions } from './setOptions';
+import { BarDotIcon, LBarIcon, PolylineBarIcon, StirrupIcon, StirrupsIcon, TieIcon, UBarIcon } from './icons';
+import { structureHooks } from '../structure/hooks';
+import { StirrupsFields } from './StirrupsFields';
+import { bars3d } from './bars3d';
+import { labelPlaceGrips, type LabelData } from './labelGrips';
+import { anchorGrips, type AnchorData } from './anchors';
+import { lazyPart } from '../../platform/lazyPart';
+import { PartitionOptions, partitionArg, useShapePick } from './partitions';
+import { ShapeToolOptions } from './ShapeTool';
+import { AlongEdgesOptions, placeAlongEdges } from './AlongEdgesTool';
+import { exportBvbsFile } from './barShapes';
+import './extensionKind';
+import { insetTool } from '../core/insets';
+import { mapper, viaOf } from '../../viewport/insetMap';
+
+// Fetched the first time each is opened (platform/lazyPart.tsx).
+const BarShapesDialog = lazyPart(() => import('./BarShapesDialog').then((m) => m.BarShapesDialog), { title: 'Bar shapes' });
+const BendingScheduleDialog = lazyPart(() => import('./BendingScheduleDialog').then((m) => m.BendingScheduleDialog), { title: 'Bending schedule' });
+const RebarSettingsDialog = lazyPart(() => import('./RebarDialogs').then((m) => m.RebarSettingsDialog), { title: 'Rebar settings' });
+
+// The stirrups of a beam's or a column's type are set in the Structure types dialog (decision 215).
+structureHooks.typeExtras.push(StirrupsFields);
+
+/** What a section can be cut across: anything with an axis, or standing at a point. */
+export const ACROSS = ['IfcBeam', 'IfcColumn', 'IfcWall', 'IfcFooting', 'IfcMember', 'IfcPile'];
+
+async function open(r: unknown) {
+  const id = (r as { id?: string; viewId?: string } | null)?.viewId ?? (r as { id?: string } | null)?.id;
+  if (id) useUi.setState({ view: 'drawing', drawingViewId: id, tool: null });
+}
+
+/** A bar placed with a click, of a shape of the catalogue. */
+const bar = (shape: string, label: string, icon: ToolDef['icon'], shortcut?: string): ToolDef => ({
+  id: `rebar.${shape}`, label, icon, shortcut,
+  gesture: { kind: 'point' },
+  options: PartitionOptions,
+  complete: async ({ points: [p] }, ctx) => { await ctx.execute('rebar.add', { viewId: ctx.viewId, shape, at: [p.x, p.y], ...partitionArg() }); },
+});
+const straight = bar('straight', 'Straight bar', Minus, 'RB');
+const lBar = bar('L', 'L bar', LBarIcon);
+const uBar = bar('U', 'U bar', UBarIcon);
+const stirrup = bar('stirrup', 'Stirrup', StirrupIcon, 'RS');
+const tie = bar('tie', 'Tie', TieIcon);
+const dot = bar('dot', 'Bar in section', BarDotIcon, 'BS');
+/** A bar bent as drawn: its vertices, the first one its point. */
+const polylineBar: ToolDef = {
+  id: 'rebar.polyline', label: 'Polyline bar', icon: PolylineBarIcon,
+  gesture: { kind: 'polyline' },
+  options: PartitionOptions,
+  complete: async ({ points }, ctx) => {
+    if (points.length < 2) return;
+    const [o] = points;
+    await ctx.execute('rebar.add', { viewId: ctx.viewId, shape: 'polyline', at: [o.x, o.y], vertices: points.map((p) => [p.x - o.x, p.y - o.y]), ...partitionArg() });
+  },
+};
+/** Stirrups (or any bar) along a path: its two ends. */
+const run: ToolDef = {
+  id: 'rebar.run', label: 'Stirrups along', icon: StirrupsIcon, shortcut: 'RR',
+  gesture: { kind: 'twoPoints' },
+  options: PartitionOptions,
+  complete: async ({ points: [a, b] }, ctx) => { await ctx.execute('rebar.addRun', { viewId: ctx.viewId, start: [a.x, a.y], end: [b.x, b.y], ...partitionArg() }); },
+};
+/** Bars laid over a slab, a footing or a wall, in layers (decision 730): a click on the host. */
+const setTool: ToolDef = {
+  id: 'rebar.set', label: 'Rebar set', icon: Grid3x3,
+  gesture: { kind: 'pick', types: ['IfcSlab', 'IfcFooting', 'IfcWall'] },
+  options: SetToolOptions,
+  complete: async ({ entity }, ctx) => {
+    if (!entity) return;
+    const r = await ctx.execute('rebar.addSet', { host: entity.id, ...setArgs(useSetOptions.getState()), ...partitionArg() }) as { id?: string } | null;
+    if (r?.id) useUi.setState({ selected: [r.id] });
+  },
+};
+/** A set over a region drawn in a plan, whatever lies under it (slabs only). */
+const setInRegion: ToolDef = {
+  id: 'rebar.setRegion', label: 'Rebar set in region', icon: Rows3,
+  gesture: { kind: 'polyline' },
+  options: SetToolOptions,
+  complete: async ({ points }, ctx) => {
+    if (points.length < 3) return;
+    const r = await ctx.execute('rebar.addSet', { viewId: ctx.viewId, region: points.map((p) => [p.x, p.y]), ...setArgs(useSetOptions.getState()), ...partitionArg() }) as { id?: string } | null;
+    if (r?.id) useUi.setState({ selected: [r.id] });
+  },
+};
+/** A section across the element clicked, where it was clicked, inset beside the click in this view. */
+const sectionHere: ToolDef = {
+  id: 'rebar.sectionHere', label: 'Section here', icon: Scissors, shortcut: 'RH',
+  gesture: { kind: 'pick', types: ACROSS },
+  complete: async ({ points: [p], entity }, ctx) => {
+    if (!entity) return;
+    const r = await ctx.execute('rebar.sectionHere', { viewId: ctx.viewId, id: entity.id, point: [p.x, p.y] }) as { insetId?: string } | null;
+    if (r?.insetId) useUi.setState({ selected: [r.insetId] });
+  },
+};
+/** A section across the element clicked, opened on its own. */
+const sectionAcross: ToolDef = {
+  id: 'rebar.sectionAcross', label: 'Section across', icon: SectionIcon, shortcut: 'SX',
+  gesture: { kind: 'pick', types: ACROSS },
+  complete: async ({ points: [p], entity }, ctx) => {
+    if (!entity) return;
+    await open(await ctx.execute('rebar.sectionHere', { viewId: ctx.viewId, id: entity.id, point: [p.x, p.y], inset: false }));
+  },
+};
+/** Another view drawn in this one (the core's tool, decision 576), kept here under its own id so a quick slot or a key given to it stays. */
+const insetView: ToolDef = { ...insetTool, id: 'rebar.inset', shortcut: undefined };
+const schedule: ToolDef = {
+  id: 'rebar.schedule', label: 'Bar schedule', icon: Table2,
+  run: () => void execute('architecture.createSchedule', { kind: 'rebar' }).then((r) => { if (r) notify('Bar bending schedule made: it is in the project browser, under Schedules.'); }),
+};
+/** A bar of one of the project's own shapes (Bar shapes…), placed with a click; the shape is chosen in the tool bar. */
+const userShapeBar: ToolDef = {
+  id: 'rebar.userShape', label: 'Bar of a shape', icon: Shapes,
+  gesture: { kind: 'point' },
+  options: ShapeToolOptions,
+  complete: async ({ points: [p] }, ctx) => {
+    const shapeId = useShapePick.getState().shapeId;
+    if (!shapeId) { notify('Make a bar shape first: Bar shapes…'); return; }
+    await ctx.execute('rebar.add', { viewId: ctx.viewId, shapeId, at: [p.x, p.y], ...partitionArg() });
+  },
+};
+/**
+ * Bars along the edges of an element's cut in a section: a click inside the cut (all round: a stirrup); with Pick edges, further
+ * clicks near the sides toggle them, Enter places an open bar along them.
+ */
+const alongEdges: ToolDef = {
+  id: 'rebar.alongEdges', label: 'Bars along edges', icon: Square,
+  gesture: { kind: 'polyline' },
+  options: AlongEdgesOptions,
+  complete: placeAlongEdges,
+};
+/** The project's bar shapes: the codes of the user's standard (BS 8666, ISO 4066, the office's), edited with a live drawing. */
+const barShapes: ToolDef = { id: 'rebar.shapes', label: 'Bar shapes…', icon: Shapes, run: () => useUi.setState({ dialog: 'barShapes' }) };
+/** The bars' marks as the standard writes them (shape code, A B C, number, length, mass), as CSV or BVBS. */
+const bendingSchedule: ToolDef = { id: 'rebar.bendingSchedule', label: 'Bending schedule (standard)', icon: Ruler, run: () => useUi.setState({ dialog: 'bendingSchedule' }) };
+/** The marks as a BVBS file (.abs) for the bending machine. */
+const exportBvbs: ToolDef = { id: 'rebar.exportBvbs', label: 'Export BVBS (.abs)…', icon: FileDown, run: () => void exportBvbsFile() };
+const settings: ToolDef = { id: 'rebar.settings', label: 'Rebar settings', icon: Settings2, run: () => useUi.setState({ dialog: 'rebarSettings' }) };
+/**
+ * A longitudinal bar cut in two with a lap where the engineer puts it (decision 227): a click on the bar at one end of the lap, a
+ * second where the other end is (the engine projects both onto the bar); a lap length typed after the first click is measured
+ * along the bar, the second click only saying which way; Enter or Esc after the first click ends the settings' lap (50Ø) at it.
+ * The bar is the first piece, a new bar the second; both selected after.
+ */
+const splitBar: ToolDef = {
+  id: 'rebar.split', label: 'Split bar', icon: Slice, shortcut: 'RC',
+  gesture: { kind: 'pickThenPoint', types: ['LapinRebar'], hint: 'click the bar where the lap starts or ends, then its other end, or type the lap length · Enter ends the settings\' lap at the click, Esc cancels' },
+  complete: async ({ points: [p, q], entity, typed }, ctx) => {
+    if (!entity) return;
+    const args: Record<string, unknown> = { id: entity.id, point: [p.x, p.y] };
+    if (q) { args.point2 = [q.x, q.y]; if (typed != null && typed > 0) args.lap = typed; }
+    const r = await ctx.execute('rebar.split', args) as { first?: string; second?: string } | null;
+    if (r?.first && r.second) useUi.setState({ selected: [r.first, r.second] });
+  },
+};
+/** The selected bar seen in section (a dot), placed with a click; it stays out of the schedule. */
+const asSection: ToolDef = {
+  id: 'rebar.asSection', label: 'Same bar in section', icon: Crosshair,
+  gesture: { kind: 'point' },
+  complete: async ({ points: [p] }, ctx) => {
+    const id = useUi.getState().selected[0];
+    if (!id) { notify('Select the bar to show in section first.'); return; }
+    await ctx.execute('rebar.duplicateAs', { id, view: 'section', at: [p.x, p.y], viewId: ctx.viewId });
+  },
+};
+
+/** How a mark seen through an inset view maps between its source's coordinates and the host's (`via` in the mark's data; viewport/insetMap.ts). */
+function mapping(mark?: GripView['mark']): { show: (p: Vec2) => Vec2; back: (p: Vec2) => Vec2; host?: string; source?: string } {
+  const via = viaOf(mark);
+  if (!via) return { show: (p) => p, back: (p) => p };
+  return { ...mapper(via), host: via.host, source: via.source };
+}
+
+/**
+ * The labels of what the engine generates for an element (a type's stirrups, a column's bars, a bar seen in another view), each
+ * with its place's grips (its point, its elbow, its string) kept on the view (`rebar.placeLabel`); through an inset, on the inset's source.
+ */
+function labelGrips(_node: NodeDto, view?: GripView): Grip[] {
+  const grips: Grip[] = [];
+  for (const mark of view?.marks ?? []) {
+    const labels = (mark.data as { labels?: ({ owner: string; key: string } & LabelData)[] } | undefined)?.labels ?? [];
+    const { show, back, source, host } = mapping(mark);
+    const viewId = source ?? view?.view;
+    if (!viewId) continue;
+    // Through an inset, shown on its host (already mapped: the platform's own mapping leaves them).
+    for (const l of labels)
+      grips.push(...labelPlaceGrips(l, `label:${l.key}`, (patch) => ({ command: 'rebar.placeLabel', args: { viewId, owner: l.owner, key: l.key, ...patch } }), { show, back }).map((g) => ({ ...g, view: host ?? view?.view })));
+  }
+  return grips;
+}
+
+/** A bar's grips as the engine drew them: its shape's (each drives a parameter), its point, its label's place (`rebar.update`); through an inset, where the inset shows them. */
+function barGrips(node: NodeDto, view?: GripView): Grip[] {
+  const data = view?.mark?.data as { grips?: { key: string; at: number[] }[]; anchors?: AnchorData[]; at?: number[]; label?: LabelData } | undefined;
+  const { show, back, host } = mapping(view?.mark);
+  const viewId = host ?? (typeof node.props.viewId === 'string' ? node.props.viewId : undefined);
+  const step = (key: string) => (to: Vec2) => { const p = back(to); return { command: 'rebar.grip', args: { id: node.id, key, point: [p.x, p.y] } }; };
+  const grips: Grip[] = [];
+  const at = pt(data?.at) ?? pt(node.props.at);
+  if (at) grips.push({ key: 'at', kind: 'move', at: show(at), title: 'Drag: move the bar', step: step('at') });
+  for (const g of data?.grips ?? []) {
+    const p = pt(g.at);
+    if (p) grips.push({ key: g.key, kind: g.key.startsWith('v') ? 'vertex' : 'end', at: show(p), title: 'Drag: the bar follows', step: step(g.key) });
+  }
+  // The anchors standing the cover outside the bar (decision 226): dragged onto the formwork's face, the bar stops the cover inside.
+  grips.push(...anchorGrips(data?.anchors, step, show));
+  grips.push(...labelPlaceGrips(data?.label, 'label', (patch) => ({ command: 'rebar.update', args: { id: node.id, label: patch } }), { show, back }));
+  // The same bar seen in other views (dots in the cross-section) has its label there too.
+  return [...grips.map((g) => ({ ...g, view: viewId })), ...labelGrips(node, view)];
+}
+
+/** A distribution's path ends and its label's place: its balloon, its elbow, its string (`rebar.updateRun`). */
+function runGrips(node: NodeDto, view?: GripView): Grip[] {
+  const a = pt(node.props.start), b = pt(node.props.end);
+  if (!a || !b) return [];
+  const { show, back, host } = mapping(view?.mark);
+  const viewId = host ?? (typeof node.props.viewId === 'string' ? node.props.viewId : undefined);
+  const grips = axisGrips(show(a), show(b), (s, e) => { const p = back(s), q = back(e); return { command: 'rebar.updateRun', args: { id: node.id, start: [p.x, p.y], end: [q.x, q.y] } }; });
+  const label = (view?.mark?.data as { label?: LabelData } | undefined)?.label;
+  grips.push(...labelPlaceGrips(label, 'label', (patch) => ({ command: 'rebar.updateRun', args: { id: node.id, label: patch } }), { show, back }));
+  return grips.map((g) => ({ ...g, view: viewId }));
+}
+
+export const rebarModule: LapinModule = {
+  id: 'rebar',
+  name: 'Rebar 2D',
+  summary: 'Reinforcement drawn on views: bars bent at the Eurocode radius, stirrups along a path, marks and the bar bending schedule; sections across an element inset where you work.',
+  tabs: [{
+    id: 'rebar', label: 'Simple rebar', order: 35, include: ['modify'],
+    groups: [
+      { label: 'Sections', tools: [sectionHere, sectionAcross, insetView] },
+      { label: 'Bars', tools: [straight, lBar, uBar, stirrup, polylineBar], small: [tie, dot, userShapeBar, alongEdges, asSection, splitBar] },
+      { label: 'Distribution', tools: [run] },
+      { label: 'Sets', tools: [setTool, setInRegion] },
+      { label: 'Schedule', tools: [schedule, bendingSchedule, barShapes, settings, bars3d], small: [exportBvbs] },
+    ],
+  }],
+  hotbar: [straight, stirrup, run, sectionHere],
+  // Create similar: a bar's shape tool (a bar of a project shape: that shape), a run's tool.
+  similar: {
+    LapinRebar: (n) => {
+      if (typeof n.props.shapeId === 'string') { useShapePick.setState({ shapeId: n.props.shapeId }); activate(userShapeBar); return; }
+      const shape = typeof n.props.shape === 'string' ? n.props.shape : 'straight';
+      activate([straight, lBar, uBar, stirrup, tie, dot, polylineBar].find((t) => t.id === `rebar.${shape}`) ?? straight);
+    },
+    LapinRebarRun: () => activate(run),
+    LapinRebarSet: () => activate(setTool),
+  },
+  // A beam's and a column's grips here are their generated labels' (the stirrups', the column bars'), beside the structure module's own.
+  grips: { LapinRebar: barGrips, LapinRebarRun: runGrips, LapinRebarSet: labelGrips, IfcBeam: labelGrips, IfcColumn: labelGrips },
+  propertySections: [
+    { id: 'rebar.bar', label: 'Bar', classes: ['LapinRebar'], component: RebarSection },
+    { id: 'rebar.run', label: 'Distribution', classes: ['LapinRebarRun'], component: RebarRunSection },
+    { id: 'rebar.set', label: 'Rebar set', classes: ['LapinRebarSet'], component: RebarSetSection },
+  ],
+  dialogs: { rebarSettings: RebarSettingsDialog, barShapes: BarShapesDialog, bendingSchedule: BendingScheduleDialog },
+};
+
+export default rebarModule;

@@ -1,0 +1,794 @@
+/**
+ * Projects on disk: New, Open, Save, Save as, recovery of unsaved work. In
+ * the desktop app the paths come from the native dialogs; in a browser
+ * against the local engine (pnpm dev) they are typed in; with the engine in
+ * the browser (the web build) the project comes from a file the user picks
+ * and goes back to it (or to a download), as bytes.
+ */
+
+import { confirmAction, phrase, promptText } from '../shell/prompts';
+import { forget3d } from '../viewport/viewState3d';
+import { brand } from '../platform/brand';
+import { activeStorey, engine, engineInBrowser, useSession } from './session';
+import { LONG_TIMEOUT_MS } from './client';
+import { begin, editableText, end, surveyIfc, type EditableReport } from './ifcImport';
+import { sdnfSummary, type SdnfImportReport } from '../modules/steel/sdnfReport';
+import { projectTypesFile } from '../modules/core/projectTypes';
+import { emptyPane, notify, notifyProblem, select, useUi } from '../app/store';
+import { usePrefs } from '../app/prefs';
+import { applyNewProjectStandard } from './newProjectStandard';
+import { fitAfterImport, poseKey } from '../viewport/camera';
+import { flushUserSettings } from '../app/userSettings';
+import { useCde } from './cdeServer';
+
+const FILTERS = [{ name: 'Lapin project', extensions: ['lapin'] }];
+/** What File → Open takes: a project, or a page Lapin exported for the browser with its project inside (decision 482). */
+const OPEN_FILTERS = [{ name: 'Lapin project', extensions: ['lapin', 'html', 'htm'] }, { name: 'Lapin for the browser', extensions: ['html', 'htm'] }];
+
+/** The name the first save of a project opened from a page suggests: House.lapin for House.html (never the page itself). */
+let pageName: string | null = null;
+
+/** A project read from a page (an .html Lapin exported): it opens without a file of its own, Save asks where, as a .lapin. */
+function openedFromPage(page: string | null | undefined): boolean {
+  pageName = page ? `${page.replace(/\.[^.]+$/, '')}.lapin` : null;
+  if (page) notify('Opened the project inside the page. Save it as a .lapin to keep working on it.');
+  return !!page;
+}
+
+export const isDesktop = () => Boolean((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__);
+
+// ─── Files as bytes (the engine in the browser) ──────────────────────────
+
+interface PickerWindow {
+  showOpenFilePicker?: (o: { types: { description: string; accept: Record<string, string[]> }[] }) => Promise<FileSystemFileHandle[]>;
+  showSaveFilePicker?: (o: { suggestedName: string; types: { description: string; accept: Record<string, string[]> }[] }) => Promise<FileSystemFileHandle>;
+}
+const picker = () => window as unknown as PickerWindow;
+
+/** The file the project came from or was last saved to, where the browser lets a page write back to it (Chrome, Edge). */
+let projectHandle: FileSystemFileHandle | null = null;
+
+/** A file the user picks: its name and bytes (null: none picked); `ext` one extension or several (bcfzip, bcf). */
+export async function pickFile(description: string, ext: string | string[]): Promise<{ name: string; bytes: Uint8Array; handle: FileSystemFileHandle | null } | null> {
+  const exts = Array.isArray(ext) ? ext : [ext];
+  const open = picker().showOpenFilePicker;
+  if (open) {
+    try {
+      const [handle] = await open({ types: [{ description, accept: { 'application/octet-stream': exts.map((e) => `.${e}`) } }] });
+      const file = await handle.getFile();
+      return { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()), handle };
+    } catch (e) {
+      // Cancelled: nothing. Refused (a webview that has the picker but may not show it, a page not active): the file input below,
+      // rather than nothing at all (a tester's report: Import… did nothing).
+      if ((e as { name?: string } | null)?.name === 'AbortError') return null;
+    }
+  }
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = exts.map((e) => `.${e}`).join(',');
+    // In the page while it is open: a webview (WebKit's) may not tell a detached input its file was chosen.
+    input.style.display = 'none';
+    document.body.appendChild(input);
+    const done = (r: { name: string; bytes: Uint8Array; handle: null } | null) => { input.remove(); resolve(r); };
+    input.onchange = async () => {
+      const file = input.files?.[0];
+      try { done(file ? { name: file.name, bytes: new Uint8Array(await file.arrayBuffer()), handle: null } : null); } catch (e) { notify(e instanceof Error ? e.message : String(e)); done(null); }
+    };
+    input.oncancel = () => done(null);
+    input.click();
+  });
+}
+
+/** Bytes as base64, the way the protocol carries them (in pieces: a large project would overflow one call). */
+export function toBase64(bytes: Uint8Array): string {
+  let s = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+const fromBase64 = (data: string) => Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+
+/** Bytes handed to the user as a download. */
+export function download(bytes: Uint8Array, name: string, type = 'application/octet-stream'): void {
+  const url = URL.createObjectURL(new Blob([bytes as BlobPart], { type }));
+  const a = document.createElement('a');
+  a.href = url; a.download = name; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * Where a file goes in the browser: a file the user chose with the save picker (Chrome, Edge), or just the name they gave in
+ * Lapin's own box (the browser then downloads it where it is set to).
+ */
+export interface SaveTarget { name: string; handle: FileSystemFileHandle | null }
+
+const typesOf = (ext: string, type: string) => [{ description: ext ? ext.toUpperCase() : 'File', accept: { [type]: ext ? [`.${ext}`] : [] } }];
+
+/**
+ * The user is asked for the file's name before anything is made (report #145): the browser's save picker where it has one, else a box
+ * of Lapin's with the suggested name filled in. `existing` is a file already chosen (a project saved before), used as it is. Null:
+ * the user stepped back. The extension is kept: a name typed without it gets it.
+ */
+export async function chooseTarget(name: string, type = 'application/octet-stream', existing: FileSystemFileHandle | null = null): Promise<SaveTarget | null> {
+  if (existing) return { name: existing.name, handle: existing };
+  const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+  const save = picker().showSaveFilePicker;
+  if (save) {
+    try {
+      const handle = await save({ suggestedName: name, types: typesOf(ext, type) });
+      return { name: handle.name, handle };
+    } catch (e) {
+      if ((e as { name?: string } | null)?.name === 'AbortError') return null;
+      // Refused (the click that began the export is too old for the browser, a frame that may not show it): the box below.
+    }
+  }
+  const { ask, textField } = await import('../shell/AskBox');
+  const r = await ask('Save as…', [textField('name', 'File name', name)]);
+  if (!r) return null;
+  let typed = safeFileName(String(r.name ?? ''), '').trim();
+  if (!typed) return null;
+  if (ext && !typed.toLowerCase().endsWith(`.${ext}`)) typed += `.${ext}`;
+  return { name: typed, handle: null };
+}
+
+/** The bytes into the chosen file, or handed to the browser as a download under the chosen name. */
+export async function writeTarget(target: SaveTarget, bytes: Uint8Array, type = 'application/octet-stream'): Promise<void> {
+  if (target.handle) {
+    const w = await target.handle.createWritable();
+    await w.write(bytes as BlobPart);
+    await w.close();
+  } else download(bytes, target.name, type);
+}
+
+/**
+ * Bytes the interface made (a schedule's CSV or XLSX, exported types) saved where the user says (report #66): on the
+ * desktop the save dialog, the default name given, and the engine writes them; in a browser the save picker or a box asking
+ * the name, then a download. The file's name when saved, null when the user stepped back or it failed (said in a notice).
+ */
+export async function saveFile(bytes: Uint8Array, name: string, type = 'application/octet-stream'): Promise<string | null> {
+  try {
+    if (isDesktop()) {
+      const ext = name.includes('.') ? name.split('.').pop()!.toLowerCase() : '';
+      const dialog = await import('@tauri-apps/plugin-dialog');
+      const path = await dialog.save({ defaultPath: name, filters: ext ? [{ name: ext.toUpperCase(), extensions: [ext] }] : [] });
+      if (typeof path !== 'string') return null;
+      await engine.call('file.write', { path, data: toBase64(bytes) }, { timeoutMs: LONG_TIMEOUT_MS });
+      return path.split(/[\\/]/).pop() ?? name;
+    }
+    const target = await chooseTarget(name, type);
+    if (!target) return null;
+    await writeTarget(target, bytes, type);
+    return target.name;
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+    return null;
+  }
+}
+
+/** A file name the systems accept, from a schedule's or a type's name (no slashes, colons, quotes…). */
+export const safeFileName = (name: string, fallback = 'export') => name.replace(/[\\/:*?"<>|]+/g, '_').trim() || fallback;
+
+/** Bytes written into a file the user chose (where the browser can) or named, else downloaded; false: the user cancelled. */
+async function keep(bytes: Uint8Array, name: string, handle: FileSystemFileHandle | null, ask: boolean): Promise<{ handle: FileSystemFileHandle | null } | false> {
+  const target = await chooseTarget(name, 'application/zip', ask ? null : handle);
+  if (!target) return false;
+  await writeTarget(target, bytes);
+  return { handle: target.handle };
+}
+
+export interface RecoverableWork { file: string; path: string | null; at: string; edits: number; lastEdit: string | null }
+
+export async function pickPath(mode: 'open' | 'save', defaultName?: string, filters = FILTERS): Promise<string | null> {
+  if (isDesktop()) {
+    const dialog = await import('@tauri-apps/plugin-dialog');
+    const r = mode === 'open'
+      ? await dialog.open({ multiple: false, directory: false, filters })
+      : await dialog.save({ filters, defaultPath: defaultName });
+    return typeof r === 'string' ? r : null;
+  }
+  const ext = filters[0]?.extensions[0] ?? 'lapin';
+  const p = promptText(mode === 'open' ? 'Path of the .{ext} file to open:' : 'Save as (full path, .{ext}):', defaultName ?? '', { ext });
+  return p?.trim() || null;
+}
+
+export async function confirmDiscard(question: string): Promise<boolean> {
+  if (!useSession.getState().doc?.dirty) return true;
+  if (isDesktop()) {
+    const dialog = await import('@tauri-apps/plugin-dialog');
+    return dialog.ask(phrase(question), { title: brand.name, kind: 'warning' });
+  }
+  return confirmAction(question);
+}
+
+/** The project's name: its file's, without the folder and the extension. */
+export const projectTitle = (path: string | null | undefined) => path?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, '') || 'New project';
+
+const RECENT_KEY = 'lapin.recent';
+
+/** The projects opened or saved last on this computer (a convenience: kept by the browser). */
+export function recentProjects(): string[] {
+  // The engine in the browser opens what the user picks: there are no paths to go back to.
+  if (engineInBrowser) return [];
+  try { return JSON.parse(localStorage.getItem(RECENT_KEY) ?? '[]') as string[]; } catch { return []; }
+}
+
+function remember(path: string): void {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify([path, ...recentProjects().filter((p) => p !== path)].slice(0, 8))); } catch { /* no storage: no list */ }
+}
+
+/** Into the project: the ground floor's plan in front, the 3D open in a tab beside it. */
+export function enter(): void {
+  select(null);
+  // Another project: what the CDE start screen said of the last one (opened read-only, cloned, not saved to the server) goes.
+  const cde = useCde.getState();
+  if (cde.opened || cde.cloned || cde.unpushed || cde.linked) useCde.setState({ opened: null, cloned: null, unpushed: null, linked: false });
+  forget3d();
+  const plan = emptyPane('plan');
+  useUi.setState({ screen: 'workspace', storeyId: null, tool: null, panes: [plan], pane: 0, ...plan });
+  useUi.setState((s) => ({ viewTabs: [...s.viewTabs, { ...emptyPane('3d'), storeyId: null }] }));
+}
+
+/** A level a new project starts with: its name, elevation and height (metres). */
+export interface NewStorey { name: string; elevation: number; height: number }
+
+/**
+ * A new project: the edition's levels, or a start screen template's (decision 261); without either, the project template
+ * Preferences chose for new projects (decision 470), when it is still on this computer (`lapinDefault`: Lapin's own start
+ * whatever was chosen). False when the user kept the open one.
+ */
+export async function newProject(storeys?: NewStorey[], lapinDefault = false): Promise<boolean> {
+  if (!(await confirmDiscard('The project has unsaved changes. Start a new one anyway?'))) return false;
+  const chosen = storeys?.length || lapinDefault ? null : usePrefs.getState().defaultTemplate;
+  if (chosen) {
+    const { defaultTemplateOf, refreshTemplates, startFromTemplate } = await import('./templates');
+    const template = defaultTemplateOf(chosen, await refreshTemplates());
+    if (template) {
+      try {
+        await startFromTemplate(template.id);
+        await applyNewProjectStandard();
+        enter();
+        return true;
+      } catch (e) {
+        notify(`The template „${template.name}” could not be used: ${e instanceof Error ? e.message : String(e)} Lapin's default was used instead.`);
+      }
+    } else notify(`The template „${chosen}” chosen for new projects is no longer on this computer: Lapin's default was used.`);
+  }
+  try {
+    // The profile standards it offers, as the user chose for new projects (Preferences → Profiles; decision 457).
+    const profileStandards = usePrefs.getState().newProjectProfileStandards;
+    const params = { ...(storeys?.length ? { storeys } : {}), ...(profileStandards ? { profileStandards } : {}) };
+    await engine.call('project.new', Object.keys(params).length ? params : undefined);
+    await applyNewProjectStandard();
+    enter();
+    return true;
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+/** A project holding what modules this edition lacks own: said once as it opens (it is kept as it is, and saved back unchanged). */
+function tellAbsent(absent: string[] | undefined): void {
+  if (absent?.length) notify(`This project holds content of modules this edition does not have (${absent.join(', ')}): it is kept as it is and saved back unchanged.`);
+}
+
+function tellOld(notes: string[]): void {
+  notify(`Opened an old Lapin project: save it to keep it in the new format.${notes.length ? ` Left out: ${notes.join('; ')}.` : ''}`);
+}
+
+/** A project opened from bytes in the browser's engine (a file picked, or a commit's package from a CDE server): false when it failed. */
+async function openBytes(name: string, bytes: Uint8Array, handle: FileSystemFileHandle | null): Promise<boolean> {
+  try {
+    const r = await engine.call<{ notes?: string[]; page?: string | null; absent?: string[] } | null>('project.openBytes', { name, data: toBase64(bytes) }, { timeoutMs: LONG_TIMEOUT_MS });
+    // An old project (format 2), or one read from a page, opens unsaved: saving must not write over the file it came from.
+    const old = !useSession.getState().doc?.path;
+    projectHandle = old ? null : handle;
+    enter();
+    if (!openedFromPage(r?.page)) {
+      if (old) tellOld(r?.notes ?? []);
+      else tellAbsent(r?.absent);
+    }
+    return true;
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+/**
+ * A project handed over as bytes (a commit's package from a CDE server, engine/cdeServer.ts), opened with no file of its own:
+ * Save asks where, so it keeps a copy and never writes back. False when the user kept the open project or it did not open.
+ */
+export async function openProjectBytes(name: string, bytes: Uint8Array): Promise<boolean> {
+  if (!(await confirmDiscard('The project has unsaved changes. Open another anyway?'))) return false;
+  return openBytes(name, bytes, null);
+}
+
+export async function openProject(path?: string): Promise<void> {
+  if (!(await confirmDiscard('The project has unsaved changes. Open another anyway?'))) return;
+  if (engineInBrowser) {
+    const picked = await pickFile('Lapin project', ['lapin', 'html', 'htm']);
+    if (!picked) return;
+    await openBytes(picked.name, picked.bytes, picked.handle);
+    return;
+  }
+  const target = path ?? (await pickPath('open', undefined, OPEN_FILTERS));
+  if (!target) return;
+  try {
+    const r = await engine.call<{ notes?: string[]; page?: string | null; absent?: string[] } | null>('project.open', { path: target }, { timeoutMs: LONG_TIMEOUT_MS });
+    remember(target);
+    enter();
+    // An old Lapin project (format 2) is rebuilt natively and opens unsaved; say what it left out. A page's project opens unsaved too.
+    if (!openedFromPage(r?.page)) {
+      if (!useSession.getState().doc?.path) tellOld(r?.notes ?? []);
+      else tellAbsent(r?.absent);
+    }
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** What the engine says about a save or a version it made (`warnings`: a part it could not write whole, a value it kept as it was…): each shown as a notice, never silent. */
+export function reportWarnings(result: unknown): void {
+  const w = (result as { warnings?: unknown } | null)?.warnings;
+  if (!Array.isArray(w)) return;
+  for (const m of w) if (typeof m === 'string' && m.trim()) notify(m);
+}
+
+export async function saveProject(as = false): Promise<boolean> {
+  const current = useSession.getState().doc?.path ?? null;
+  if (engineInBrowser) {
+    try {
+      // The name is asked first (the engine then holds the project under it, so exports are named after it).
+      const chosen = await chooseTarget(current ?? pageName ?? 'project.lapin', 'application/zip', as ? null : projectHandle);
+      if (!chosen) return false;
+      const r = await engine.call<{ name: string; data: string; warnings?: string[] }>('project.saveBytes', { name: chosen.name }, { timeoutMs: LONG_TIMEOUT_MS });
+      await writeTarget(chosen, fromBase64(r.data), 'application/zip');
+      projectHandle = chosen.handle;
+      notify(`Saved ${projectTitle(r.name)}.`);
+      reportWarnings(r);
+      return true;
+    } catch (e) {
+      notify(e instanceof Error ? e.message : String(e));
+      return false;
+    }
+  }
+  const target = as || !current ? await pickPath('save', current ?? pageName ?? 'project.lapin') : current;
+  if (!target) return false;
+  const path = target.endsWith('.lapin') ? target : `${target}.lapin`;
+  try {
+    const saved = await engine.call('project.save', { path }, { timeoutMs: LONG_TIMEOUT_MS });
+    remember(path);
+    notify(`Saved ${projectTitle(path)}.`);
+    reportWarnings(saved);
+    return true;
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+    return false;
+  }
+}
+
+// ─── Versions (docs/versions.md) ─────────────────────────────────────────
+
+export interface VersionRevision { at: string; note: string | null; entities: number; size: number }
+export interface ProjectVersion { number: number; name: string; note: string | null; at: string; updatedAt: string; entities: number; size: number; parts: number; app: string; revisions: VersionRevision[] }
+
+/** The open project's versions, as its file holds them. */
+export const listVersions = () => engine.call<ProjectVersion[]>('project.versions').catch(() => [] as ProjectVersion[]);
+
+/**
+ * A version call that writes the project's file (a version lives there): on
+ * the desktop in place, so the project needs a file first (Save as); with the
+ * engine in the browser the file comes back as bytes and is kept like a save.
+ * False: the user stepped back; a refusal is thrown.
+ */
+export async function writeVersions(method: string, args: Record<string, unknown>): Promise<boolean> {
+  if (engineInBrowser) {
+    const r = await engine.call<{ name: string; data: string; warnings?: string[] }>(method, { ...args, bytes: true }, { timeoutMs: LONG_TIMEOUT_MS });
+    reportWarnings(r);
+    const kept = await keep(fromBase64(r.data), r.name, projectHandle, false);
+    if (!kept) return false;
+    projectHandle = kept.handle;
+    return true;
+  }
+  if (!useSession.getState().doc?.path) {
+    notify('Save the project first: its versions live in its file.');
+    if (!await saveProject(true)) return false;
+  }
+  reportWarnings(await engine.call(method, args, { timeoutMs: LONG_TIMEOUT_MS }));
+  return true;
+}
+
+/**
+ * The project's file as a call that also saved it handed it back (the engine in the browser: an issue, which saves its version): kept
+ * like a save, into the file the project came from where the browser can write back, else as a download. False: the user stepped back.
+ */
+export async function keepProjectFile(file: { name: string; data: string }): Promise<boolean> {
+  const kept = await keep(fromBase64(file.data), file.name, projectHandle, false);
+  if (!kept) return false;
+  projectHandle = kept.handle;
+  return true;
+}
+
+/** A version as a .lapin file of its own, where the user says (the desktop) or as a download. */
+export const exportVersion = (number: number, revision: number | null, name: string) =>
+  exportFile('project.exportVersion', { number, ...(revision == null ? {} : { revision }) }, name, 'lapin');
+
+/** A version written to a file of its own and opened in another Lapin window (the desktop), to look at or edit there. */
+export async function openVersionSeparately(number: number, revision: number | null): Promise<void> {
+  const r = await engine.call<{ path: string }>('project.exportVersion', { number, ...(revision == null ? {} : { revision }), temp: true }, { timeoutMs: LONG_TIMEOUT_MS });
+  const { invoke } = await import('@tauri-apps/api/core');
+  await invoke('open_separately', { path: r.path });
+  notify('Opening the version in another Lapin window.');
+}
+
+export const listRecovery = () => engine.call<RecoverableWork[]>('recovery.list').catch(() => [] as RecoverableWork[]);
+
+export async function restoreWork(file: string): Promise<void> {
+  try {
+    await engine.call('recovery.restore', { path: file }, { timeoutMs: LONG_TIMEOUT_MS });
+    enter();
+    notify('Your unsaved work is back. Save it to keep it.');
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+  }
+}
+
+export const discardWork = (file: string) => engine.call('recovery.discard', { path: file });
+
+/** The desktop window asks before closing on unsaved work. */
+export async function guardWindowClose(): Promise<void> {
+  if (!isDesktop()) {
+    // A browser tab: the browser asks before leaving unsaved work (the journal keeps it besides).
+    // In front of a CDE server, also while the browser holds commits the server has not got (W2: the copy here is lost with the tab).
+    window.addEventListener('beforeunload', (e) => { if (useSession.getState().doc?.dirty || useCde.getState().unpushed) e.preventDefault(); });
+    return;
+  }
+  const { getCurrentWindow } = await import('@tauri-apps/api/window');
+  const win = getCurrentWindow();
+  await win.onCloseRequested(async (e) => {
+    // The settings changed a moment ago reach the user's folder before the window goes (decision 470).
+    await flushUserSettings();
+    if (!useSession.getState().doc?.dirty) return;
+    e.preventDefault();
+    const dialog = await import('@tauri-apps/plugin-dialog');
+    const save = await dialog.ask(phrase('Save the changes to the project before closing?'), { title: brand.name, kind: 'warning', okLabel: phrase('Save'), cancelLabel: phrase("Don't save") });
+    // Saving cancelled in the file dialog: the window stays.
+    if (save && !(await saveProject())) return;
+    if (!save) {
+      // A second thought is still possible; only a confirmed "close" lets the work go (and no recovery is offered next time).
+      if (!(await dialog.confirm(phrase('Close without saving? The changes will be lost.'), { title: brand.name, kind: 'warning', okLabel: phrase('Close'), cancelLabel: phrase('Cancel') }))) return;
+      await engine.call('project.new').catch(() => undefined);
+    }
+    await win.destroy();
+  });
+}
+
+/**
+ * An export from the engine (PDF, DXF): to the path the save dialog gives on
+ * the desktop, else handed back and downloaded by the browser.
+ */
+const MIME: Record<string, string> = { pdf: 'application/pdf', dxf: 'application/dxf', ifc: 'application/x-step', step: 'application/step', glb: 'model/gltf-binary', gltf: 'model/gltf+json', usdz: 'model/vnd.usdz+zip', usda: 'model/vnd.usda', dae: 'model/vnd.collada+xml', frag: 'application/octet-stream', bcfzip: 'application/zip', bcf: 'application/zip', zip: 'application/zip', csv: 'text/csv', json: 'application/json', html: 'text/html' };
+
+export async function exportFile(method: string, args: Record<string, unknown>, name: string, ext: string): Promise<boolean> {
+  let target: SaveTarget | null = null;
+  try {
+    if (isDesktop()) {
+      const dialog = await import('@tauri-apps/plugin-dialog');
+      const path = await dialog.save({ defaultPath: name, filters: [{ name: ext.toUpperCase(), extensions: [ext] }] });
+      if (typeof path !== 'string') return false;
+      await engine.call(method, { ...args, path }, { timeoutMs: LONG_TIMEOUT_MS });
+      notify(`Exported ${path.split(/[\\/]/).pop()}.`);
+      return true;
+    }
+    // Asked before the engine works: the picker needs the click that began the export, which a long export outlives.
+    target = await chooseTarget(name, MIME[ext] ?? 'application/octet-stream');
+    if (!target) return false;
+    // The file's bytes as they are in the reply's frame (`binary`), not as base64 text, which a large export outgrew (report #156).
+    const r = await engine.call<{ data: string | Uint8Array }>(method, { ...args, binary: true }, { timeoutMs: LONG_TIMEOUT_MS });
+    const bytes = fileBytes(r?.data);
+    if (!bytes) throw new Error('The engine sent back no file.');
+    await writeTarget(target, bytes, MIME[ext] ?? 'application/octet-stream');
+    notify(`Exported ${target.name}.`);
+    return true;
+  } catch (e) {
+    // The browser's save picker made the file when it was chosen: a failed export takes it away again, so no empty file is left behind.
+    if (target?.handle) await discardTarget(target.handle);
+    notifyProblem(`Nothing was exported: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}
+
+/** An export's bytes from its reply: a buffer of the frame (asked with `binary`), or base64 from a call that has no other way; null when none came. */
+export function fileBytes(data: unknown): Uint8Array | null {
+  const bytes = data instanceof Uint8Array ? data : typeof data === 'string' ? fromBase64(data) : null;
+  return bytes && bytes.length > 0 ? bytes : null;
+}
+
+/** The file the save picker made for an export that then failed, removed (where the browser can: Chrome and Edge since 110). */
+export async function discardTarget(handle: FileSystemFileHandle): Promise<void> {
+  try { await (handle as FileSystemFileHandle & { remove?: () => Promise<void> }).remove?.(); } catch { /* left as it is: the notice says nothing was exported */ }
+}
+
+/**
+ * The project as IFC (docs/spec-ifc.md): IFC4 by default, IFC4X3 on request; parts grouped under their element unless `detail` is 'simple';
+ * bodies as faceted B-reps, or as face sets (`geometry: 'faceset'`), simplified within `tolerance` (metres) when one is given.
+ */
+export async function exportIfc(options: { schema?: string; detail?: string; phase?: string; geometry?: string; tolerance?: number } = {}): Promise<void> {
+  const path = useSession.getState().doc?.path ?? null;
+  await exportFile('project.exportIfc', options, `${projectTitle(path)}.ifc`, 'ifc');
+}
+
+/**
+ * The file this instance of the desktop app was started for (a link opened on
+ * its own from Manage → Links): a new project with the IFC imported natively,
+ * or the DXF import dialog on a new project's plan.
+ */
+export async function openStartupFile(): Promise<void> {
+  if (!isDesktop()) return;
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    const path = await invoke<string | null>('startup_file');
+    if (!path) return;
+    const name = path.split(/[\\/]/).pop() ?? path;
+    // A Lapin project (a linked one opened on its own, to edit there): opened as it is.
+    if (/\.lapin$/i.test(name)) {
+      const r = await engine.call<{ absent?: string[] } | null>('project.open', { path }, { timeoutMs: LONG_TIMEOUT_MS });
+      remember(path);
+      enter();
+      tellAbsent(r?.absent);
+      return;
+    }
+    // An IFC brings its own storeys: the new project starts with a ground floor only.
+    await engine.call('project.new', { plain: !/\.dxf$/i.test(name) });
+    enter();
+    if (/\.dxf$/i.test(name)) { dxfFile.current = { name, path }; useUi.setState({ dialog: 'importDxf' }); return; }
+    // An IFC opened on its own: what of it comes in chosen first, as for an import.
+    await surveyIfc({ name, path }, 'auto', 'ifc', true);
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/** The DXF the user picked, waiting for the import dialog: by path (the desktop), or its bytes (the browser). */
+export const dxfFile: { current: { name: string; path?: string; data?: string } | null } = { current: null };
+
+/** The PDF or picture the user picked to trace over, waiting for its dialog (decision 371): by path, or its bytes. */
+export const traceFile: { current: { name: string; path?: string; data?: string } | null } = { current: null };
+
+/** A PDF or a picture (PNG, JPEG) into the view in front, to trace over: picked here, placed from the import dialog. */
+export async function importTrace(): Promise<void> {
+  const exts = ['pdf', 'png', 'jpg', 'jpeg'];
+  const picked = isDesktop() ? null : await pickFile('PDF or image', exts);
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'PDF or image', extensions: exts }]) : picked?.name ?? null;
+  if (!path) return;
+  traceFile.current = picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path };
+  useUi.setState({ dialog: 'importTrace' });
+}
+
+/** A DXF into the view in front, as Lapin's own drafting: the file is picked here, the rest is asked in the import dialog. */
+export async function importDxf(): Promise<void> {
+  const picked = isDesktop() ? null : await pickFile('DXF', 'dxf');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'DXF', extensions: ['dxf'] }]) : picked?.name ?? null;
+  if (!path) return;
+  dxfFile.current = picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path };
+  useUi.setState({ dialog: 'importDxf' });
+}
+
+/**
+ * A That Open Fragments file (.frag, docs/fragments.md) into the open project: its items as references with their
+ * bodies, on their storeys, identical bodies shared. By path on the desktop, by its bytes in a browser.
+ */
+export async function importFragments(): Promise<void> {
+  const picked = isDesktop() ? null : await pickFile('Fragments', 'frag');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'Fragments', extensions: ['frag'] }]) : picked?.name ?? null;
+  if (!path) return;
+  // Looked at first, then chosen from, as an IFC is (docs/fragments.md, Exchange).
+  await surveyIfc(picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path }, 'auto', 'frag');
+}
+
+/**
+ * File → Import types from a project… (issue #74): another .lapin picked, by path on the desktop, by its bytes in a browser (as
+ * a linked project is); its dialog asks the engine for its types (library.projectTypes) and brings the chosen ones in.
+ */
+export async function importProjectTypes(): Promise<void> {
+  if (!useSession.getState().connected) { notify('Open a project first.'); return; }
+  const picked = isDesktop() ? null : await pickFile('Lapin project', 'lapin');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'Lapin project', extensions: ['lapin'] }]) : picked?.name ?? null;
+  if (!path) return;
+  projectTypesFile.current = picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path };
+  useUi.setState({ dialog: 'projectTypes' });
+}
+
+/**
+ * Another Lapin project linked in, read-only, as a module placed where asked (docs/links.md, Hotlinks). The same project may be
+ * linked many times; Manage → Links reads a link again when its file changes.
+ */
+export async function linkLapin(): Promise<void> {
+  const picked = isDesktop() ? null : await pickFile('Lapin project', 'lapin');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'Lapin project', extensions: ['lapin'] }]) : picked?.name ?? null;
+  if (!path) return;
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const { ask, choiceField, lengthField, numberField } = await import('../shell/AskBox');
+  const r = await ask(`Link ${name}`, [lengthField('x', 'Placed at x', 0), lengthField('y', 'Placed at y', 0), numberField('rotation', 'Turned (°)', 0), choiceField('mirror', 'Mirrored', 'no', [{ value: 'no', label: 'No' }, { value: 'yes', label: 'Yes' }])]);
+  if (!r) return;
+  const place = { x: Number(r.x), y: Number(r.y), rotation: Number(r.rotation), mirror: r.mirror === 'yes' };
+  begin(`Linking ${name}`, 'Reading the project');
+  try {
+    await engine.call('project.linkLapin', picked ? { name: picked.name, data: toBase64(picked.bytes), ...place } : { path, ...place }, { timeoutMs: LONG_TIMEOUT_MS });
+    notify(`Linked ${name}: read-only, Manage → Links reads it again when it changes.`);
+  } catch (e) { notify(e instanceof Error ? e.message : String(e)); } finally { end(); }
+}
+
+/**
+ * A BIM Open Schema file (.bos, docs/bos.md: Parquet tables in a zip) into the open project, looked at first and chosen
+ * from as a Fragments file is: its elements as references with their bodies, on their storeys, identical meshes shared.
+ */
+export async function importBos(): Promise<void> {
+  const picked = isDesktop() ? null : await pickFile('BIM Open Schema', 'bos');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'BIM Open Schema', extensions: ['bos'] }]) : picked?.name ?? null;
+  if (!path) return;
+  await surveyIfc(picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path }, 'auto', 'bos');
+}
+
+/**
+ * A Steel Detailing Neutral File (.sdnf, SDNF 3.0 or 2.0: docs/sdnf.md) into the open project, by the steel module, in one
+ * undo step: its linear members as native columns, beams and steel members, its plates and grids. A file Lapin wrote, or one
+ * brought in before, updates the elements it brought rather than adding them again.
+ */
+export async function importSdnf(): Promise<void> {
+  const exts = ['sdnf', 'dat', 'sdn'];
+  const picked = isDesktop() ? null : await pickFile('SDNF', exts);
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'SDNF', extensions: exts }]) : picked?.name ?? null;
+  if (!path) return;
+  const name = path.split(/[\\/]/).pop() ?? path;
+  // Its stages shown as it goes, Cancel while it reads and makes the model (report #148: a large file left the window busy
+  // with nothing to say); at the end its protocol, or why the file could not be read.
+  const { showSdnfReport } = await import('../modules/steel/SdnfReportDialog');
+  const started = Date.now();
+  // The engine in a page works the call in one go: nothing reaches it to stop it meanwhile.
+  begin(`Importing ${name}`, 'Reading the file', engineInBrowser ? undefined : () => { void engine.call('cancel.long', {}).catch(() => undefined); });
+  try {
+    const r = await engine.call<SdnfImportReport>('doc.execute',
+      { command: 'steel.importSdnf', args: picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name, path } }, { timeoutMs: SDNF_TIMEOUT_MS });
+    end();
+    notify(sdnfSummary(r));
+    showSdnfReport(name, r, null, Date.now() - started);
+  } catch (e) {
+    end();
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.startsWith('Cancelled')) { notify(msg); return; }
+    notify(msg);
+    showSdnfReport(name, null, msg, Date.now() - started);
+  }
+}
+
+/** A large SDNF may take longer than other imports on a slow computer: the overlay shows it working meanwhile. */
+const SDNF_TIMEOUT_MS = 30 * 60_000;
+
+/**
+ * A mesh from another program into the open project as references (OBJ, STL, glTF, GLB: docs/plan-studio-editor.md);
+ * Studio's Make Studio solid makes one editable. OBJ and STL say neither their unit nor which way is up: asked for.
+ */
+export async function importMesh(given?: { source: { name: string; path?: string; data?: string }; up?: string }): Promise<void> {
+  const exts = ['obj', 'stl', 'gltf', 'glb', 'ply'];
+  const picked = given || isDesktop() ? null : await pickFile('Meshes', exts);
+  const path = given ? given.source.path ?? given.source.name : isDesktop() ? await pickPath('open', undefined, [{ name: 'Meshes (OBJ, STL, glTF, PLY)', extensions: exts }]) : picked?.name ?? null;
+  if (!path) return;
+  const name = given?.source.name ?? path.split(/[\\/]/).pop() ?? path;
+  const ext = name.split('.').pop()?.toLowerCase() ?? '';
+  // An OBJ, STL or PLY says neither its unit nor its up; any mesh comes in as references or, asked, editable (Studio solids).
+  const { ask, choiceField } = await import('../shell/AskBox');
+  const units = ext === 'obj' || ext === 'stl' || ext === 'ply';
+  const ups = [{ value: 'z', label: 'z (CAD, BIM)' }, { value: 'y', label: 'y (most 3D programs)' }, ...(ext === 'ply' ? [{ value: '-y', label: '−y (a 3DGS capture, MeshSplatting)' }] : [])];
+  const r = await ask(`Import ${name}`, [
+    ...(units ? [
+      choiceField('scale', 'Its unit', ext === 'stl' ? '0.001' : '1', [{ value: '1', label: 'metres' }, { value: '0.01', label: 'centimetres' }, { value: '0.001', label: 'millimetres' }, { value: '0.0254', label: 'inches' }]),
+      choiceField('up', 'Up is its', given?.up ?? (ext === 'obj' ? 'y' : 'z'), ups),
+    ] : []),
+    choiceField('as', 'As', 'reference', [{ value: 'reference', label: 'references' }, { value: 'editable', label: 'editable (Studio solids)' }]),
+  ]);
+  if (!r) return;
+  const options: Record<string, unknown> = { ...(units ? { scale: Number(r.scale), up: r.up } : {}), ...(r.as === 'editable' ? { editable: true } : {}) };
+  const storeyId = activeStorey()?.id;
+  const source = given ? given.source : picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name, path };
+  // The model framed when it is in, unless the camera is moved meanwhile.
+  const pose = poseKey();
+  try {
+    const res = await engine.call<{ elements: number; triangles: number; editable?: EditableReport | null; notes: string[] }>('project.importMesh', { ...source, ...options, ...(storeyId ? { storeyId } : {}) }, { timeoutMs: LONG_TIMEOUT_MS });
+    notify(res.editable
+      ? `Imported ${name}: ${res.elements} piece${res.elements === 1 ? '' : 's'}, ${res.triangles} triangles.${editableText(res.editable)}${res.notes.length ? ' ' + res.notes.join(' ') : ''}`
+      : `Imported ${name}: ${res.elements} reference${res.elements === 1 ? '' : 's'}, ${res.triangles} triangles. Select one and use Studio → Make Studio solid to edit it.${res.notes.length ? ' ' + res.notes.join(' ') : ''}`);
+    fitAfterImport(pose);
+  } catch (e) {
+    notify(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * An IFC file into the open project, in two steps (ifcImport.ts): the file looked at, the Import IFC dialog to choose
+ * what of it comes in (by discipline, kind and storey) and how (recognised, as references, linked), then the import
+ * with its stages shown. `asProject`: the IFC opened as a project (the start screen's IFC): the new project is made from the
+ * file, its project, site, building and storeys under the file's GlobalIds.
+ */
+export async function importIfc(mode: 'auto' | 'editable' | 'reference' | 'link' = 'auto', asProject = false): Promise<void> {
+  // By path on the desktop (the native dialog); in a browser, the file's bytes from the browser's own
+  // picker, whether the engine runs in the page or as the local process of pnpm dev: a page never knows a path.
+  const picked = isDesktop() ? null : await pickFile('IFC', 'ifc');
+  const path = isDesktop() ? await pickPath('open', undefined, [{ name: 'IFC', extensions: ['ifc'] }]) : picked?.name ?? null;
+  if (!path) return;
+  const source = picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name: path.split(/[\\/]/).pop() ?? path, path };
+  await surveyIfc(source, mode, 'ifc', asProject);
+}
+
+/**
+ * The point cloud formats Lapin reads (docs/point-clouds.md): the open ones only; Gaussian splats as 3DGS PLY, SuperSplat's
+ * compressed PLY (.compressed.ply), SPZ or SOG (docs/plan-gaussian-splats.md). On the desktop a SOG folder's meta.json too.
+ */
+export const POINT_CLOUD_EXTENSIONS = ['las', 'laz', 'e57', 'ply', 'spz', 'sog', 'xyz', 'pts', 'csv', 'txt'];
+
+/** The largest cloud a browser links (its bytes are held in the page's engine): larger ones need the desktop app. */
+export const BROWSER_CLOUD_MAX = 160 * 1024 * 1024;
+
+/** The ways a cloud can stand, and its units, for the link's dialogs. */
+export const CLOUD_MODES = [
+  { value: 'auto', label: 'as Lapin suggests' },
+  { value: 'shared', label: 'by the project\'s map coordinates' },
+  { value: 'origin', label: 'origin to origin' },
+  { value: 'center', label: 'centred on the project\'s origin' },
+];
+/** The axis a cloud's file has up: a scan's z, SPZ's y, a 3DGS PLY's −y (docs/plan-gaussian-splats.md). */
+export const CLOUD_UPS = [
+  { value: 'z', label: 'z (a scan)' }, { value: 'y', label: 'y (SPZ, glTF)' }, { value: '-y', label: '−y (a 3DGS PLY)' },
+];
+export const CLOUD_UNITS = [
+  { value: 'auto', label: 'as the file says (else metres)' },
+  { value: 'm', label: 'metres' }, { value: 'cm', label: 'centimetres' }, { value: 'mm', label: 'millimetres' },
+  { value: 'ft', label: 'feet' }, { value: 'usft', label: 'US survey feet' }, { value: 'in', label: 'inches' },
+];
+
+/**
+ * A point cloud linked (LAS, LAZ, E57, PLY, XYZ, PTS, CSV), or Gaussian splats (3DGS PLY, compressed PLY, SPZ, SOG): kept outside the project, indexed in the background,
+ * listed in Manage → Links. Where it stands and its unit asked first; the engine says what it found.
+ */
+export async function linkPointCloud(): Promise<void> {
+  const picked = isDesktop() ? null : await pickFile('Point cloud', POINT_CLOUD_EXTENSIONS);
+  const path = isDesktop()
+    ? await pickPath('open', undefined, [
+      { name: 'Point cloud or splats (LAS, LAZ, E57, PLY, SPZ, SOG, XYZ, PTS, CSV)', extensions: POINT_CLOUD_EXTENSIONS },
+      { name: 'A SOG folder (its meta.json)', extensions: ['json'] },
+    ])
+    : picked?.name ?? null;
+  if (!path) return;
+  if (picked && picked.bytes.length > BROWSER_CLOUD_MAX) { notify(`${picked.name} is ${Math.round(picked.bytes.length / 1048576)} MB: in a browser a point cloud is at most ${BROWSER_CLOUD_MAX / 1048576} MB. Link it in the desktop app.`); return; }
+  const name = path.split(/[\\/]/).pop() ?? path;
+  const { ask, choiceField } = await import('../shell/AskBox');
+  const r = await ask(`Link the point cloud ${name}`, [choiceField('mode', 'Placed', 'auto', CLOUD_MODES), choiceField('units', 'Its unit', 'auto', CLOUD_UNITS)]);
+  if (!r) return;
+  const placement: Record<string, unknown> = {};
+  if (r.mode !== 'auto') placement.mode = r.mode;
+  if (r.units !== 'auto') placement.units = r.units;
+  const source = picked ? { name: picked.name, data: toBase64(picked.bytes) } : { name, path };
+  try {
+    const res = await engine.call<{ id: string; notes: string[] }>('doc.execute',
+      { command: 'pointcloud.link', args: { ...source, placement } }, { timeoutMs: LONG_TIMEOUT_MS });
+    notify(`Linked ${name}: indexed in the background; Manage → Links shows how far.${res.notes.length ? ' ' + res.notes.join(' ') : ''}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    // A PLY of faces (MeshSplatting's output, a photogrammetry model) is a mesh: offered as one (G2 of docs/plan-gaussian-splats.md).
+    if (msg.includes('holds a mesh')) {
+      const { ask: askMesh, choiceField: choice } = await import('../shell/AskBox');
+      const a = await askMesh(`${name} is a mesh`, [choice('as', 'Bring it in', 'mesh', [{ value: 'mesh', label: 'as a 3D mesh (Import mesh)' }, { value: 'points', label: 'its vertices, as a point cloud' }])]);
+      if (a?.as === 'mesh') { await importMesh({ source, up: '-y' }); return; }
+      if (a?.as === 'points') {
+        try {
+          await engine.call('doc.execute', { command: 'pointcloud.link', args: { ...source, placement, asPoints: true } }, { timeoutMs: LONG_TIMEOUT_MS });
+          notify(`Linked ${name}'s vertices as a point cloud.`);
+        } catch (e2) { notify(e2 instanceof Error ? e2.message : String(e2)); }
+      }
+      return;
+    }
+    notify(msg);
+  }
+}

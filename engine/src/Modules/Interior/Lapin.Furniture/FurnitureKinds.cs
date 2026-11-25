@@ -1,0 +1,378 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Furniture;
+
+/// <summary>A parameter of a furniture kind, as the types dialog edits it: a length, a number, a choice or a switch.</summary>
+public sealed record KindParam(string Key, string Label, string Kind, double? Min = null, double? Max = null, string[]? Choices = null, string[]? Layouts = null);
+
+/// <summary>A common size a kind offers (indicative): a word on what it is (empty for a plain size; the interface adds its sizes) and the values it gives a type's spec.</summary>
+public sealed record KindSize(string Label, JsonObject Spec);
+
+/// <summary>
+/// A kind of furniture (docs/plan-furniture.md, Felurile): its key, label, group, IFC predefined type (USERDEFINED with
+/// its object type when IFC has none), the size a new type starts with, its own parameters with their first values and
+/// the material roles its body uses.
+/// </summary>
+public sealed record FurnitureKind(string Key, string Label, string Group, string Predefined, string? ObjectType,
+    double Width, double Depth, double Height, IReadOnlyList<KindParam> Params, JsonObject Defaults, IReadOnlyList<string> Roles)
+{
+    /// <summary>The IFC class its pieces are written as: IfcFurniture, a sanitary fixture's IfcSanitaryTerminal (forum topic #245).</summary>
+    public string IfcClass { get; init; } = FurnitureModule.Class;
+
+    /// <summary>The common sizes it offers, indicative (a manufacturer's are its own).</summary>
+    public IReadOnlyList<KindSize> Sizes { get; init; } = [];
+
+    public JsonObject ToJson() => new()
+    {
+        ["key"] = Key, ["label"] = Label, ["group"] = Group, ["predefined"] = Predefined, ["objectType"] = ObjectType,
+        ["width"] = Width, ["depth"] = Depth, ["height"] = Height,
+        ["params"] = new JsonArray([.. Params.Select(p => (JsonNode)new JsonObject
+        {
+            ["key"] = p.Key, ["label"] = p.Label, ["kind"] = p.Kind, ["min"] = p.Min, ["max"] = p.Max,
+            ["choices"] = p.Choices is { } c ? new JsonArray([.. c.Select(x => (JsonNode)x)]) : null,
+            ["layouts"] = p.Layouts is { } ly ? new JsonArray([.. ly.Select(x => (JsonNode)x)]) : null,
+        })]),
+        ["defaults"] = Defaults.DeepClone(),
+        ["roles"] = new JsonArray([.. Roles.Select(r => (JsonNode)r)]),
+        ["ifcClass"] = IfcClass,
+        ["sizes"] = new JsonArray([.. Sizes.Select(z => (JsonNode)new JsonObject { ["label"] = z.Label, ["spec"] = z.Spec.DeepClone() })]),
+        ["sizesIndicative"] = Sizes.Count > 0 ? true : null,
+    };
+}
+
+/// <summary>The kinds Lapin builds, and a type's spec read with its kind's defaults under it.</summary>
+public static class FurnitureKinds
+{
+    /// <summary>The material roles, with the material a new type takes for each and its colour.</summary>
+    public static readonly IReadOnlyDictionary<string, (string Material, string Color)> RoleDefaults = new Dictionary<string, (string, string)>
+    {
+        ["body"] = ("Oak veneer", "#b98b5a"),
+        ["upholstery"] = ("Upholstery fabric grey", "#8e9399"),
+        ["top"] = ("Oak solid wood", "#a87b4c"),
+        ["fronts"] = ("Lacquered MDF white", "#ece9e2"),
+        ["linen"] = ("Linen white", "#f2efe8"),
+        ["metal"] = ("Brushed steel", "#9ea4aa"),
+        ["glass"] = ("Black glass", "#202326"),
+        // A kitchen's plinth and handles (decision 472); a type without them takes its body's and its metal's.
+        ["plinth"] = ("Plinth anthracite", "#3c3f43"),
+        ["handles"] = ("Brushed steel", "#9ea4aa"),
+        // Casework's back panels and legs (decision 475).
+        ["back"] = ("HDF white", "#efece6"),
+        ["legs"] = ("Black powder-coated steel", "#2b2c2e"),
+        // The models' slots (decision 477): a second fabric (a rug's border, cushions), a lamp's shade, a plant and its pot.
+        ["accent"] = ("Fabric charcoal", "#4a4d52"),
+        ["shade"] = ("Lamp shade linen", "#f1e6c8"),
+        ["foliage"] = ("Plant foliage", "#5f8a4a"),
+        ["pot"] = ("Terracotta", "#b8673f"),
+        // Sanitary fixtures (forum topic #245): the ceramic, a WC's seat, the taps and fittings, a shower's glass, a sink's steel, a mirror.
+        ["ceramic"] = ("Sanitary ceramic white", "#f4f3ef"),
+        ["seat"] = ("Plastic white", "#f1f0ec"),
+        ["fittings"] = ("Chrome", "#c9ced3"),
+        ["screen"] = ("Clear glass", "#cfe3e8"),
+        ["steel"] = ("Stainless steel", "#b7bcc1"),
+        ["mirror"] = ("Mirror glass", "#dfe8ec"),
+    };
+
+    public static readonly string[] RoleOrder = ["body", "upholstery", "top", "fronts", "linen", "metal", "glass", "plinth", "handles", "back", "legs", "accent", "shade", "foliage", "pot", "ceramic", "seat", "fittings", "screen", "steel", "mirror"];
+
+    /// <summary>The colours of the materials the presets and styles name, when the project has not made them yet (indicative).</summary>
+    public static readonly IReadOnlyDictionary<string, string> MaterialColors = new Dictionary<string, string>
+    {
+        ["Walnut veneer"] = "#6b4a32", ["Lacquered MDF sage"] = "#9caf88", ["Lacquered MDF terracotta"] = "#c4704f", ["Lacquered MDF anthracite"] = "#3d4044",
+        ["White melamine"] = "#f3f2ee", ["Clear glass"] = "#cfe3e8", ["Brass"] = "#b5a06a",
+        // The models' colour variants (decision 477).
+        ["Linen beige"] = "#d8cbb3", ["Bouclé off-white"] = "#ece6da", ["Velvet sage"] = "#8fa58a", ["Velvet terracotta"] = "#b5644a",
+        ["Velvet navy"] = "#2f3d5c", ["Leather cognac"] = "#8a4f2a", ["Black-stained ash"] = "#2a2826", ["Marble white"] = "#eceae6",
+        ["Opal glass"] = "#f4f4f0", ["Olive foliage"] = "#7d8a5a", ["Concrete grey"] = "#a3a29d", ["Ceramic white"] = "#f2f0ea",
+    };
+
+    /// <summary>The colour a material of that name starts with: a role's default's, a preset's, else none (the project picks one).</summary>
+    public static string? ColorOf(string name) =>
+        RoleDefaults.Values.FirstOrDefault(v => v.Material == name).Color ?? MaterialColors.GetValueOrDefault(name);
+
+    /// <summary>The IFC predefined type and object type of a type of the spec: its kind's, a casework's its preset's.</summary>
+    public static (string Predefined, string? ObjectType) IfcOf(Spec s) => s.Kind.Key switch
+    {
+        Casework.Key => Casework.Ifc(s),
+        // A sanitary fixture's own (forum topic #245); an accessory USERDEFINED by its item („Grab bar”).
+        _ when Sanitary.Is(s.Kind) => Sanitary.Ifc(s),
+        // A model's own: a sofa SOFA, a chair CHAIR, a lamp USERDEFINED „Floor lamp” (decision 477).
+        FurnitureModels.Key => FurnitureModels.Of(s) is var m ? (m.Predefined, m.Predefined == "USERDEFINED" ? m.ObjectType ?? m.Name : null) : default,
+        _ => (s.Kind.Predefined, s.Kind.ObjectType),
+    };
+
+    /// <summary>Whether a type's IFC type follows its spec (a casework's preset, a model): changed, its pieces are retyped.</summary>
+    public static bool Retypes(FurnitureKind k) => k.Key is Casework.Key or FurnitureModels.Key or Sanitary.AccessoryKey;
+
+    /// <summary>The IFC class a type of the spec's pieces are written as (forum topic #245): its kind's.</summary>
+    public static string ClassOf(Spec s) => s.Kind.IfcClass;
+
+    static KindParam L(string k, string l, double min = 0, double max = 3) => new(k, l, "length", min, max);
+    static KindParam N(string k, string l, double min, double max) => new(k, l, "number", min, max);
+    static KindParam C(string k, string l, params string[] c) => new(k, l, "choice", Choices: c);
+    /// <summary>A parameter shown (and used) for some of the kitchen's layouts only.</summary>
+    static KindParam In(KindParam p, params string[] layouts) => p with { Layouts = layouts };
+    static KindParam B(string k, string l) => new(k, l, "bool");
+    static JsonObject D(params (string Key, JsonNode? Value)[] v) { var o = new JsonObject(); foreach (var (k, x) in v) o[k] = x; return o; }
+
+    static readonly KindParam[] SofaParams =
+    [
+        N("seats", "Seats", 1, 6), C("arms", "Arms", "both", "left", "right", "none"), L("armWidth", "Arm width", 0.05, 0.4),
+        L("seatHeight", "Seat height", 0.3, 0.6), C("chaise", "Chaise longue", "none", "left", "right"),
+        L("chaiseLength", "Chaise length", 0.4, 1.6), B("legs", "Legs"),
+    ];
+
+    public static readonly IReadOnlyList<FurnitureKind> All =
+    [
+        new("sofa", "Sofa", "Seating", "SOFA", null, 2.2, 0.95, 0.82, SofaParams,
+            D(("seats", 3), ("arms", "both"), ("armWidth", 0.18), ("seatHeight", 0.43), ("chaise", "none"), ("chaiseLength", 0.75), ("legs", true)),
+            ["upholstery", "metal"]),
+        new("cornerSofa", "Corner sofa", "Seating", "SOFA", null, 2.7, 0.95, 0.82,
+        [
+            C("corner", "Corner on the", "left", "right"), L("cornerLength", "Length of the corner side", 1.2, 3.5), N("seats", "Seats on the long side", 1, 6),
+            C("arms", "Arms", "both", "left", "right", "none"), L("armWidth", "Arm width", 0.05, 0.4), L("seatHeight", "Seat height", 0.3, 0.6),
+            B("legs", "Legs"),
+        ],
+            D(("corner", "left"), ("cornerLength", 1.9), ("seats", 2), ("arms", "both"), ("armWidth", 0.15), ("seatHeight", 0.43), ("legs", true)),
+            ["upholstery", "metal"]),
+        new("armchair", "Armchair", "Seating", "CHAIR", null, 0.85, 0.85, 0.85,
+            [L("armWidth", "Arm width", 0.05, 0.4), L("seatHeight", "Seat height", 0.3, 0.6), B("legs", "Legs")],
+            D(("armWidth", 0.17), ("seatHeight", 0.42), ("legs", true)),
+            ["upholstery", "metal"]),
+        new("chair", "Chair", "Seating", "CHAIR", null, 0.45, 0.52, 0.85,
+            [L("seatHeight", "Seat height", 0.3, 0.8), B("arms", "Arms"), B("upholstered", "Upholstered seat")],
+            D(("seatHeight", 0.46), ("arms", false), ("upholstered", true)),
+            ["body", "upholstery"]),
+        new("bed", "Bed", "Beds", "BED", null, 1.6, 2.05, 0.95,
+        [
+            L("mattressHeight", "Top of the mattress", 0.3, 0.8), B("headboard", "Headboard (as high as the bed)"), B("footboard", "Footboard"),
+            N("pillows", "Pillows", 0, 4), B("duvet", "Duvet turned down"),
+        ],
+            D(("mattressHeight", 0.5), ("headboard", true), ("footboard", false), ("pillows", 2), ("duvet", true)),
+            ["body", "upholstery", "linen"]),
+        new("bedside", "Bedside table", "Beds", "USERDEFINED", "Bedside table", 0.45, 0.4, 0.5,
+            [N("drawers", "Drawers", 0, 4), B("legs", "Legs")],
+            D(("drawers", 2), ("legs", true)),
+            ["body", "fronts", "metal"]),
+        new("wardrobe", "Wardrobe", "Storage", "USERDEFINED", "Wardrobe", 2.0, 0.6, 2.3,
+            [N("doors", "Doors", 1, 8), C("opening", "Doors", "hinged", "sliding"), N("drawers", "Drawers at the bottom", 0, 4), L("plinth", "Plinth", 0, 0.2)],
+            D(("doors", 3), ("opening", "hinged"), ("drawers", 0), ("plinth", 0.08)),
+            ["body", "fronts", "metal"]),
+        new("chest", "Chest of drawers", "Storage", "USERDEFINED", "Chest of drawers", 1.0, 0.48, 0.85,
+            [N("rows", "Rows of drawers", 1, 8), N("columns", "Columns", 1, 4), B("legs", "Legs")],
+            D(("rows", 4), ("columns", 1), ("legs", false)),
+            ["body", "fronts", "metal"]),
+        new("bookcase", "Bookcase", "Storage", "SHELF", null, 1.0, 0.35, 2.0,
+            [N("shelves", "Shelves", 1, 10), L("doorsHeight", "Doors at the bottom, as high as", 0, 1.5)],
+            D(("shelves", 5), ("doorsHeight", 0.0)),
+            ["body", "fronts", "metal"]),
+        new("sideboard", "Sideboard", "Storage", "USERDEFINED", "Sideboard", 1.8, 0.45, 0.75,
+            [N("doors", "Doors", 0, 6), N("drawers", "Drawers on top", 0, 6), B("legs", "Legs")],
+            D(("doors", 3), ("drawers", 3), ("legs", true)),
+            ["body", "fronts", "metal"]),
+        new("table", "Table", "Tables", "TABLE", null, 1.6, 0.9, 0.75,
+            [C("shape", "Shape", "rectangular", "round", "oval"), C("base", "Legs", "four", "pedestal"), L("topThickness", "Top thickness", 0.015, 0.1)],
+            D(("shape", "rectangular"), ("base", "four"), ("topThickness", 0.03)),
+            ["top", "metal"]),
+        new("coffeeTable", "Coffee table", "Tables", "TABLE", null, 1.1, 0.6, 0.42,
+            [C("shape", "Shape", "rectangular", "round", "oval"), B("shelf", "Shelf under the top")],
+            D(("shape", "rectangular"), ("shelf", true)),
+            ["top", "metal"]),
+        new("desk", "Desk", "Tables", "DESK", null, 1.4, 0.7, 0.75,
+            [C("pedestal", "Drawer pedestal", "none", "left", "right"), N("drawers", "Drawers", 1, 5)],
+            D(("pedestal", "right"), ("drawers", 3)),
+            ["top", "fronts", "metal"]),
+        new("kitchen", "Kitchen", "Kitchen", "USERDEFINED", "Kitchen", 3.0, 0.6, 0.9,
+        [
+            C("layout", "Layout", KitchenLayouts.Keys),
+            L("worktop", "Worktop thickness", 0.01, 0.08), L("plinth", "Plinth", 0, 0.2), L("unit", "Base unit width", 0.3, 1.2),
+            In(C("corner", "Corner on the", "left", "right"), "l-shaped", "peninsula"),
+            In(L("leg", "Leg length from the back wall", 1.2, 6), "l-shaped", "u-shaped", "peninsula"),
+            In(L("leg2", "Second leg length", 1.2, 6), "u-shaped"),
+            In(L("gap", "Aisle between the runs", 0.8, 3), "galley", "island"),
+            In(L("secondRun", "Opposite run length (0: as long as the first)", 0, 12), "galley"),
+            In(L("islandLength", "Island length", 0.6, 6), "island"),
+            In(L("islandDepth", "Island depth", 0.6, 1.6), "island"),
+            In(N("islandAt", "Island at (0–1 along)", 0, 1), "island"),
+            In(L("peninsula", "Peninsula length", 0.6, 4), "peninsula"),
+            In(L("overhang", "Worktop overhang for stools", 0, 0.5), "peninsula"),
+            C("sinkOn", "Sink on", "run", "other"), N("sinkAt", "Sink at (0–1 along)", 0, 1),
+            C("hobOn", "Hob on", "run", "other"), N("hobAt", "Hob at (0–1 along)", 0, 1), B("wallUnits", "Wall units"),
+            L("wallFrom", "Wall units from", 1.2, 1.8), L("wallHeight", "Wall unit height", 0.3, 1.2), L("wallDepth", "Wall unit depth", 0.2, 0.5),
+            C("tall", "Tall unit (fridge)", "none", "left", "right"),
+            In(B("islandHood", "Hood over the hob there"), "island", "peninsula"),
+        ],
+            D(("layout", "one-wall"), ("worktop", 0.04), ("plinth", 0.1), ("unit", 0.6), ("corner", "left"), ("leg", 2.4), ("leg2", 2.4), ("gap", 1.2), ("secondRun", 0.0),
+              ("islandLength", 1.8), ("islandDepth", 0.9), ("islandAt", 0.5), ("peninsula", 1.2), ("overhang", 0.3), ("sinkOn", "run"), ("sinkAt", 0.3), ("hobOn", "run"), ("hobAt", 0.72),
+              ("wallUnits", true), ("wallFrom", 1.45), ("wallHeight", 0.72), ("wallDepth", 0.35), ("tall", "right"), ("islandHood", false)),
+            ["body", "fronts", "top", "plinth", "handles", "metal", "glass"]),
+        // Casework (decision 475): carcasses of boards, configured; its presets start a type (Casework.Presets).
+        new(Casework.Key, "Casework", "Casework", "USERDEFINED", "Casework", 1.8, 0.45, 0.8,
+        [
+            C("preset", "Preset", Casework.PresetKeys), C("form", "Form", "cabinet", "bed"),
+            L("carcassBoard", "Carcass boards", 0.008, 0.04), L("backBoard", "Back panel", 0.003, 0.025), L("shelfBoard", "Shelves", 0.012, 0.04), L("frontBoard", "Fronts", 0.012, 0.03),
+            C("topOn", "Top and bottom", "between", "over"), C("back", "Back", "inset", "overlay"),
+            C("base", "Base", "plinth", "legs", "floating", "none"), L("plinthHeight", "Plinth height", 0.03, 0.2), L("plinthRecess", "Plinth set back", 0, 0.1),
+            C("legs", "Legs", "metal", "tapered", "sled"), L("legHeight", "Leg height", 0.05, 0.5), L("mount", "Hung at (its underside)", 0, 2.4),
+            C("top", "Top", "none", "overhang", "worktop"), L("topThickness", "Top thickness", 0.012, 0.06), L("overhang", "Overhang", 0, 0.1), B("basin", "Basin cut-out in the top"),
+            C("handles", "Handles", "none", "jprofile", "bar", "knob", "edge"), C("frontStyle", "Front style", "slab", "framed", "fluted"),
+            N("sliding", "Sliding doors across it (0: none)", 0, 6),
+            L("mattressHeight", "Top of the mattress", 0.25, 0.8), N("bedDrawers", "Drawers under it, each side", 0, 4), C("drawersOn", "Drawers on", "both", "left", "right"),
+        ],
+            D(("preset", "sideboard"), ("form", "cabinet"), ("carcassBoard", 0.018), ("backBoard", 0.008), ("shelfBoard", 0.018), ("frontBoard", 0.018), ("topOn", "between"), ("back", "inset"),
+              ("base", "legs"), ("plinthHeight", 0.1), ("plinthRecess", 0.05), ("legs", "tapered"), ("legHeight", 0.18), ("mount", 0.3), ("top", "overhang"), ("topThickness", 0.025),
+              ("overhang", 0.01), ("basin", false), ("handles", "bar"), ("frontStyle", "slab"), ("sliding", 0), ("mattressHeight", 0.5), ("bedDrawers", 0), ("drawersOn", "both"),
+              (Casework.CarcassesKey, Casework.DefaultCarcasses())),
+            ["body", "fronts", "top", "back", "plinth", "legs", "handles", "glass", "metal", "linen"]),
+        // From a model (decision 477): a CC0 mesh stretched by its zones to the type's size; its roles are its model's.
+        new(FurnitureModels.Key, "From a model", "Models", FurnitureModels.All[0].Predefined, null,
+            FurnitureModels.All[0].Size[0], FurnitureModels.All[0].Size[1], FurnitureModels.All[0].Size[2],
+            [C("model", "Model", [.. FurnitureModels.All.Select(m => m.Id)]), L("mount", "Hung at (its underside)", 0, 3)],
+            D(("model", FurnitureModels.All[0].Id), ("mount", FurnitureModels.All[0].Mount)),
+            FurnitureModels.Roles),
+        // Sanitary fixtures (forum topic #245): IfcSanitaryTerminal, the accessories IfcFurniture.
+        .. Sanitary.Kinds,
+    ];
+
+    public static FurnitureKind? Find(string? key) => All.FirstOrDefault(k => k.Key == key);
+
+    /// <summary>A new type's spec: the kind's size and defaults, its materials, under what was given.</summary>
+    public static JsonObject NewSpec(FurnitureKind k, JsonObject? given)
+    {
+        var s = new JsonObject { ["kind"] = k.Key, ["width"] = k.Width, ["depth"] = k.Depth, ["height"] = k.Height };
+        foreach (var (key, v) in k.Defaults) s[key] = v?.DeepClone();
+        // A type of a model starts at its model's size, with materials for its model's roles only.
+        if (k.Key == FurnitureModels.Key) StartModel(s, FurnitureModels.Find((string?)given?["model"]) ?? FurnitureModels.All[0], given);
+        s["materials"] = new JsonObject([.. FurnitureModels.RolesOf(new Spec(s)).Select(r => new KeyValuePair<string, JsonNode?>(r, RoleDefaults[r].Material))]);
+        if (given != null) Merge(s, given, k);
+        return s;
+    }
+
+    /// <summary>
+    /// Values given merged into a spec, each checked against its kind: lengths and numbers within their range, choices
+    /// among their choices, switches true or false; null takes the default again; materials merged by role.
+    /// </summary>
+    public static void Merge(JsonObject spec, JsonObject given, FurnitureKind k)
+    {
+        // A type of a model (decision 477): a new model first (its size, its hanging height, materials for its roles),
+        // then the sizes asked kept between its least and most.
+        var model = k.Key == FurnitureModels.Key;
+        if (model && given["model"] is { } mv)
+        {
+            var id = (string?)mv;
+            var m = FurnitureModels.Find(id) ?? throw new CommandException($"There is no furniture model „{id}”.");
+            if ((string?)spec["model"] != m.Id) StartModel(spec, m, given);
+        }
+        // An accessory of another item (forum topic #245): the item's size and height first, then what was given.
+        if (k.Key == Sanitary.AccessoryKey) Sanitary.StartItem(spec, given);
+        foreach (var (key, v) in given)
+        {
+            if (key is "kind" or "model" && model) continue;
+            if (key == "kind") continue;
+            if (model && key is "width" or "depth" or "height")
+            {
+                var d = Json.Number(v) ?? throw new CommandException($"The {key} is a length in metres.");
+                var axis = key == "width" ? 0 : key == "depth" ? 1 : 2;
+                spec[key] = Math.Round(FurnitureModels.Of(new Spec(spec)).Clamp(axis, d), 6);
+                continue;
+            }
+            if (key == "materials")
+            {
+                var mats = spec["materials"] as JsonObject ?? [];
+                if (v is JsonObject g)
+                    foreach (var (role, name) in g)
+                    {
+                        if (!RoleDefaults.ContainsKey(role)) throw new CommandException($"„{role}” is not a material role: {string.Join(", ", RoleOrder)}.");
+                        if (name is null || (string?)name is not { Length: > 0 } n) mats[role] = RoleDefaults[role].Material; else mats[role] = n.Trim();
+                    }
+                spec["materials"] = mats;
+                continue;
+            }
+            // Its plan drawn by a symbol of the user's (docs/plan-user-extensibility.md §3.5), any kind; null or "": the body seen from above.
+            if (key == "planSymbol")
+            {
+                if ((string?)v is { Length: > 0 } sym) spec[key] = sym.Trim(); else spec.Remove(key);
+                continue;
+            }
+            // A kitchen's own units, along its main run and above it (decision 472): each checked; null or [] goes back to the even split.
+            if (key is KitchenUnits.BaseKey or KitchenUnits.UpperKey)
+            {
+                if (k.Key != "kitchen") throw new CommandException($"A {k.Label.ToLowerInvariant()} has no „{key}”.");
+                var list = KitchenUnits.Normalise(v, key == KitchenUnits.UpperKey);
+                if (list.Count == 0) spec.Remove(key); else spec[key] = list;
+                continue;
+            }
+            // A casework piece's carcasses (decision 475): each checked; null or [] goes back to the kind's three.
+            if (key == Casework.CarcassesKey)
+            {
+                if (k.Key != Casework.Key) throw new CommandException($"A {k.Label.ToLowerInvariant()} has no „{key}”.");
+                var list = Casework.Normalise(v);
+                spec[key] = list.Count == 0 ? Casework.DefaultCarcasses() : list;
+                continue;
+            }
+            if (key is "width" or "depth" or "height")
+            {
+                var d = Json.Number(v) ?? throw new CommandException($"The {key} is a length in metres.");
+                // A towel rail is 50 mm high, a mirror 20 mm deep (forum topic #245).
+                var least = Sanitary.Is(k) ? 0.01 : 0.1;
+                if (!(d >= least && d <= 12)) throw new CommandException($"A piece of furniture's {key} is between {least * 1000:0} mm and 12 m.");
+                spec[key] = d;
+                continue;
+            }
+            var p = k.Params.FirstOrDefault(x => x.Key == key) ?? throw new CommandException($"A {k.Label.ToLowerInvariant()} has no „{key}”.");
+            if (v == null) { spec[key] = k.Defaults[key]?.DeepClone(); continue; }
+            switch (p.Kind)
+            {
+                case "length" or "number":
+                    var n = Json.Number(v) ?? throw new CommandException($"{p.Label} is a number.");
+                    if (p.Min is { } lo && n < lo - 1e-9 || p.Max is { } hi && n > hi + 1e-9)
+                        throw new CommandException($"{p.Label} is between {F(p.Min)} and {F(p.Max)}.");
+                    spec[key] = p.Kind == "number" && p.Max > 1 ? Math.Round(n) : n;
+                    break;
+                case "choice":
+                    var c = (string?)v;
+                    spec[key] = c != null && p.Choices!.Contains(c) ? c : throw new CommandException($"{p.Label}: one of {string.Join(", ", p.Choices!)}.");
+                    break;
+                case "bool":
+                    spec[key] = v is JsonValue bv && bv.TryGetValue<bool>(out var b) ? b : throw new CommandException($"{p.Label} is on or off.");
+                    break;
+            }
+        }
+    }
+
+    /// <summary>A spec set to a model: its size and hanging height (unless given), its id, materials for its roles it had none for.</summary>
+    static void StartModel(JsonObject spec, FurnitureModel m, JsonObject? given)
+    {
+        spec["model"] = m.Id;
+        string[] keys = ["width", "depth", "height"];
+        for (var k = 0; k < 3; k++) if (given?[keys[k]] == null) spec[keys[k]] = m.Size[k];
+        if (given?["mount"] == null) spec["mount"] = m.Mount;
+        if (spec["materials"] is JsonObject mats)
+            foreach (var r in m.Roles) if (mats[r] == null) mats[r] = RoleDefaults[r].Material;
+    }
+
+    static string F(double? v) => v?.ToString("0.###", CultureInfo.InvariantCulture) ?? "";
+
+    public static JsonArray Catalog() => new([.. All.Select(k => (JsonNode)k.ToJson())]);
+}
+
+/// <summary>A type's spec read with its kind's defaults under it.</summary>
+public sealed class Spec(JsonObject? o)
+{
+    readonly JsonObject s = o ?? [];
+    public FurnitureKind Kind => FurnitureKinds.Find(s["kind"] is JsonValue k && k.TryGetValue<string>(out var key) ? key : null) ?? FurnitureKinds.All[0];
+    public double W => Num("width", Kind.Width);
+    public double D => Num("depth", Kind.Depth);
+    public double H => Num("height", Kind.Height);
+    public double Num(string key, double fallback) => Json.Number(s[key]) ?? Json.Number(Kind.Defaults[key]) ?? fallback;
+    public int Int(string key, int fallback) => (int)Math.Round(Num(key, fallback));
+    public string Str(string key, string fallback = "") => s[key] is JsonValue v && v.TryGetValue<string>(out var t) ? t : Kind.Defaults[key] is JsonValue d && d.TryGetValue<string>(out var dt) ? dt : fallback;
+    public bool Bool(string key) => s[key] is JsonValue v && v.TryGetValue<bool>(out var b) ? b : Kind.Defaults[key] is JsonValue d && d.TryGetValue<bool>(out var db) && db;
+    /// <summary>Whether the spec names a material for the role itself (a kitchen made before decision 472 has none for its plinth and handles).</summary>
+    public bool HasMaterial(string role) => (s["materials"] as JsonObject)?[role] is JsonValue v && v.TryGetValue<string>(out var n) && n.Length > 0;
+    public JsonArray? List(string key) => s[key] as JsonArray;
+    public string MaterialName(string role) => (s["materials"] as JsonObject)?[role] is JsonValue v && v.TryGetValue<string>(out var n) && n.Length > 0 ? n : FurnitureKinds.RoleDefaults[role].Material;
+}

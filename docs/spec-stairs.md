@@ -1,0 +1,154 @@
+# Scări și rampe: configuratorul
+
+Lapin are azi un buton „Stair” care nu face nimic și o clasă Studio `IfcStair` pentru solide libere. Acest document propune sistemul de scări și rampe: cum se configurează, ce tipuri vin gata făcute, ce primește arhitectul și ce primește inginerul din același element, și ce întrebări trebuie lămurite înainte de implementare (marcate **[Î1]** … **[Î10]**; **toate decise la 25.10.2026**, în `decisions-pending.md`, #120: două seturi de reguli, locuință și public, alese pe tip; etapa 1 cu formele dreaptă, cu podest, L și U, cu podest sau **balansate**; beton monolit întâi; în `architecture`; golul și balustrada propuse și legate automat, cu posibilitatea de a le scoate; plasarea prin formă, picior, direcție și partea întoarcerii; Studio își păstrează scara liberă; rampele, cotele și finisajele cum au fost propuse).
+
+Modelul e cel al tâmplăriei, care merge deja: un **tip** (`IfcStairType`, `IfcRampType`) ține regulile și construcția, editate într-un configurator cu previzualizare; o **instanță** (`IfcStair`, `IfcRamp`) ține plasarea, cotele și traseul, editate în plan cu grips. Tot ce iese (corpul 3D, piesele structurale, simbolul din plan, cotele, extrasul, IFC-ul) se deduce din cele două.
+
+## Așa s-a făcut (etapa 1, 25.10.2026)
+
+- Cod: `engine/src/Modules/Architecture/Lapin.Architecture/Stairs/` (`StairSpec`, `StairSolver`, `StairBuilder`, `StairsModule`), teste `StairTests`; interfața în `ui/src/modules/architecture/StairTypesDialog.tsx` și `StairSection.tsx`, comanda CAD `STAIR` (și unealta „Stair”, scurtătura ST).
+- Comenzi: `architecture.createStairType`, `updateStairType`, `addStair {storeyId, typeId?, x, y, x2, y2 | rotation, turn?, width?…}`, `updateStair`; interogări `stairPreview`, `stairPlan`, `stairCheck`.
+- Instanța ține `at`, `rotation` (grade, ca stâlpii, deci mutarea și rotirea din plan o poartă), `turn`, decalajele, `topStoreyId`, `height` (fără etaj deasupra) și ce fixează.
+- Golul din placa de sus e un `IfcOpeningElement` cu `stairId`; conturul lui **se citește din scară la fiecare construire** (`Slabs.HoleContour`), deci urmează scara și la mutare; ștergerea scării îl ia cu ea (`IDeletion` pentru elemente existente, în `element.delete`).
+- Planul desena **scara întreagă**, de la picior la vârf, oricare ar fi cota de tăiere a vederii (decis 25.10.2026); raportul testerului #143 (12.11.2026) a cerut tăietura standard, vezi „Planul tăiat” mai jos. Configuratorul arată planul și o secțiune de-a lungul primei rampe **desenate de generatorul 2D** (`architecture.stairDrawing`: scara într-o sesiune proprie, cu o placă deasupra, randată ca vedere), cu hașurile materialelor și grosimile de linie.
+- Treptele balansate au intradosul în trepte (prisme pe fiecare treaptă), nu o suprafață lină; rampele drepte au vangul înclinat corect.
+- Studio nu mai deține `IfcStair`: scara lui liberă e un proxy exportat ca `IfcStair`.
+- Rămase pentru etapele următoare: partea de deasupra tăieturii pe planul etajului de sus („COBOARĂ”), cota automată „n × h / b”, înălțimea liberă verificată sub placă, rampele, oțelul și lemnul, extrasul.
+
+## Planul tăiat (raportul #143, 12.11.2026)
+
+Testerul (0.1.814, Windows) a cerut ca planul să taie scara la planul de secționare, cu simbolul standard, iar numerele treptelor să nu stea pe linia de pas. Făcut:
+
+- **Unde:** `Stairs/StairPlan.cs` dă simbolul în sistemul scării pentru o cotă de tăiere dată (deasupra piciorului scării); `StairMarks.Marks` (în `StairBuilder.cs`) îl desenează în fiecare plan, ca marcaje ale motorului, cu cota de tăiere a vederii (`Views.Range(...).Cut`), deci ecranul, planșele și PDF-ul arată la fel. Liniile de plan ale elementului (`ElementGeometry.Plan`) rămân scara întreagă, de fel `outline`: după ele se alege și se agață scara, iar desenul vederii nu le mai desenează.
+- **Tăietura:** pe o rampă pe care o traversează tăietura, linia de întrerupere trece prin punctul liniei de pas unde linia nasurilor ajunge la cota tăieturii, oblică la 30° față de perpendiculara pe rampă (deci la 60° față de rampă), de la o latură la alta, ținută în rampă; liniile rampei (contratreptele, laturile) sunt tăiate de ea: dinspre picior văzute, dincolo cu stilul liniilor de deasupra tăieturii (`overhead`: întrerupt, gri, sau cum spun stilurile obiectelor și Visibility / Graphics pentru scări). Podestele și treptele balansate (și treptele scărilor curbe și în spirală) se clasează după cota lor, latură cu latură, o latură comună desenată o dată (văzută dacă una din ele e sub tăietură). Când tăietura nu cade într-o rampă (pe trepte balansate, pe o spirală, la prima contratreaptă a unei rampe), linia de întrerupere traversează drept linia de pas acolo (radial pe spirală). O scară toată sub tăietură se desenează întreagă, ca înainte; una toată deasupra, toată întreruptă.
+- **Linia de pas** continuă până sus, văzută până la tăietură, întreruptă după ea, cu săgeata sus; o scară bifurcată are câte una pe rampă.
+- **Tipul alege** (`StairPlanSymbols`, fila Shape → In plan): `AboveCut` `dashed` (implicit), `hidden` (nimic deasupra, săgeata la linia de întrerupere, numerele de deasupra lipsesc) sau `whole` (scara întreagă, fără tăietură, ca înainte); `Break` `zigzag` (implicit, zigzagul pe latura liberă de numere) sau `double` (două linii paralele).
+- **Numerele treptelor** stau lângă linia de pas, cu cercul la o distanță de ea (1 mm pe hârtie): pe dreapta la urcare pe o scară dreaptă, pe partea exterioară a întoarcerii la L și U, spre exterior pe spirale și scări curbe, departe de mijloc pe rampele laterale ale scării bifurcate; cercul încape în jumătatea rampei (`StairMarks.NumberSize`, `NumberSpots`).
+- Teste: `StairPlanCutTests` (linia de întrerupere la stația bună și contratreptele de deasupra întrerupte; scara sub tăietură neschimbată; formele L, U, balansate, spirală, curbă, bifurcată la cinci cote; numerele niciodată pe linia de pas; desenul vederii).
+- Rămase: partea care coboară pe planul etajului de sus („COBOARĂ”, nedesenată încă); rampele (`RampMarks`) desenează încă tronsoanele întregi.
+
+## Scara în U fără gol și balustradele una câte una (forumul, subiectele 104 și 102, 15.11.2026; deciziile 592 și 593)
+
+Enrique (arhitect, ArchiCAD) a desenat cum trebuie să arate o scară de beton în U fără gol (două rampe și un podest la jumătate). Făcut:
+
+- **Mâna curentă** (`StairBuilder.RailingPaths`): înălțimea h a balustradei se măsoară pe verticală de la linia nasurilor până la axa mâinii curente (convenția tuturor balustradelor Lapin: montanții ajung la h, bara e centrată pe h), paralel cu panta. Jos începe cu ½ treaptă înaintea primului nas, tot pe pantă (h/2 peste pardoseală), și coboară acolo pe montantul ei; sus se termină cu ½ treaptă după ultimul nas, orizontal la h peste pardoseală. La un podest (`LandingTurn`): de la ultimul nas al rampei, orizontal la h peste podest, pe marginea podestului în jurul întoarcerii (U, L) sau drept peste gol (interiorul unui U), până la ½ treaptă înaintea primului nas al rampei următoare (mai puțin unde colțul vine mai devreme: interiorul unui L), unde urcă vertical h/2 pe linia ei de pantă. Fără goluri: fiecare bară se prelungește cu o jumătate din grosimea ei peste o îmbinare (`Railings.Bars`), iar treptele verticale au bara lor. **Continuă dincolo de capete** coboară întâi la h peste pardoseală, apoi merge orizontal.
+- **Placa continuă** (`StairBuilder.FlightProfile`, `LandingAbove`, `LandingBelow`): rampa care intră într-un podest își continuă intradosul sub el până îl întâlnește pe al podestului (la (n·h − t + w_v)·b/h de la prima contratreaptă; cu placa și podestul implicite, la o treaptă și 4 cm de marginea podestului), deci rampa ia pana de sub podest; rampa care pleacă din podest coboară sub primele trepte până la intradosul podestului, lipită de muchia lui. Fără crestătură, fără treaptă, fără volum în două piese (testat prin raze și eșantionare). Un podest mai gros decât placa rampei măsurată pe verticală își arată muchia sub rampa care pleacă (rar; nimic nu se suprapune).
+- **Fundația separată** (`StairConstruction.FootingDepth`, `FootingWidth`): opțional, o fâșie sub prima treaptă, la fața primei contratrepte, sub pardoseală; partea `footing`, IfcFooting STRIP_FOOTING, numărată la beton.
+- **Balustradele una câte una** (decizia 593): rămân piese ale scării, selectate ca `stairId#railing:left|right` (ca axele unui caroiaj). Setările fiecărei părți stau pe scară în `railings.left|right` (`kind` balustrade/handrail, `height`, `style`, `profile`; lipsă: ale tipului), schimbate de `architecture.updateStairRailing` (și `on`: pune sau scoate partea); `element.delete` pe id-ul balustradei o scoate din `railingSides` (`StairDeletion`). Planul desenează fiecare balustradă ca marcaj propriu (`StairMarks`), un clic în plan sau în 3D o selectează (`subSelectionPick`, `subSelectionPanels` în contractul modulelor UI), panoul ei e `StairRailingPanel`. În IFC: un IfcRailing al scării (BALUSTRADE, sau HANDRAIL pe perete), cu setul `Lapin_StairRailing` (Side, Kind, Height), GlobalId-ul derivat din scară și cheia piesei, deci stabil la reconstruire.
+- Teste: `StairDogLegTests` (intradosurile, suprapunerea, volumul, linia mâinii curente punct cu punct, bara fără goluri la 5 mm, montantul de jos, fundația, selecția, ștergerea, IFC și GlobalId-urile); `StairTests` actualizat pentru montanții noi de la capete.
+
+## Scara din schiță (cerută de utilizatori, 19.11.2026; decizia 694)
+
+Ca „stair by sketch” din Revit: scara se desenează, nu se alege dintr-o formă. Architecture → Circulation → **Stair by sketch** (comanda `STAIRSKETCH`, `STS`) deschide o planșetă de schiță (un plan propriu al etajului, `studio.editStairSketch`), unde se desenează cu uneltele din Desen linii de trei roluri:
+
+- **Boundary** (verde): cele două laturi ale scării, fiecare una sau mai multe linii și arce cap la cap; o linie fără rol contează ca latură.
+- **Riser**: fiecare contratreaptă, de la o latură la cealaltă (o linie, un arc sau o polilinie; trasă până la 5 cm de latură o atinge). Fără contratrepte desenate, cele ale regulilor se împart egal de-a lungul liniei de la mijlocul laturilor.
+- **Path**: spune doar încotro urcă scara, de la capătul mai apropiat de începutul ei; „Climbs the other way” o întoarce.
+
+n contratrepte desenate = n contratrepte de H / n; fiecare treaptă e forma dintre două contratrepte și cele două laturi, la cota ei (n − 1 trepte, ultima contratreaptă urcă pe placa de sus). O treaptă mai adâncă de max(0,5 m, 1,5 × treapta maximă a regulilor) e podest. Laturile curbe dau trepte balansate. Panoul planșetei arată, pe măsură ce se desenează, contratreptele desenate față de cele cerute de înălțime, h, b, lățimea și podestele, sau ce e greșit (`studio.stairSketchCheck`).
+
+**Termină schița** (`studio.finishStairSketch`, un pas de anulare) face scara (`architecture.addSketchStair`) sau o redesenează (`architecture.updateStairSketch`, id-ul și GlobalId-ul păstrate); o schiță care nu dă o scară e refuzată, cu motivul, și planșeta rămâne deschisă. Scara ține schița în sistemul ei (`sketch`: laturile, contratreptele, linia de urcare, ca bucăți `[ax, ay, bx, by, rise]`, piciorul la origine, urcând pe +X), deci mutarea și rotirea o poartă; e intenție de proiectare și merge în IFC cu celelalte atribute (`IfcStair` NOTDEFINED). Clic dreapta → Edit sketch, sau în inspector „Edit sketch” și „Use the type's shape” (scoate schița).
+
+În motor (`Stairs/StairSketch.cs`) scara din schiță e un `Resolved` ca oricare: treptele ca trepte balansate (conturul și cota fiecăreia), podestele ca podeste, plus `SketchRun` (contratreptele de la stânga la dreapta, laturile, linia de mers prin mijlocul contratreptelor). Corpul (prisme în trepte), simbolul din plan tăiat la planul de secționare, numerele treptelor, balustradele (pe fiecare latură, paralele cu panta peste trepte, orizontale peste podeste), golul din placa de sus, cantitățile și IFC-ul sunt cele ale tuturor scărilor. Teste: `StairSketchTests` (9), `stairSketchBoard.test.ts`.
+
+Rămase: grips pe laturi și contratrepte direct în plan (acum: Edit sketch), rampele din schiță, placa continuă (intradosul) sub treptele din schiță (acum în trepte, ca la treptele balansate), contratreptele generate perpendicular pe linia de urcare desenată (acum: între punctele egale ale laturilor).
+
+## Principii
+
+1. **Se pleacă de la ce știe utilizatorul:** de unde pleacă scara, până unde urcă și cât loc are. Motorul propune contratreapta, treapta și numărul de trepte după normă; utilizatorul corectează doar ce vrea.
+2. **Norma e vizibilă, nu ascunsă.** Fiecare valoare care are o limită (contratreaptă, treaptă, 2h+b, lățime, înălțime liberă, trepte pe rampă, panta rampei) se arată cu limita ei și se colorează când o depășește. Nimic nu e refuzat: se semnalează.
+3. **Un element, două citiri.** Același `IfcStair` dă arhitectului finisajele, balustrada și simbolul din plan, iar inginerului placa (vangul), grinzile de reazem, podestele și cantitățile de beton, cofraj, oțel sau lemn. Diferența e în ce părți vede fiecare și în ce tabele intră.
+4. **Tipuri gata făcute, puține și bune.** Câteva forme, câteva construcții, cu valori normale pentru o locuință din România. Un tip nou e o copie corectată.
+5. **Piese, nu un bloc.** Scara e un părinte fără corp propriu, cu piese: rampele (`IfcStairFlight`), podestele (`IfcSlab` LANDING), balustradele (`IfcRailing`), vangurile de oțel sau lemn (`IfcMember` STRINGER). Așa se exportă în IFC (ca grupurile din `spec-ifc.md`), așa se selectează în 3D, așa se măsoară.
+
+## Tipul: ce ține și ce calculează
+
+Un tip de scară are trei straturi de parametri. Configuratorul le arată pe trei file, cu aceeași previzualizare (plan și secțiune) peste tot.
+
+### 1. Forma **[Î2]**
+
+| Formă | Descriere | IFC `PredefinedType` |
+|---|---|---|
+| dreaptă | o rampă | STRAIGHT_RUN_STAIR |
+| dreaptă cu podest | două rampe în linie, podest intermediar | TWO_STRAIGHT_RUN_STAIR |
+| în L | două rampe la 90°, podest de colț | QUARTER_TURN_STAIR |
+| în U | două rampe paralele, podest de întoarcere (scara de bloc) | HALF_TURN_STAIR |
+| în U cu trei rampe | trei rampe în jurul unui gol, două podeste | THREE_QUARTER_TURN_STAIR |
+| balansată în L / în U | fără podest, trepte balansate în colț | QUARTER_WINDING_STAIR / HALF_WINDING_STAIR (mai târziu) |
+| elicoidală | în jurul unui ax | SPIRAL_STAIR (mai târziu) |
+
+Pentru rampe (`IfcRamp`): dreaptă, cu podest, în L, în U (STRAIGHT_RUN_RAMP, TWO_STRAIGHT_RUN_RAMP, QUARTER_TURN_RAMP, HALF_TURN_RAMP).
+
+Forma e un **traseu de segmente**: rampă (n contratrepte, sau o lungime la o pantă pentru rampe), podest (lungime), întoarcere (±90°, 180°, spre stânga sau spre dreapta). Formele gata făcute sunt doar trasee predefinite; un traseu desenat de mână e aceeași structură (**[Î6]**).
+
+### 2. Regulile: dimensiunile treptelor **[Î1]**
+
+| Parametru | Implicit (locuință) | Limite propuse | De unde |
+|---|---|---|---|
+| contratreapta h | 17 cm | 15 … 18 cm (public: ≤ 16) | STAS 2965, NP 063 |
+| treapta b | 28 cm | 26 … 32 cm (public: ≥ 30) | idem |
+| 2h + b | 62 cm | 60 … 64 cm | formula pasului |
+| lățimea rampei | 1,00 m | ≥ 0,90 m locuință; ≥ 1,20 m comun | P118, NP 063 |
+| trepte pe o rampă | — | 3 … 18 (public: ≤ 16) | |
+| lungimea podestului | = lățimea | ≥ lățimea rampei | |
+| înălțimea liberă | — | ≥ 2,00 m (verificată sub placa de deasupra) | |
+| nasul treptei | 2 cm | 0 … 4 cm | |
+| panta rampei (IfcRamp) | 6 % | ≤ 8 % accesibil; ≤ 15 % tehnic | NP 051 **[Î8]** |
+| podest la rampă | la 9 m sau 0,5 m urcare | | NP 051 |
+
+Calculul: din înălțimea de urcat H și din regulă, motorul alege numărul de contratrepte n = round(H / h) și recalculează h = H / n, apoi b din 2h + b, rotunjit la 0,5 cm, cu cea mai bună potrivire în limite. Utilizatorul poate fixa oricare dintre n, h, b; celelalte se recalculează. Cu forma și n, lungimea traseului rezultă; pe dos, la un traseu desenat cu lungime fixă, b rezultă din lungime și se verifică.
+
+Înălțimea de urcat **[Î9]**: implicit, de la cota etajului propriu la cota etajului de deasupra, deci inclusiv placa; scara ajunge la cota finită a etajului de sus. Un decalaj la bază și unul sus (`baseOffset`, `topOffset`) acoperă pardoselile și scările care nu urcă un etaj întreg.
+
+### 3. Construcția: ce vede inginerul **[Î3]**
+
+| Construcție | Piese | Parametri | Cantități |
+|---|---|---|---|
+| beton armat monolit (implicit) | rampa = placa înclinată (vang) + trepte pe ea; podeste = plăci; grinzi de podest opțional | grosimea plăcii de rampă (15 cm), grosimea podestului (15 cm), grinda de podest (b×h), reazemele: pe placă sus și jos, pe perete lateral (da/nu) | beton (m³), cofraj (m²: intradosul, laturile, contratreptele), trepte (buc), oțel estimativ (kg/m³, un coeficient al tipului) |
+| beton prefabricat | rampe prefabricate, podeste monolit sau prefabricate | la fel, plus lățimea de rezemare | buc rampe, beton podeste |
+| oțel pe vanguri | două vanguri (profil din catalogul de secțiuni: U, I, platbandă), trepte (tablă, grătar, lemn, beton) pe corniere | profilul vangului, trepta (material, grosime), podest (cadru + tablă) | lungimi de profil (m), kg oțel, trepte (buc) |
+| lemn | vanguri (închise sau în dinți de fierăstrău), trepte, contratrepte opționale | secțiunea vangului, grosimea treptei, cu/fără contratreaptă | m³ lemn, buc |
+
+Arhitectul vede în plus **finisajele**: grosimea și materialul treptei finite, contratreapta finită, nasul, și **balustrada**: pe partea interioară, exterioară, ambele sau nicio parte, cu înălțimea și un tip de balustradă (deocamdată bară + montanți, ca în Lapin-ul vechi). Cotele structurale și cele finite se arată amândouă în configurator (treapta brută și cea finită).
+
+## Instanța: plasarea și editarea
+
+- **Atribute:** `storeyId`, `typeId`, `at` (piciorul primei contratrepte), `direction` (unghiul rampei întâi), `turn` (stânga/dreapta pentru L și U), `width`, `baseOffset`, `topOffset`, `topStorey` (implicit etajul de deasupra), și, fixate de utilizator, `risers`, `riserHeight`, `tread`, `landing`. Totul în intenția IFC.
+- **Plasarea** **[Î6]**: unealta cere forma (sau un tip), apoi un click la piciorul scării și unul pentru direcție; L și U cer partea întoarcerii (clic în stânga sau în dreapta liniei). Motorul întinde scara după regulă; dacă nu are loc, o semnalează. Traseul desenat de mână (click din podest în podest) vine după.
+- **Editarea directă:** grips la picior, la vârf și la fiecare podest; tras un capăt, se schimbă lungimea și se recalculează b (cu semnal dacă iese din limite); tras lateral un podest, se schimbă lungimea podestului. Lățimea are un grip pe margine. Inspectorul arată numerele rezultate (n, h, b, 2h+b, lungimea, înălțimea liberă) și permite fixarea lor.
+- **Golul în placa de sus** **[Î5]**: scara știe ce placă străpunge și propune golul (conturul rampelor și al podestelor de sus, plus distanța de siguranță); golul rămâne legat de scară și se reface la editare, ca buiandrugii cu golurile.
+- **Înălțimea liberă:** se calculează sub placa și grinzile de deasupra pe tot traseul și se arată în inspector; roșu sub 2,00 m.
+
+## Desen
+
+- **Plan:** treptele ca linii pe lățime, linia de întrerupere la cota de tăiere a planului (1,20 m): sub ea linii pline, deasupra întrerupt sau nimic, după tip (făcut, raportul #143, vezi „Planul tăiat”); săgeata de urcare cu „URCĂ” sau numerotarea contratreptelor (1 … n) la picior și la vârf; podestele cu conturul lor; balustrada ca linie. Pe planul etajului de sus, partea care coboară apare ca „COBOARĂ”, tot până la linia de întrerupere.
+- **Secțiune și fațadă:** profilul în trepte, placa, podestele, balustrada, din corpurile 3D, ca restul.
+- **Cote:** o cotă de scară: „15 × 17,5 / 28” lângă săgeată; cota lungimii rampei în plan.
+- **Extras:** fișa scării, pe tipul de extras existent: forma, n, h, b, lățimea, construcția, cantitățile.
+
+## Comenzi și module **[Î4]**
+
+- `architecture.createStairType`, `updateStairType`, `architecture.addStair {storeyId, typeId, at, direction, turn?, width?, topStorey?}`, `updateStair`, `architecture.addRamp` cu aceleași argumente; interogarea `architecture.stairCheck {id}` dă valorile și verificările pentru inspector.
+- Modulul `architecture` deține `IfcStair`, `IfcRamp` și tipurile lor (Studio le lasă, păstrează doar solidul liber cu `exportAs`). Piesele structurale (vang, grinzi de podest, vanguri de oțel) sunt `GeometryPart`-uri cu materialul lor, deci intră în cantități și în extrasele structurii fără un al doilea element; modulul `structure` poate adăuga mai târziu armarea și verificarea reazemelor.
+- Cantitățile: `Qto_StairFlightBaseQuantities` (Length, GrossVolume, NetVolume, NumberOfRiser, NumberOfTreads, RiserHeight, TreadLength) pe fiecare rampă, `Qto_SlabBaseQuantities` pe podeste, `Qto_RampFlightBaseQuantities` pe rampe; setul `Lapin_StairQuantities` pe scară cu betonul, cofrajul și oțelul totale.
+- IFC: `IfcStair` părinte fără corp, `IfcRelAggregates` peste `IfcStairFlight` (cu `NumberOfRiser`, `NumberOfTreads`, `RiserHeight`, `TreadLength` în IFC4), `IfcSlab` LANDING, `IfcRailing`, `IfcMember` STRINGER; tipul ca `IfcStairType` cu intenția; cum fac deja pereții cu zone.
+
+## Etape
+
+1. **Făcut (25.10.2026).** Tipul și configuratorul: forma (dreaptă, cu podest, L, U; L și U și cu trepte balansate în loc de podest), regulile pe două seturi (locuință, public) cu verificare, construcția beton armat monolit, finisajele, balustrada bară + montanți; instanța cu plasarea prin două clicuri; corpul 3D pe piese; planul cu linia de întrerupere și săgeata; cantitățile; IFC.
+2. Rampele (aceleași forme, în pantă), golul propus în placă, înălțimea liberă, grips.
+3. Oțel pe vanguri și lemn; extrasul scării; cotarea automată.
+4. Scara elicoidală, traseul desenat de mână, armarea.
+
+## Întrebări deschise
+
+- **[Î1] Norma și valorile implicite.** Propun valorile din tabelul regulilor (h 17, b 28, 2h+b 60–64, lățime 0,90/1,20, max 18 trepte, 2,00 m liber). Sunt bune, sau le vrei pe ale tale? Vrei două seturi, „locuință” și „public”, alese pe tip?
+- **[Î2] Formele primei etape.** Dreaptă, dreaptă cu podest, L și U cu podeste, plus rampele. Balansate și elicoidale mai târziu. De acord?
+- **[Î3] Construcția primei etape.** Beton armat monolit întâi, oțelul și lemnul în etapa 3. De acord, sau ai nevoie de oțel mai devreme?
+- **[Î4] Modulul.** Scara în `architecture`, cu piesele structurale ca părți ale ei (inginerul le vede în cantități și tabele). Alternativa, un modul `circulation` separat, nu aduce nimic acum.
+- **[Î5] Golul în placă și balustrada.** Propuse și legate automat de scară (se refac la editare), cu posibilitatea de a le scoate. Sau le pune utilizatorul singur?
+- **[Î6] Plasarea.** Forma aleasă, apoi două clicuri (picior și direcție) și partea întoarcerii. Traseul desenat liber vine după. Sau preferi de la început desenarea traseului, podest cu podest?
+- **[Î7] Studio.** Clasa `IfcStair` din Studio rămâne pentru scări libere (sculptate), exportate ca `IfcStair`. Sau o scoatem, ca să nu fie două unelte cu același nume?
+- **[Î8] Rampele.** Implicit 6 %, maxim 8 % accesibil, podest la 9 m sau 0,5 m urcare, lățime 1,20 m. Confirmi?
+- **[Î9] Înălțimea de urcat.** De la cota etajului la cota etajului de deasupra (inclusiv placa), cu decalaje la bază și sus. O scară pe mai multe etaje = o scară pe etaj, cu același tip. De acord?
+- **[Î10] Finisajele.** Treapta finită (material, grosime) și nasul în tip; configuratorul arată și cotele brute și cele finite. Contratreapta se calculează pe cotele finite (ce calcă omul). De acord?

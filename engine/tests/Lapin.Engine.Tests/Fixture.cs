@@ -1,0 +1,94 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Architecture;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Engine.Tests;
+
+/// <summary>A session of the full product, with helpers that run its commands as the interface does.</summary>
+sealed class Fixture
+{
+    public Session Session { get; }
+
+    public Fixture(params ILapinModule[] modules)
+    {
+        ILapinModule[] use = modules.Length == 0 ? [new ArchitectureModule()] : modules;
+        Session = new Session(ModuleCatalog.Create(use), new ProductManifest("test", "Test", ["core", .. use.Select(m => m.Id)]));
+        // Seeded (a golden that compares bits across runs): the project made again with ids from the seed, and every edit's after it.
+        if (SeedValue.Value is { } seed)
+        {
+            Session.SeededIds(seed);
+            Session.New(plain: true);
+        }
+    }
+
+    static readonly AsyncLocal<long?> SeedValue = new();
+
+    /// <summary>Fixtures made until disposed take their ids from <paramref name="seed"/>, one after the other: the same model, ids and order at every run.</summary>
+    public static IDisposable Seeded(long seed)
+    {
+        SeedValue.Value = seed;
+        return new Unseed();
+    }
+
+    sealed class Unseed : IDisposable { public void Dispose() => SeedValue.Value = null; }
+
+    public IModelView Model => Session.Model;
+    public string Storey => Spatial.Storeys(Model).First().Id;
+
+    public JsonNode? Run(string command, JsonObject args) { Session.Execute(command, args, out var r); return r; }
+    public Diff RunDiff(string command, JsonObject args) => Session.Execute(command, args, out _);
+
+    public string Type(string name, params (string Material, double Thickness, bool Core)[] layers) =>
+        (string)Run("architecture.createWallType", new JsonObject
+        {
+            ["name"] = name,
+            ["layers"] = new JsonArray(layers.Select(l => (JsonNode)new JsonObject { ["material"] = l.Material, ["thickness"] = l.Thickness, ["core"] = l.Core }).ToArray()),
+        })!["id"]!;
+
+    /// <summary>A wall on the lowest storey: to the storey above (WallTop), or unconnected at <paramref name="height"/> when one is given.</summary>
+    public string Wall(double x1, double y1, double x2, double y2, string? typeId = null, string? joinStyle = null, double? height = null)
+    {
+        var a = new JsonObject { ["storeyId"] = Storey, ["x1"] = x1, ["y1"] = y1, ["x2"] = x2, ["y2"] = y2 };
+        if (height != null) a["height"] = height;
+        if (typeId != null) a["typeId"] = typeId;
+        if (joinStyle != null) a["joinStyle"] = joinStyle;
+        return (string)Run("architecture.addWall", a)!["id"]!;
+    }
+
+    /// <summary>The bounds of everything the element's geometry built.</summary>
+    public (Vec3 Min, Vec3 Max) Bounds(string id)
+    {
+        var g = Session.Geometry(id) ?? throw new InvalidOperationException($"{id} has no geometry.");
+        var all = g.Parts.Select(p => Measure.Bounds(p.Solid)!.Value).ToList();
+        return (new Vec3(all.Min(b => b.Min.X), all.Min(b => b.Min.Y), all.Min(b => b.Min.Z)),
+                new Vec3(all.Max(b => b.Max.X), all.Max(b => b.Max.Y), all.Max(b => b.Max.Z)));
+    }
+
+    /// <summary>Every material's section hatch set to what decision 325 suggested from its name (brick in courses), as a test drawn before decision 456 saw it.</summary>
+    public void LegacyHatches()
+    {
+        foreach (var m in Model.OfClass(IfcClass.Material).ToList())
+            if (Lapin.Drawing.MaterialGraphics.Resolve(m, "section") is { Membrane: false, Source: "name" })
+                Run("material.update", new JsonObject { ["id"] = m.Id, ["section"] = new JsonObject { ["hatch"] = Lapin.Drawing.MaterialGraphics.LegacyFromName(m.Name, 0) } });
+    }
+
+    /// <summary>The project as a build before decision 725 saved it and opened again: its hatches fixed to the view, not turned with their elements.</summary>
+    public void ViewAlignedHatches()
+    {
+        var saved = Model.Entities.Select(e =>
+        {
+            if (e.Class != IfcClass.Project) return e;
+            var a = e.CloneAttrs();
+            a[MaterialHatchUpgrade.RevKey] = 3;
+            return e.With(attrs: a);
+        }).ToList();
+        Session.Load(saved, Model.Relations.ToList(), null);
+    }
+
+    /// <summary>The plans drawing the entire model, as a project made before decision 500 drew them (a new project's plans leave out the finishes).</summary>
+    public void EveryLayerInPlans() => Run("viewStyle.update", new JsonObject { ["id"] = "architectural", ["layersPlan"] = "all" });
+
+    public LayerUsage Usage(string wallId) => Layers.ReadUsage(Walls.UsageOf(Model, wallId)!)!;
+}

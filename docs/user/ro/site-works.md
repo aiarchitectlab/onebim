@@ -1,0 +1,81 @@
+---
+title: Organizare de șantier
+order: 55
+summary: Schele de fațadă și cofraje pentru plăci și grinzi, desfășurate din model de configuratoarele lor.
+---
+
+Organizarea de șantier, pe tabul **Teren** după teren, modelează lucrările provizorii de pe șantier: schelele de fațadă și cofrajele plăcilor și grinzilor. Lapin le desfășoară din model și numără ce le trebuie. Când modelul se schimbă, ele îl urmează.
+
+![Organizarea de șantier pe tabul Teren](shots/ribbon-site-works.webp)
+
+Schelele și cofrajele sunt **temporare**: se montează și se demontează în faza **Execuție**. Prima pe care o așezi adaugă faza, dacă proiectul nu o are, și o face faza activă. Vederile fazelor de dinainte nu le arată. Vezi **Gestionează → Faze**.
+
+![O schelă în jurul casei și cofrajul planșeului de peste parter, pe popi](shots/site-works-3d.webp)
+
+## Schele
+
+- **Schelă pe pereți** (<kbd>WS</kbd>): selectezi pereții (Shift-clic pentru mai mulți), apoi apeși butonul. Schela merge pe fețele lor exterioare, la distanța tipului de perete, până la partea de sus a pereților. Își închide singură colțurile. Muți un perete sau îl faci mai înalt, și schela îl urmează.
+- **Schelă** (<kbd>FS</kbd>): îi desenezi linia în plan, de-a lungul fațadei, și apeși Enter ca să termini. Schela stă la stânga liniei. Partea cealaltă o alegi în proprietăți.
+
+Fiecare tronson drept e împărțit în traveile tipului, cât mai puține câte ajung până la capăt. Nivelurile urcă până când podina de sus ajunge aproape de cota de lucru, iar parapetul stă deasupra ei. Tălpile stau pe teren, pe tălpi reglabile. Dacă terenul coboară mai mult decât preiau tălpile, Lapin îți spune.
+
+![Proprietățile unei schele](shots/scaffold-properties.webp)
+
+În proprietăți poți da **cota de lucru**: o lași goală pentru partea de sus a pereților. Mai poți alege dacă tălpile stau **pe teren** sau **pe etaj**, sau poți **desprinde** schela de pereți.
+
+Fiecare schelă și fiecare cofraj are un **tip**. Îl alegi sus în proprietăți sau dai tipul unui element altora cu Match Type (MA). La **Parametrii tipului** sunt valorile din configurator: sistemul, lungimile de travee, lățimea, nivelul de lucru, placajul, distanțele, articolul. Le poți schimba și acolo. Schimbarea e a tipului, deci o urmează toate elementele acelui tip. Create Similar (CS) desenează unul nou de același tip. Un tip creat în configurator e cel pe care îl ia următoarea schelă sau următorul cofraj.
+
+**Tipuri de schelă…** deschide configuratorul. În el alegi sistemul (modular sau cu cadre), lungimile de travee, lățimea și înălțimea nivelului, distanța de perete, podinele, parapetele și bordurile, ancorele, tălpile reglabile, traveile de acces și plasa de protecție. Vederea arată un tronson de lungimea și înălțimea alese, cu ce numără. Cu o schelă selectată, configuratorul se deschide pe tipul ei; dă clic pe alt tip din listă ca să-l modifici pe acela. Lista spune câte schele are fiecare tip. **Salvează tipul** aplică schimbarea la toate schelele de acel tip.
+
+![Configuratorul de schele](shots/scaffold-configurator.webp)
+
+## Cofraje
+
+- **Cofraje** (<kbd>FW</kbd>): selectezi plăci și grinzi, apoi apeși butonul. Fiecare primește cofrajul tuturor fețelor care se cofrează.
+- **Cofraj pe față** (<kbd>FF</kbd>): alegi o singură față. În 3D, fața de sub cursor se colorează și îi apare numele: intradosul plăcii, fața de jos a grinzii sau una dintre fețele ei laterale. În plan, dai clic pe marginea unei plăci sau în interiorul conturului ei. O față aleasă mai târziu intră în același cofraj.
+
+**Cofrajul plăcii** acoperă intradosul cu placaj pe grinzi secundare, pe grinzi principale, pe popi. Grinzile de sub placă nu se cofrează a doua oară, și nici pereții și stâlpii pe care stă sau golurile ei. Distanțele vin din tabelul tipului, după grosimea plăcii. Popii ajung până la placa de dedesubt, la teren sau la etajul de sub ea. Se cofrează și marginile libere, cât grosimea plăcii plus o supraînălțare. În proprietăți alegi ce fețe se cofrează și direcția grinzilor principale.
+
+**Cofrajul grinzii** e fața de jos, pe grinzi de rezemare și popi, plus fețele laterale. Fiecare față laterală e cât grinda sub placa turnată odată cu ea. Stâlpii și grinzile mai înalte o întrerup. Poți pune baghete de șanfren pe muchiile de jos.
+
+**Tipuri de cofraj…** deschide configuratorul, pentru plăci și pentru grinzi. Pentru plăci alegi sistemul (grinzi de lemn și popi, sau panouri), placajul, grinzile și lungimile lor din catalog, tabelul de distanțe, marginile, popii și refolosirile. Pentru grinzi alegi grinzile de rezemare, popii, jugurile după înălțimea grinzii, șanfrenul și refolosirile. Secțiunea arată straturile și popul ales de motor pentru înălțimea dată. Cu un cofraj selectat, se deschide pe tipul și felul acelui cofraj.
+
+![Configuratorul de cofraje](shots/formwork-configurator.webp)
+
+## Pereți, stâlpi, centuri și fundații
+
+**Cofraje** și **Cofraj pe față** merg și pe pereți, stâlpi și fundații:
+
+- **Un perete** primește ambele fețe și capetele libere, fără ușile și ferestrele lui. Un perete compus cu centură sau cu bandă de beton primește doar centura sau banda. În proprietăți poți alege ambele fețe, centurile sau capetele libere.
+- **Un stâlp** primește fețele laterale, până la placa sau grinda turnată peste el.
+- **O fundație** primește fețele fiecărei trepte, la fundația izolată, sau fețele tălpii și ale elevației, la fundația continuă.
+
+Ce stă lipit de o față nu se cofrează: alt perete, un stâlp. Placa turnată deasupra oprește fața la intradosul ei. Tipul alege panourile (lățimi și înălțimi), tijele prin pereți, jugurile stâlpilor și sprijinirile.
+
+![Configuratorul pentru pereți și stâlpi](shots/wall-formwork-configurator.webp)
+
+## Planul de cofraj
+
+**Plan de cofraj** face un plan al etajului activ în faza Execuție, secționat la un metru deasupra plăcii și **văzut de jos**: un plan de plafon. Popii apar secționați. Cofrajul de deasupra lor e desenat cum îl vezi privind în sus: grinzile principale și secundare, placajul și marginile. Planul stă orientat la fel ca planul obișnuit, ca să se potrivească unul peste altul.
+
+**Plan de cofraj văzut de sus** face același plan văzut de sus, cu cofrajul desenat cu linie întreruptă peste secțiune. Orice plan se poate schimba între cele două din proprietăți (**Văzut din**) sau din **Intervalul vederii**.
+
+![Planul de cofraj al parterului](shots/formwork-plan.webp)
+
+## Ce numără
+
+Fiecare schelă și fiecare cofraj își arată cantitățile în proprietăți:
+
+- la schelă: aria, traveile, nivelurile, montanții, podinele și ancorele;
+- la cofraj: aria de contact pe fiecare față, popii pe mărimi și grinzile pe lungimile din catalog.
+
+**Extras de cofraje** și **Extras de schele** își pun tabelele în browserul proiectului, la Extrase, ca să le pui pe planșă sau să le exporți.
+
+Extrasul de cofraje se încheie cu un rând pentru fiecare tip:
+
+- **setul**: cel mai mult cofraj turnat deodată. Se socotește pe fază de execuție, când lucrarea e împărțită în mai multe, altfel pe etaj.
+- **de cumpărat**: setul, sau totalul împărțit la refolosirile tipului, oricare e mai mare.
+
+Fiecare tip are **articolul de deviz**: codul din normele folosite în deviz și textul lui. Le scrii în configurator, iar extrasul le arată pe fiecare rând.
+
+În IFC se scriu ca ansambluri (`IfcElementAssembly` FORMWORK și SCAFFOLD) cu statusul TEMPORARY. Piesele sunt bare, plăci și accesorii. Fiecare are resursa ei de construcție, iar cofrajul e legat de elementul pe care îl cofrează.

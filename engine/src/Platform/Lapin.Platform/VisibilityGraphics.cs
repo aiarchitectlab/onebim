@@ -1,0 +1,530 @@
+using System.Text.Json.Nodes;
+using Lapin.Drawing;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// What a view's Visibility / Graphics (docs/plan-visibility-graphics.md) makes of an element, a part
+/// and a mark, worked out once per view: the view's graphics (its own, its set's or its style's set,
+/// <see cref="GraphicsSets.Of"/>), and for a linked element the link's row in them: hidden or halftone
+/// in this view, and, displayed <c>custom</c>, the link's own categories, subcategories and classes in
+/// place of the view's (an architect's plan without the structural link's rebar). Plans, sections,
+/// elevations and sheets (<see cref="Views"/>), the 3D (<c>view.looks3d</c>) and the mesh exports ask it.
+/// </summary>
+public sealed class VisibilityGraphics
+{
+    /// <summary>The parts of an element a category can show or hide apart: its layers by their role, a door's or a window's reveals.</summary>
+    /// <summary>The reinforcement's (decision 728): longitudinal bars, stirrups and ties, rebar sets; the rebar module reads them.</summary>
+    public static readonly string[] RebarSubs = ["longitudinal", "stirrups", "sets"];
+    public static readonly string[] Subcategories = ["core", "finishes", "insulation", "membranes", "otherLayers", "reveals", .. RebarSubs];
+    static readonly string[] LayerSubs = ["core", "finishes", "insulation", "membranes", "otherLayers"];
+
+    /// <summary>The subcategories each category offers: the layers where its elements can be layered, the reveals of doors and windows.</summary>
+    public static readonly IReadOnlyDictionary<string, string[]> SubcategoriesOf = new Dictionary<string, string[]>
+    {
+        ["walls"] = LayerSubs, ["slabs"] = LayerSubs, ["roofs"] = LayerSubs, ["coverings"] = LayerSubs,
+        ["beams"] = LayerSubs, ["columns"] = LayerSubs, ["other"] = LayerSubs,
+        ["doors"] = ["reveals"], ["windows"] = ["reveals"], ["rebar"] = RebarSubs,
+    };
+
+    /// <summary>A link's display in a view: its elements ruled by the view's graphics (the default) or by the link's own.</summary>
+    public static readonly string[] LinkDisplays = ["host", "custom"];
+
+    /// <summary>The annotation categories, by what owns a mark (stage B).</summary>
+    public static readonly string[] AnnotationCategories = ["dimensions", "texts", "tags", "roomTags", "grids", "levels", "sections", "elevations", "callouts", "refPlanes", "viewBoundaries", "legends", "symbols", "keys"];
+
+    readonly IModelView m;
+    readonly bool in3d;
+    readonly Dictionary<string, IReadOnlyList<LayerBand>?> bands = [];
+    readonly IReadOnlyDictionary<string, ViewFilters.Filter> filters;
+    readonly Dictionary<(string, string), bool> matched = [];
+    ViewFilters.Matcher? matcher;
+
+    /// <summary>The view's graphics as they rule it (null: none).</summary>
+    public JsonObject? Graphics { get; }
+
+    /// <summary>
+    /// The categories whose finish layers this view leaves out by its style and its kind (the forum's topic #30): a plan, or a
+    /// section or an elevation, without the walls' finishes ("walls") or the floors' ("slabs"); empty for a 3D view and by default.
+    /// </summary>
+    public IReadOnlySet<string> FinishesHidden { get; }
+
+    /// <summary>
+    /// The view's partial structure display (decision 500, <see cref="ViewStyles.LayerModes"/>): its own, else its style's for
+    /// a view of its kind; the parts it leaves out are hidden (<see cref="HidesPart"/>) and, the cores of the load-bearing
+    /// elements only, the elements that bear no load (<see cref="Hides"/>). <c>all</c> for a 3D view, whose layers the 3D
+    /// and its exports keep apart (<see cref="ViewStyles.Shows3d"/>), and for graphics read as given.
+    /// </summary>
+    public string Structure { get; }
+
+    /// <summary>Whether the separate finish elements go with the finish layers in <see cref="Structure"/> (decision 502; false for a project made before, <see cref="ViewStyles.Style.FinishElements"/>).</summary>
+    public bool FinishElements { get; }
+
+    /// <summary>
+    /// What the view shows only (its subject, decision 579: an element view's element, or the ids a view keeps), the rest
+    /// hidden or, <see cref="SubjectFaded"/>, halftone; null: the whole model. The first rule of all (<see cref="Hides"/>).
+    /// </summary>
+    public IReadOnlySet<string>? Subject { get; private init; }
+    /// <summary>Whether what is not the subject draws halftone (<c>context: faded</c>) rather than not at all.</summary>
+    public bool SubjectFaded { get; private init; }
+
+    /// <summary>
+    /// Whether an entity is outside the view's subject: a model element (one on a storey, a grid, a level) not in it; never a
+    /// view's own annotation or drafting, nor a view, a sheet or a resource.
+    /// </summary>
+    public bool OutsideSubject(Entity e) =>
+        Subject != null && !Subject.Contains(e.Id)
+        && (e.Class is IfcClass.Grid or IfcClass.BuildingStorey || e.Class != IfcClass.Annotation && e.Str("viewId") == null && Spatial.StoreyOf(m, e.Id) != null);
+
+    VisibilityGraphics(IModelView model, JsonObject? graphics, bool in3d, IReadOnlySet<string>? finishesHidden = null, string structure = "all", bool finishElements = true)
+    {
+        m = model;
+        Graphics = graphics;
+        this.in3d = in3d;
+        FinishesHidden = finishesHidden ?? new HashSet<string>();
+        Structure = in3d ? "all" : structure;
+        FinishElements = finishElements;
+        filters = graphics == null ? new Dictionary<string, ViewFilters.Filter>() : ViewFilters.All(model).ToDictionary(f => f.Id);
+    }
+
+    /// <summary>A 2D view's resolved style (null: a 3D view, or no view entity).</summary>
+    static ViewStyles.Style? StyleOf2d(IModelView m, Entity view) =>
+        view.Class == Views.Class && view.Str("kind") != "3d" ? ViewStyles.Of(m, view) : null;
+
+    /// <summary>The categories a view's style leaves the finishes out of in a view of its kind (<see cref="ViewStyles.Style.DrawsFinishes"/>).</summary>
+    static HashSet<string>? FinishRule(Entity view, ViewStyles.Style? style)
+    {
+        var kind = view.Str("kind");
+        if (kind is not ("plan" or "section" or "elevation" or null) || style == null) return null;
+        HashSet<string>? o = null;
+        foreach (var c in new[] { "walls", "slabs" })
+            if (!style.DrawsFinishes(kind, c)) (o ??= []).Add(c);
+        return o;
+    }
+
+    /// <summary>The filters a set of rules uses, in order, with their rows ({id, hidden, …}), those the project no longer has left out.</summary>
+    IEnumerable<(ViewFilters.Filter Filter, JsonObject Row)> FiltersOf(JsonObject? rules) =>
+        (rules?["filters"] as JsonArray)?.OfType<JsonObject>().Select(r => ((string?)r["id"] is { } id && filters.TryGetValue(id, out var f) ? f : null, r))
+            .Where(x => x.Item1 != null).Select(x => (x.Item1!, x.r)) ?? [];
+
+    bool Takes(ViewFilters.Filter f, Entity e)
+    {
+        // On the model alone: a view's graphics never build an element (a filter reads no quantities here, docs/plan-visibility-graphics.md).
+        if (!matched.TryGetValue((f.Id, e.Id), out var hit)) matched[(f.Id, e.Id)] = hit = (matcher ??= new(new ModelQuery(m))).Matches(e, f);
+        return hit;
+    }
+
+    /// <summary>The rows of the filters that take an element, in the view's order (the first gives each field, as Revit's).</summary>
+    public IEnumerable<JsonObject> FilterRows(Entity e) => FiltersOf(RulesFor(e)).Where(x => Takes(x.Filter, e)).Select(x => x.Row);
+
+    /// <summary>A view's (a 2D view, a 3D view, or {3D} as <see cref="GraphicsSets.As3dView"/> gives it).</summary>
+    public static VisibilityGraphics Of(IModelView m, Entity view)
+    {
+        var style = StyleOf2d(m, view);
+        return new(m, GraphicsSets.Of(m, view), view.Str("kind") == "3d", FinishRule(view, style), style?.Layers ?? "all", style?.FinishElements ?? true)
+        {
+            Subject = ElementViews.SubjectOf(view),
+            SubjectFaded = ElementViews.ContextOf(view) == "faded",
+            ElementRows = view.Attrs[ElementGraphics.Key] as JsonObject is { Count: > 0 } rows ? rows : null,
+            ViewId = view.Id,
+            // An MEP plan's walls, doors and furniture grey under the services (its style's, the view's own choice over it).
+            Discipline = style is { HalftonesOthers: true } && DisciplineCategories.TryGetValue(style.Discipline ?? "", out var own) ? own : null,
+            // How its plants look (decision 818): its style's, its own over it; a 3D view's as a drawing's.
+            Vegetation = view.Class == Views.Class ? (style ?? ViewStyles.Of(m, view)).Vegetation : "coloured",
+        };
+    }
+
+    /// <summary>
+    /// How the view's plants look (decision 818, <see cref="ViewStyles.VegetationModes"/>): <c>coloured</c> (each species in its
+    /// colour; the default and graphics read as given) or <c>maquette</c> (neutral faceted bodies, an architectural model's).
+    /// </summary>
+    public string Vegetation { get; private init; } = "coloured";
+
+    /// <summary>Whether the view draws the plants as a maquette's.</summary>
+    public bool Maquette => Vegetation == ViewStyles.Maquette;
+
+    /// <summary>
+    /// The geometry an element draws by in this view: its maquette body when the view's vegetation is the maquette and it has one
+    /// (<see cref="ElementGeometry.VegetationShape"/>), else <paramref name="g"/> as it is. The 3D, the mesh exports and the
+    /// drawings all ask it, so they draw the same bodies.
+    /// </summary>
+    public ElementGeometry? Shaped(IQueryContext q, string id, ElementGeometry? g) =>
+        Maquette && g is { VegetationShape: true } ? q.MaquetteGeometry(id) ?? g : g;
+
+    /// <summary>
+    /// The categories of a discipline's own elements, for a view whose style draws the others halftone
+    /// (<see cref="ViewStyles.Style.HalftonesOthers"/>): an MEP view's services; a structural view's load-bearing kinds.
+    /// </summary>
+    public static readonly IReadOnlyDictionary<string, IReadOnlySet<string>> DisciplineCategories = new Dictionary<string, IReadOnlySet<string>>(StringComparer.OrdinalIgnoreCase)
+    {
+        ["MEP"] = new HashSet<string> { "mep" },
+        ["Structure"] = new HashSet<string> { "walls", "slabs", "roofs", "columns", "beams", "other", "rebar", "formwork", "steelConnections" },
+    };
+
+    /// <summary>The categories the view's discipline draws in full, the other model elements halftone; null: none drawn halftone for it.</summary>
+    public IReadOnlySet<string>? Discipline { get; private init; }
+
+    /// <summary>
+    /// Whether an element is drawn halftone as not of the view's discipline (<see cref="Discipline"/>): an element of the model
+    /// (on a storey; never an annotation, a grid, a view's own drafting) of another category, unless the view's graphics give
+    /// its category a colour or say it is not halftone (the user's Visibility / Graphics wins).
+    /// </summary>
+    public bool OutsideDiscipline(Entity e)
+    {
+        if (Discipline == null || e.Class is IfcClass.Annotation or IfcClass.Grid or IfcClass.BuildingStorey || e.Str("viewId") != null) return false;
+        var category = ReferenceLayers.CategoryOf(e);
+        if (category != null && Discipline.Contains(category)) return false;
+        if (CategoryRow(e) is { } row && (row["halftone"] is JsonValue || (string?)row["lineColor"] is { Length: > 0 })) return false;
+        return Spatial.StoreyOf(m, e.Id) != null;
+    }
+
+    /// <summary>A view's graphics read as given (a test, an export with graphics of its own).</summary>
+    public static VisibilityGraphics From(IModelView m, JsonObject? graphics, bool in3d) => new(m, graphics, in3d);
+
+    static bool True(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) && b;
+
+    /// <summary>The row a view gives a link ({display, hidden, halftone, categories, classes}), or null.</summary>
+    public JsonObject? LinkRow(string? linkId) => linkId == null ? null : Graphics?["links"]?[linkId] as JsonObject;
+
+    /// <summary>Whether the view has rows for links at all (the drawing then asks each linked element).</summary>
+    public bool HasLinks => Graphics?["links"] is JsonObject { Count: > 0 };
+
+    /// <summary>The graphics that rule an element: a link's own when the view displays it custom, else the view's.</summary>
+    public JsonObject? RulesFor(Entity e) =>
+        LinkRow(e.Str(Links.Key)) is { } row && (string?)row["display"] == "custom" ? row : Graphics;
+
+    /// <summary>Whether the view hides an element: the link hidden in this view, its category or IFC class hidden (the link's own when custom).</summary>
+    public bool Hides(Entity e)
+    {
+        // Solids a layered wall was made of, kept hidden behind it (forum topic 101).
+        if (Superseded.Hidden(m, e)) return true;
+        // Outside the view's subject (decision 579): hidden, unless the view shows the rest faded.
+        if (!SubjectFaded && OutsideSubject(e)) return true;
+        if (LinkRow(e.Str(Links.Key)) is { } row && True(row["hidden"])) return true;
+        var g = RulesFor(e);
+        if (in3d ? GraphicsSets.Hides3d(g, e) : GraphicsSets.Hides(g, e)) return true;
+        // The cores of the load-bearing elements only (decision 500): a partition, a covering, a room's finish not drawn at all,
+        // and with a wall left out its doors, windows and openings (decision 502).
+        if (Structure == "coreLoadBearing" && (!ViewStyles.BearsLoad(m, e) || HostOf(e) is { } host && !ViewStyles.BearsLoad(m, host))) return true;
+        // A reference all of one finish, insulation or membrane (a plaster part of a wall, a covering): hidden with its subcategory (decision 400).
+        if (HiddenSubs(e) is { } sub && ReferenceLayers.WholeSub(m, e) is { } whole && True(sub[whole]?["hidden"])) return true;
+        // The finishes the view's style leaves out in a view of its kind (topic #30): a reference that is all finish, a room's wall or floor finish.
+        if (FinishesHidden.Count > 0 && FinishOf(e) is { } fc && FinishesHidden.Contains(fc)) return true;
+        // A filter that takes it and hides what it takes (the first that says, in the view's order).
+        return FilterRows(e).Select(r => r["hidden"]).FirstOrDefault(h => h is JsonValue) is { } hv && True(hv);
+    }
+
+    Dictionary<string, Entity>? referenceHosts;
+
+    /// <summary>
+    /// The element a door, a window or an opening is in: the wall (or floor) its opening voids, or the reference whose kept
+    /// opening it fills (<see cref="ReferenceFills"/>); null for any other element.
+    /// </summary>
+    Entity? HostOf(Entity e)
+    {
+        if (m.RelatingOf(e.Id, IfcClass.RelFillsElement) is { } opening) return m.RelatingOf(opening.Id, IfcClass.RelVoidsElement);
+        if (e.Class == IfcClass.OpeningElement) return m.RelatingOf(e.Id, IfcClass.RelVoidsElement);
+        if (e.Class is not (IfcClass.Door or IfcClass.Window) || !StoredBodies.Has(e)) return null;
+        if (referenceHosts == null)
+        {
+            referenceHosts = [];
+            foreach (var x in m.Entities)
+                if (x.Attrs[StoredBodies.OpeningsKey] is JsonArray)
+                    foreach (var filler in ReferenceFills.Fillers(x)) referenceHosts.TryAdd(filler, x);
+        }
+        return referenceHosts.GetValueOrDefault(e.Id);
+    }
+
+    /// <summary>Whether a linked element draws halftone in this view (its link's row; Manage → Links halftones it everywhere).</summary>
+    public bool Halftone(Entity e) => LinkRow(e.Str(Links.Key)) is { } row && True(row["halftone"])
+        || (e.Str(DxfImportKey) is { } imp && ImportRow(imp) is { } ir && True(ir["halftone"]));
+
+    /// <summary>What a DXF import's shapes carry, and the project's list of the imports (the drafting module's <c>dxfImport</c>, <c>dxfImports</c>).</summary>
+    public const string DxfImportKey = "dxfImport", DxfImportsKey = "dxfImports";
+
+    /// <summary>The row a view gives an import (a DXF import by its id, a traced PDF or image by its own): {hidden, halftone, layers: {name: {hidden}}}.</summary>
+    public JsonObject? ImportRow(string? id) => id == null ? null : Graphics?["imports"]?[id] as JsonObject;
+
+    /// <summary>The annotation category of a mark's owner (a dimension, a grid, a level, a room's stamp…), or null when it is not an annotation.</summary>
+    public static string? AnnotationOf(Entity e, ViewMark? mk = null) => mk?.Owner is { } ow && ow.Contains(":partdim:", StringComparison.Ordinal) ? "dimensions" : e.Class switch
+    {
+        IfcClass.Annotation => e.PredefinedType switch { "DIMENSION" => "dimensions", "TEXT" or "TABLE" or "TABLEPART" => "texts", "TAG" => "tags", "LEGEND" => "legends", "SYMBOL" => "symbols", DrawingKeys.NorthArrow or DrawingKeys.ScaleBar => "keys", _ => null },
+        IfcClass.Grid => "grids",
+        IfcClass.BuildingStorey => "levels",
+        IfcClass.Space => mk is { Under: false, Pick: false } ? "roomTags" : null,
+        Views.Class => e.Str("kind") switch { "section" => "sections", "elevation" => "elevations", "plane" => "refPlanes", _ => null },
+        "LapinInset" or Callouts.Class => "callouts",
+        ViewBoundaries.Class => "viewBoundaries",
+        _ => null,
+    };
+
+    // Stage C: graphic overrides (decision 394).
+
+    /// <summary>The first value a field has in the rows of the filters that take an element (the view's order: the first that says gives it).</summary>
+    JsonNode? FromFilters(Entity e, string field) => FilterRows(e).Select(r => r[field]).FirstOrDefault(x => x != null);
+
+    JsonObject? CategoryRow(Entity e) => ReferenceLayers.CategoryOf(e) is { } c ? RulesFor(e)?["categories"]?[c] as JsonObject : null;
+
+    /// <summary>Whether anything in the view's graphics draws an element otherwise than its styles (a filter's colour or lines, a halftone, a transparency).</summary>
+    public bool HasOverrides =>
+        HasLinks || HasElementGraphics || Discipline != null || (SubjectFaded && Subject != null) || (Graphics?["filters"] as JsonArray)?.OfType<JsonObject>().Any(r => r.Count > 2 || r.Any(kv => kv.Key is not ("id" or "hidden"))) == true
+        || (Graphics?["categories"] as JsonObject)?.Any(c => c.Value?["halftone"] != null || c.Value?["transparency"] != null) == true;
+
+    /// <summary>
+    /// The hatch and fill a filter's row may give the elements it takes (stage 5 of docs/plan-material-graphics.md): cutHatch (a
+    /// pattern, "none"), cutFill (#rrggbb, "none"), hatchColor, hatchHalftone, cutLine {color, weight} for the cut bands;
+    /// surfaceHatch and surfaceFill for the faces an elevation sees; hatchColor and hatchHalftone for both.
+    /// </summary>
+    public static readonly string[] FilterGraphicsFields = ["cutHatch", "cutFill", "hatchColor", "hatchHalftone", "cutLine", "surfaceHatch", "surfaceFill"];
+
+    /// <summary>Every field of a view's filter row: its filter, shown or hidden, its lines and colours (decision 394), its hatch and fill.</summary>
+    public static readonly string[] FilterFields = ["id", "hidden", "color", "halftone", "transparency", "pen", "pattern", .. FilterGraphicsFields];
+
+    bool? _hasFilterGraphics;
+
+    /// <summary>Whether any filter row in the view's graphics (or a link's own) gives a hatch or a fill: none, and no element is asked.</summary>
+    public bool HasFilterGraphics => _hasFilterGraphics ??= new[] { Graphics }.Concat((Graphics?["links"] as JsonObject ?? []).Select(l => l.Value as JsonObject))
+        .Any(g => (g?["filters"] as JsonArray)?.OfType<JsonObject>().Any(r => FilterGraphicsFields.Any(r.ContainsKey)) == true);
+
+    readonly Dictionary<string, FilterLook?> filterLooks = [];
+
+    /// <summary>
+    /// What the filters that take an element give its hatch and fill, field by field: the first filter in the view's order that
+    /// gives a field gives it (Revit's rule, as for a filter's other columns); null when none gives any.
+    /// </summary>
+    public FilterLook? FilterGraphics(Entity e)
+    {
+        if (!HasFilterGraphics) return null;
+        if (filterLooks.TryGetValue(e.Id, out var had)) return had;
+        JsonObject? o = null;
+        var names = new List<string>();
+        foreach (var (f, row) in FiltersOf(RulesFor(e)))
+        {
+            if (!FilterGraphicsFields.Any(row.ContainsKey) || !Takes(f, e)) continue;
+            var gave = false;
+            foreach (var k in FilterGraphicsFields)
+                if (row[k] is { } v && !(o?.ContainsKey(k) ?? false)) { (o ??= [])[k] = v.DeepClone(); gave = true; }
+            if (gave) names.Add(f.Name);
+        }
+        return filterLooks[e.Id] = o == null ? null : new FilterLook(o, string.Join(" + ", names));
+    }
+
+    /// <summary>What the filters taking an element give its hatch and fill (<see cref="FilterGraphicsFields"/>), and the names of those that gave it.</summary>
+    public sealed record FilterLook(JsonObject Row, string Names)
+    {
+        /// <summary>What tells two looks apart: elements of one material join only when the filters draw them alike.</summary>
+        public string Key { get; } = Row.ToJsonString();
+        public bool Gives(string field) => Row.ContainsKey(field);
+    }
+
+    // Decision 718: graphics overridden per element in a view (Revit's Override Graphics in View → By Element).
+
+    /// <summary>
+    /// The view's per-element rows (<see cref="ElementGraphics"/>: the view's own <c>elementGraphics</c>, never a set's or a
+    /// style's, as Revit's by-element overrides stay with their view); null: none.
+    /// </summary>
+    public JsonObject? ElementRows { get; private init; }
+
+    /// <summary>Whether the view overrides any element's graphics (none, and no element is asked).</summary>
+    public bool HasElementGraphics => ElementRows != null;
+
+    /// <summary>The view's own row for an element (<see cref="ElementGraphics.Fields"/>), or null.</summary>
+    public JsonObject? ElementRow(string id) => ElementRows?[id] as JsonObject;
+
+    /// <summary>The colour an element's lines (and its fills, paled) draw in: a filter's colour or halftone, else its category's halftone, else its link's; null: its own.</summary>
+    public string? ColorOf(Entity e)
+    {
+        if (SubjectFaded && OutsideSubject(e)) return Links.Halftone;
+        // The element's own override in this view (decision 718): halftone over everything the view gives it.
+        if (True(ElementRow(e.Id)?["halftone"])) return Links.Halftone;
+        foreach (var r in FilterRows(e))
+        {
+            if ((string?)r["color"] is { Length: 7 } c) return c;
+            if (True(r["halftone"])) return Links.Halftone;
+        }
+        if (True(CategoryRow(e)?["halftone"])) return Links.Halftone;
+        if (OutsideDiscipline(e)) return Links.Halftone;
+        return Halftone(e) ? Links.Halftone : null;
+    }
+
+    /// <summary>The line styles a filter gives an element ({role: {pen, pattern}} for cut and projection), as the per-element overrides read them; null: none.</summary>
+    public JsonObject? LinesOf(Entity e)
+    {
+        var pen = Json.Number(FromFilters(e, "pen"));
+        var pattern = (string?)FromFilters(e, "pattern");
+        if (pen == null && pattern == null) return null;
+        JsonObject Spec()
+        {
+            var o = new JsonObject();
+            if (pen != null) o["pen"] = (int)pen.Value;
+            if (pattern != null) o["pattern"] = pattern;
+            return o;
+        }
+        return new JsonObject { [LineRole.Cut] = Spec(), [LineRole.Projection] = Spec() };
+    }
+
+    /// <summary>How opaque an element draws in 3D: a filter's transparency (0–100), else its category's; a halftone 35 %; null: as it is.</summary>
+    public double? OpacityOf(Entity e)
+    {
+        var t = Json.Number(FromFilters(e, "transparency")) ?? Json.Number(CategoryRow(e)?["transparency"]);
+        if (t is { } pct && pct > 0) return Math.Clamp(1 - pct / 100, 0.05, 1);
+        return ColorOf(e) == Links.Halftone ? 0.35 : null;
+    }
+
+    /// <summary>The colour an annotation category draws in this view (its own, or halftone grey); null: as it is.</summary>
+    public string? AnnotationColor(string category) =>
+        Graphics?["annotations"]?[category] is JsonObject row ? (string?)row["color"] is { Length: 7 } c ? c : True(row["halftone"]) ? Links.Halftone : null : null;
+
+    /// <summary>The level of development the view's graphics keep (decision 394's coarse, medium, fine read as LOD 100, 200, 400; decision 404's), or null; <see cref="ViewDetail.Of"/> says the view's.</summary>
+    public int? DetailLevel => PlanDetail.LodOf(Graphics?["detailLevel"]);
+
+    /// <summary>A mark recoloured as its annotation category says (lines, texts and fills); unchanged otherwise.</summary>
+    public void Recolor(ViewMark mk)
+    {
+        if (OwnerOf(m, mk.Owner) is not { } e || AnnotationOf(e, mk) is not { } ac || AnnotationColor(ac) is not { } color) return;
+        for (var i = 0; i < mk.Lines.Count; i++) mk.Lines[i] = mk.Lines[i] with { Color = color };
+        for (var i = 0; i < mk.Texts.Count; i++) mk.Texts[i] = mk.Texts[i] with { Color = color };
+        for (var i = 0; i < mk.Fills.Count; i++) mk.Fills[i] = mk.Fills[i] with { Color = color };
+    }
+
+    /// <summary>Whether the view hides a components' detail set by its name (forum #224; <c>detailSets</c>: {name: {hidden}}; shown by default).</summary>
+    public bool HidesDetailSet(string set) => HidesDetailSet(Graphics, set);
+
+    /// <summary>Whether graphics hide a detail set (<see cref="HidesDetailSet(string)"/>), read before the rest of a view's graphics.</summary>
+    public static bool HidesDetailSet(JsonObject? graphics, string set) => True(graphics?["detailSets"]?[set]?["hidden"]);
+
+    /// <summary>Whether the view hides an annotation category.</summary>
+    public bool HidesAnnotation(string category) => True(Graphics?["annotations"]?[category]?["hidden"]);
+
+    /// <summary>The view whose graphics these are (null: graphics read as given), whose own annotations <see cref="OwnAnnotationsOnly"/> keeps.</summary>
+    public string? ViewId { get; private init; }
+
+    /// <summary>
+    /// Whether the view shows only the annotations drawn on it (issue #111, decision 722: <c>ownAnnotationsOnly</c>): the marks of
+    /// annotations that come from elsewhere left out, the grids, the levels' marks, the rooms' stamps, other views' section,
+    /// elevation and callout marks and reference planes; its own dimensions, texts, tags, symbols, keys and insets stay.
+    /// </summary>
+    public bool OwnAnnotationsOnly => True(Graphics?["ownAnnotationsOnly"]);
+
+    /// <summary>Whether a mark is an annotation that does not belong to this view (<see cref="OwnAnnotationsOnly"/>): another view's, or the model's (a grid, a level, a room's stamp).</summary>
+    public bool Foreign(Entity e, ViewMark mk) =>
+        ViewId != null && AnnotationOf(e, mk) != null && e.Str("viewId") is var on && on != ViewId && on != Components.DetailView && mk.Data?["via"] == null;
+
+    /// <summary>The subcategories an element's category hides in this view (null: none, so its parts need not be asked).</summary>
+    public JsonObject? HiddenSubs(Entity e)
+    {
+        if (ReferenceLayers.CategoryOf(e) is not { } c || RulesFor(e)?["categories"]?[c]?["sub"] is not JsonObject sub) return null;
+        return sub.Any(s => True(s.Value?["hidden"])) ? sub : null;
+    }
+
+    /// <summary>The graphics a subcategory's row may give beside <c>hidden</c> (decision 682).</summary>
+    public static readonly string[] SubGraphicsFields = ["cutHatch", "fillColor", "lineColor", "lineWeight", "halftone"];
+
+    /// <summary>The fields of a subcategory's row: shown or hidden, and its graphics.</summary>
+    public static readonly string[] SubFields = ["hidden", .. SubGraphicsFields];
+
+    /// <summary>A weight as a row writes it: a pen's name or millimetres, as text or as a number.</summary>
+    public static string? WeightText(JsonNode? n) => n is JsonValue v && v.TryGetValue<string>(out var s) ? s : Json.Number(n)?.ToString(System.Globalization.CultureInfo.InvariantCulture);
+
+    static bool GivesGraphics(JsonNode? row) => row is JsonObject o && SubGraphicsFields.Any(o.ContainsKey);
+
+    bool? _hasSubGraphics;
+
+    /// <summary>
+    /// Whether any subcategory in the view's graphics (or a link's own) gives graphics (decision 682): none, and the drawing asks
+    /// no part for its subcategory.
+    /// </summary>
+    public bool HasSubGraphics => _hasSubGraphics ??= Rows(Graphics).Concat((Graphics?["links"] as JsonObject ?? []).Select(l => l.Value as JsonObject))
+        .Any(g => (g?["categories"] as JsonObject)?.Any(c => (c.Value?["sub"] as JsonObject)?.Any(x => GivesGraphics(x.Value)) == true) == true);
+
+    static IEnumerable<JsonObject?> Rows(JsonObject? g) => [g];
+
+    /// <summary>
+    /// The graphics a part of an element takes from its subcategory in this view (decision 682): its subcategory's row when it gives
+    /// any (cut hatch, fill colour, line colour and weight, halftone), with its category's row (whose fill colour a halftone washes);
+    /// null when its subcategory gives none.
+    /// </summary>
+    public (JsonObject Sub, JsonObject? Category)? SubGraphics(Entity e, string? partKey)
+    {
+        if (!HasSubGraphics || ReferenceLayers.CategoryOf(e) is not { } c || RulesFor(e)?["categories"]?[c] is not JsonObject cat || cat["sub"] is not JsonObject subs) return null;
+        if (SubOf(e, partKey) is not { } s || subs[s] is not JsonObject row || !GivesGraphics(row)) return null;
+        return (row, cat);
+    }
+
+    /// <summary>Whether the view hides one part of an element by its subcategory (a wall's finishes, a door's reveals).</summary>
+    /// <remarks>
+    /// <paramref name="cut"/> false: a part a plan sees under or over its cut plane, not cut by it (a floor under it, a soffit
+    /// over it), which shows as it is: the partial structure display and the finishes by kind of view rule what is cut.
+    /// </remarks>
+    public bool HidesPart(Entity e, string? partKey, bool cut = true)
+    {
+        // The layers the view's partial structure display leaves out (decision 500): the finishes, all but the core.
+        if (cut && Structure != "all" && partKey != null && !ViewStyles.Draws(m, Structure, e.Id, partKey, bands, FinishElements)) return true;
+        // The finish layers of walls or floors, which the view's style leaves out in a view of its kind (topic #30).
+        if (cut && FinishesHidden.Count > 0 && partKey != null && ReferenceLayers.CategoryOf(e) is { } c && FinishesHidden.Contains(c) && SubOf(e, partKey) == "finishes") return true;
+        if (HiddenSubs(e) is not { } sub || SubOf(e, partKey) is not { } s) return false;
+        return True(sub[s]?["hidden"]);
+    }
+
+    /// <summary>
+    /// Whether a whole element is a finish of walls or floors, and of which ("walls", "slabs"): a reference all of finish (a
+    /// plaster part of a wall), a room's finish of its walls or its floor; null otherwise.
+    /// </summary>
+    string? FinishOf(Entity e)
+    {
+        if (e.Class == "LapinRoomFinish") return e.Str("part") switch { "walls" => "walls", "floor" => "slabs", _ => null };
+        // A finish painted on a face (forum topic 83): a wall's side a wall finish, a floor's top a floor finish.
+        if (e.Class == "LapinFinishZone") return e.PredefinedType switch { "CLADDING" when m.Get(e.Str("hostId") ?? "")?.Class == IfcClass.Wall => "walls", "FLOORING" => "slabs", _ => null };
+        return ReferenceLayers.CategoryOf(e) is { } c && c is "walls" or "slabs" && ReferenceLayers.WholeSub(m, e) == "finishes" ? c : null;
+    }
+
+    /// <summary>
+    /// A part's subcategory by its key: a layer (<c>layer:&lt;n&gt;</c>) as its band is the core, a finish
+    /// (<see cref="Materials.IsFinish"/>), an insulation or a membrane (the material's category), or another
+    /// layer; a reveal (<c>reveal…</c>); null for any other part (it goes with its element).
+    /// </summary>
+    public string? SubOf(Entity e, string? partKey)
+    {
+        if (partKey == null) return null;
+        if (partKey.StartsWith("reveal", StringComparison.Ordinal)) return "reveals";
+        if (!partKey.StartsWith("layer:", StringComparison.Ordinal)
+            || !int.TryParse(partKey.AsSpan(6), System.Globalization.CultureInfo.InvariantCulture, out var index)) return null;
+        if (!bands.TryGetValue(e.Id, out var list)) bands[e.Id] = list = LayerSets.DrawnBandsOf(m, e.Id);
+        // A reference's layers, from its file's material (decision 400).
+        if (list == null) return ReferenceLayers.SubOfPart(m, e, partKey);
+        if (index < 0 || index >= list.Count) return null;
+        // By the layer's own category when its type gives one (the forum's topic #30), else its material's.
+        return LayerSets.SubOf(m, list[index]);
+    }
+
+    /// <summary>The entity a mark belongs to: its owner, or the element before the owner's colon (a beam's stirrups) or hash (a grid's axis, grid#A).</summary>
+    public static Entity? OwnerOf(IModelView m, string? owner)
+    {
+        if (owner == null) return null;
+        if (m.Get(owner) is { } e) return e;
+        var cut = owner.IndexOfAny([':', '#']);
+        return cut > 0 ? m.Get(owner[..cut]) : null;
+    }
+
+    /// <summary>
+    /// Whether the view hides a mark by its owner: an element the view hides (a rebar's marks with the rebar, a
+    /// drafted line with the linework, a link's shapes with the link hidden in this view); annotations
+    /// (dimensions, texts, tags) only by their link here.
+    /// </summary>
+    public bool HidesMark(ViewMark mk)
+    {
+        if (OwnerOf(m, mk.Owner) is not { } e) return false;
+        // Annotation categories (stage B): a dimension, a grid, a section's mark, a room's stamp…
+        if (AnnotationOf(e, mk) is { } ac && HidesAnnotation(ac)) return true;
+        // Only its own annotations (decision 722): what comes from elsewhere left out.
+        if (OwnAnnotationsOnly && Foreign(e, mk)) return true;
+        // Imported categories: a DXF import by its file and its layers, a traced PDF or image.
+        if (e.Str(DxfImportKey) is { } imp && ImportRow(imp) is { } ir && (True(ir["hidden"]) || (e.Str("layer") is { } layer && True(ir["layers"]?[layer]?["hidden"])))) return true;
+        if (e.Class == "LapinViewImage" && True(ImportRow(e.Id)?["hidden"])) return true;
+        if (e.Class == IfcClass.Annotation && e.PredefinedType != "DRAFT")
+            return LinkRow(e.Str(Links.Key)) is { } row && True(row["hidden"]);
+        // A room's stamp goes with its room only in the rooms' own marks (they ask the graphics themselves).
+        return Hides(e);
+    }
+}

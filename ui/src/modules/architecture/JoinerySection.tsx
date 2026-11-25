@@ -1,0 +1,134 @@
+/**
+ * A door or window in the inspector: its type (and the configurator), its
+ * width and height (its own over its type's, forum topic 140), its place on
+ * its wall (along it, its sill), and Flip — the hand (left ↔ right)
+ * or the side (interior ↔ exterior).
+ */
+
+import { FlipHorizontal2, FlipVertical2, LayoutGrid, RotateCcw, Settings2, SquareDashed } from 'lucide-react';
+import { joinerySize, sizeArgs } from './joinerySize';
+import { select, useUi } from '../../app/store';
+import { execute, useSession } from '../../engine/session';
+import { mm, num, ofClass, relatedOf, relatingOf, typeOf } from '../../engine/model';
+import type { NodeDto } from '../../engine/protocol';
+import { LengthField } from '../../shell/cells';
+import { sameKind } from '../../shell/params';
+import { AlongField } from './AlongField';
+import { SillFromRows } from './SillFromRows';
+import { sillFromOf } from './sillFrom';
+import { JoineryDataButton } from './JoineryData';
+import type { Position } from './JoineryDialog';
+import { openTypeDialog } from '../../shell/typeToEdit';
+
+/** Doors and windows flip together. */
+const JOINERY = ['IfcDoor', 'IfcWindow'];
+
+/** The doors and windows selected made wall openings of their holes, one step; the first opening selected. */
+async function toOpening(node: NodeDto): Promise<void> {
+  const r = await execute('architecture.fillToOpening', { ids: sameKind(node, JOINERY) }) as { ids?: string[] } | null;
+  if (r?.ids?.[0]) select(r.ids[0]);
+}
+
+export function JoinerySection({ node }: { node: NodeDto }) {
+  const nodes = useSession((s) => s.nodes);
+  const relations = useSession((s) => s.relations);
+  const model = { nodes, relations };
+  const type = typeOf(model, node.id);
+  const types = ofClass(model, node.type === 'IfcDoor' ? 'IfcDoorType' : 'IfcWindowType');
+  const opening = relatingOf(model, node.id, 'IfcRelFillsElement');
+  // A curtain wall's door (report #133): in a cell of the wall it is part of.
+  const curtain = relatingOf(model, node.id, 'IfcRelAggregates');
+  const inCurtain = curtain?.type === 'IfcCurtainWall' ? curtain : null;
+  const wall = opening ? relatingOf(model, opening.id, 'IfcRelVoidsElement') : inCurtain;
+  const setCurtain = (args: Record<string, unknown>) => void execute('architecture.updateCurtainDoor', { ids: sameKind(node, ['IfcDoor']).filter((x) => relatingOf(model, x, 'IfcRelAggregates')?.type === 'IfcCurtainWall'), ...args });
+  const fit = node.props.fit === true;
+  const spec = type?.props.spec as { width?: number; height?: number; position?: Position | null } | undefined;
+  // The frame's place across the wall (report #76): the element's own over the type's.
+  const ownPosition = node.props.position as Position | null | undefined;
+  const position = ownPosition ?? spec?.position ?? null;
+  // Its size: its own over its type's (forum topic 140).
+  const size = joinerySize(node.props, spec);
+  const setSize = (change: { width?: number; height?: number } | 'reset') => void execute('architecture.setJoinerySize', sizeArgs(sameKind(node, JOINERY), change));
+  const setPosition = (p: Position | null) => void execute('architecture.setJoineryPosition', p ? { ids: sameKind(node, JOINERY), ...p } : { ids: sameKind(node, JOINERY), clear: true });
+  const openMode = typeof node.props.openMode === 'string' ? node.props.openMode : 'auto';
+  return (
+    <div className="layers">
+      <label className="type-pick">
+        <span className="eyebrow">Type</span>
+        <span className="row">
+          <select value={type?.id ?? ''} disabled={!node.editable} onChange={(e) => void execute('architecture.setJoineryType', { ids: sameKind(node), typeId: e.target.value })}>
+            {types.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+          <button type="button" className="icon" title="Doors and windows…" onClick={() => openTypeDialog('joinery', type?.id)}><Settings2 size={14} /></button>
+        </span>
+      </label>
+      <dl className="fields">
+        {inCurtain || !node.editable
+          ? <><dt>Size</dt><dd className="num">{inCurtain && fit ? <span>its cell&apos;s</span> : <>{mm(size.width)} × {mm(size.height)}</>}</dd></>
+          : <>
+            {/* Its own width and height over its type's (forum topic 140): one type, many sizes. */}
+            <dt>Width</dt><dd><LengthField testId="joinery-width" metres={size.width} onCommit={(v) => { if (v != null) setSize({ width: v }); }} /></dd>
+            <dt>Height</dt><dd><LengthField testId="joinery-height" metres={size.height} onCommit={(v) => { if (v != null) setSize({ height: v }); }} /></dd>
+            {size.own && <><dt /><dd><button type="button" className="btn" data-action="joinery-type-size" title="Back to its type's width and height: it follows the type again" onClick={() => setSize('reset')}><RotateCcw size={14} />Type's size</button></dd></>}
+          </>}
+        <dt>{inCurtain ? 'In curtain wall' : 'In wall'}</dt><dd>{wall?.name ?? '—'}</dd>
+        {inCurtain && <>
+          <dt>Cell</dt><dd className="num" data-no-i18n>{String(node.props.cell ?? '—')}</dd>
+          {node.editable && <>
+            <dt>Fill the cell</dt><dd><input type="checkbox" data-field="curtain-door-fit" checked={fit} title="Its width and height are the cell's, and follow it when the grid changes" onChange={(e) => setCurtain({ fit: e.target.checked })} /></dd>
+            {!fit && <>
+              <dt>In the cell</dt><dd>
+                <select data-field="curtain-door-align" value={String(node.props.align ?? 'center')} onChange={(e) => setCurtain({ align: e.target.value })}>
+                  <option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option>
+                </select>
+              </dd>
+              <dt>Offset</dt><dd><LengthField metres={num(node, 'offset')} onCommit={(v) => { if (v != null) setCurtain({ offset: v }); }} /></dd>
+            </>}
+          </>}
+        </>}
+        {opening && node.editable && <>
+          <dt>Along the wall</dt><dd><AlongField id={node.id} along={num(opening, 'along')} width={num(opening, 'width') || size.width} /></dd>
+          <dt>Sill</dt><dd><LengthField metres={num(opening, 'sill')} onCommit={(v) => { if (v != null) void execute('architecture.moveOpening', { ids: sameKind(node, JOINERY), sill: v }); }} /></dd>
+          {/* Forum topic 192: the sill from the structural base or the finished floor; chosen alone, the element stays where it is. */}
+          <SillFromRows value={sillFromOf(opening)} wall={wall} onChange={(v) => void execute('architecture.moveOpening', { ids: sameKind(node, JOINERY), sillFrom: v })} />
+        </>}
+        {node.editable && !inCurtain && <>
+          <dt>Frame in the wall</dt><dd>
+            <select data-field="position-from" title="Where the frame sits across the wall; its type’s unless set here" value={ownPosition?.from ?? ''}
+              onChange={(e) => setPosition(e.target.value ? { from: e.target.value as Position['from'], distance: position?.distance ?? 0 } : null)}>
+              <option value="">{spec?.position ? 'As the type' : 'Centred (the type’s)'}</option><option value="exterior">From the exterior finish</option><option value="core">From the core</option><option value="centre">From the wall’s centre</option>
+            </select>
+          </dd>
+          {ownPosition && <><dt>Set back</dt><dd><LengthField metres={ownPosition.distance} onCommit={(v) => { if (v != null) setPosition({ ...ownPosition, distance: v }); }} /></dd></>}
+        </>}
+        {/* Through every wall along its own it passes (forum topic 64): a door from a concrete wall up into the masonry on it. */}
+        {opening && wall?.type === 'IfcWall' && node.editable && <>
+          <dt>Cut also the walls it passes through</dt><dd><input type="checkbox" data-field="cut-through" checked={opening.props.cutThrough !== false}
+            title="Cuts each wall along its own that its opening reaches into (one stacked on it, a lining against it), not only the wall it is in"
+            onChange={(e) => void execute('architecture.setCutThrough', { ids: sameKind(node, JOINERY), on: e.target.checked })} /></dd>
+        </>}
+        <dt>Of its type</dt><dd className="num">{type ? relatedOf(model, type.id, 'IfcRelDefinesByType').length : 0}</dd>
+        {node.editable && <>
+          <dt>State</dt><dd>
+            <select data-field="open-mode" title="Show the door or window open or closed in plan and 3D" value={openMode}
+              onChange={(e) => void execute('architecture.setJoineryOpen', { ids: sameKind(node, JOINERY), mode: e.target.value })}>
+              <option value="auto">Default (plan open, 3D closed)</option>
+              <option value="open">Open (plan &amp; 3D)</option>
+              <option value="closed">Closed (plan &amp; 3D)</option>
+            </select>
+          </dd>
+        </>}
+      </dl>
+      {node.editable && (
+        <div className="row">
+          <button type="button" className="btn" title="Hinges on the other side" onClick={() => void execute('architecture.flipJoinery', { ids: sameKind(node, JOINERY), axis: 'x' })}><FlipHorizontal2 size={14} />Hand</button>
+          <button type="button" className="btn" title="Opens to the other side of the wall" onClick={() => void execute('architecture.flipJoinery', { ids: sameKind(node, JOINERY), axis: 'y' })}><FlipVertical2 size={14} />Side</button>
+          <JoineryDataButton ids={sameKind(node, JOINERY)} typeNode={type} own={node} />
+          {/* The door or window goes, its opening stays in the wall with its size and head (report #114, decision 392). */}
+          {wall?.type === 'IfcWall' && <button type="button" className="btn" data-action="fill-to-opening" onClick={() => void toOpening(node)}><SquareDashed size={14} />Change to opening</button>}
+          {inCurtain && <button type="button" className="btn" data-action="curtain-door-cells" title="The curtain wall's cells: move the door, or give the cells round it a panel type" onClick={() => useUi.setState({ dialog: 'curtainCells', selection: inCurtain.id })}><LayoutGrid size={14} />Panels and doors…</button>}
+        </div>
+      )}
+    </div>
+  );
+}

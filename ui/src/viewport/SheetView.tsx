@@ -1,0 +1,542 @@
+/**
+ * A sheet: its paper as it prints (the engine composes it: frame, title
+ * block, views at their scale), its views moved by dragging (the view's own
+ * pens alone go with the pointer; snapping to the frame and to each other,
+ * with guides), nudged with the arrows (1 mm, 10 mm
+ * with Shift), a schedule's width set by its side handles, a double-click
+ * opening the view or schedule; warnings for what runs past the frame or over
+ * the title block, and a schedule's next page placed on a new sheet. PDF and
+ * DXF out, and Print (decision 236). The frame and the title block are the
+ * paper's, never picked or moved; a click takes the smallest view under it,
+ * a pinned one last. A view's box is cropped by its handles (what it shows
+ * stays put on the paper), what it shows slid inside it with Shift-drag, and
+ * a view may be bound to one of its named boundaries (Annotate → View
+ * boundary), which then gives its box; a pinned view stays where it is.
+ * A right-click on a view places it again at another scale beside itself, cropped to the part dragged on it (decision 547).
+ * Annotate (or a double-click on the paper outside the views) draws on the sheet itself: its paper in the drawing pane,
+ * where the Draft and Annotate tools work in paper millimetres (decision 620).
+ */
+
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { AlignHorizontalJustifyStart, FileDown, Maximize, MessageSquare, PenLine, Pin, PinOff, Printer } from 'lucide-react';
+import { notify, select, useUi } from '../app/store';
+import { usePaneActive, usePaneField } from '../app/pane';
+import { execute, query, useSession } from '../engine/session';
+import { exportFile } from '../engine/files';
+import { RemarkCard, RemarksOverlay } from '../modules/core/cde/pdfRemarks/RemarksOverlay';
+import { countOpen, remarksOf, useRemarkUi } from '../modules/core/cde/pdfRemarks/remarks';
+import { DrawingLayer } from './DrawingLayer';
+import type { PenDto } from './drawing';
+import { printSheet } from './printSheet';
+import { VIEW_DRAG } from '../shell/browserSets';
+import { ScalePicker, StructurePicker } from './ScaleChip';
+import { openContextMenu } from '../shell/ContextMenu';
+import { useStandards } from '../engine/unitsStore';
+import { otherScales, partOf, placeAgainLabel } from './placeAtScale';
+import { openPlaced } from './sheetOpen';
+import { alignDelta, featureAt, type Feature, type Hit } from './sheetAlign';
+import { openPaper } from './paperView';
+import { listSymbols, placeSymbol, previewSymbol, rememberSymbol, type SymList } from '../modules/core/symbols/symbols';
+import { boxOnPaper, pickSymbol, previewArgs, previewKey, symbolsOn, type SheetSymbol } from './sheetSymbols';
+import { deleteTakesViewports, removeSteps, setSheetDelete } from './sheetDelete';
+import { byCategory } from '../modules/core/symbols/symbolModel';
+import { currentNavStyle } from '../app/navStyleStore';
+import { modsOf, pansIn2d, wheelFactor } from '../app/navStyle';
+import { PX_PER_MM, middleDouble, popHistory, pushHistory, recall, remember, useZoomHost, wheelZoom, type ZoomHost } from './zoom';
+
+interface Vp {
+  id: string; viewId: string; x0: number; y0: number; x1: number; y1: number; scale: number; content: boolean; page: number; pages: number; width?: number; warnings: string[];
+  pinned?: boolean; boundary?: string | null; boundaryName?: string | null; name?: string;
+}
+interface SheetDrawing { w: number; h: number; pens: PenDto[]; frame: number[]; titleBlock: number[]; viewports: Vp[] }
+type Drag =
+  | { kind: 'pan'; x: number; y: number; start: { k: number; ox: number; oy: number } }
+  | { kind: 'vp'; x: number; y: number; vp: Vp }
+  | { kind: 'width'; x: number; y: number; vp: Vp; side: -1 | 1 }
+  /** A crop handle: which edges it moves (−1 the left or top, 1 the right or bottom, 0 neither). */
+  | { kind: 'crop'; x: number; y: number; vp: Vp; ex: -1 | 0 | 1; ey: -1 | 0 | 1 }
+  /** Shift-drag inside a view: what it shows slides in its box. */
+  | { kind: 'slide'; x: number; y: number; vp: Vp }
+  /** The part of a view to place again at another scale, dragged on it (paper mm from where it started). */
+  | { kind: 'part'; x: number; y: number; vp: Vp; from: { x: number; y: number } }
+  /** A placed symbol dragged: it moves as one undo step when let go (forum topic 106). */
+  | { kind: 'sym'; x: number; y: number; sym: SheetSymbol };
+
+/** The crop handles: the corners and the edges' middles. */
+const CROP: [-1 | 0 | 1, -1 | 0 | 1][] = [[-1, -1], [0, -1], [1, -1], [1, 0], [1, 1], [0, 1], [-1, 1], [-1, 0]];
+
+const SNAP = 3; // paper mm
+
+export function SheetView() {
+  const id = usePaneField('sheetId');
+  const paneActive = usePaneActive();
+  const nodes = useSession((s) => s.nodes);
+  const sheet = id ? nodes.get(id) : undefined;
+  const [d, setD] = useState<SheetDrawing | null>(null);
+  const ref = useRef<SVGSVGElement>(null);
+  const [size, setSize] = useState({ w: 0, h: 0 });
+  type Zoom = { k: number; ox: number; oy: number };
+  const key = id ?? 'sheet:none';
+  const [z, setZ] = useState<Zoom | null>(() => recall<Zoom>(key) ?? null);
+  useEffect(() => { if (z) remember(key, z); }, [key, z]);
+  const go = useCallback((v: Zoom) => { setZ((old) => { if (old) pushHistory(key, old); return v; }); }, [key]);
+  const drag = useRef<Drag | null>(null);
+  const [moved, setMoved] = useState<{ id: string; dx: number; dy: number; guides: number[][] } | null>(null);
+  const [widened, setWidened] = useState<{ id: string; w: number } | null>(null);
+  const [cropped, setCropped] = useState<{ id: string; x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const [slid, setSlid] = useState<{ id: string; dx: number; dy: number } | null>(null);
+  const [active, setActive] = useState<string | null>(null);
+  // Views added to the active one with Ctrl or Cmd: Delete takes them all off the sheet, in one undo step (forum topic 91).
+  const [also, setAlso] = useState<string[]>([]);
+  // The symbols placed on this sheet: their boxes from their previews, picked, moved and deleted like the views (forum topic 106).
+  const previews = useRef(new Map<string, [number, number, number, number]>());
+  const [previewTick, setPreviewTick] = useState(0);
+  const [hoverSym, setHoverSym] = useState<string | null>(null);
+  const [symMoved, setSymMoved] = useState<{ id: string; dx: number; dy: number } | null>(null);
+  const selected = useUi((x) => x.selected);
+  // A view to place again at another scale (decision 547): the next drag on the paper is the part it shows; a click, its crop as it is.
+  const [placing, setPlacing] = useState<{ vp: Vp; scale: number } | null>(null);
+  const [part, setPart] = useState<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
+  const scales = useStandards((x) => x.scales);
+  const [dropping, setDropping] = useState(false);
+  // Aligning views by what they draw (forum topic 210): a corner or a line in one view, then the one in another that must line up with it.
+  const [aligning, setAligning] = useState<{ ref: Hit | null } | null>(null);
+  const [alignHover, setAlignHover] = useState<Hit | null>(null);
+  // A symbol of the user's own, placed by the next click on the paper (docs/plan-user-extensibility.md §3).
+  const [symbols, setSymbols] = useState<SymList>({ items: [], categories: [] });
+  const [placingSymbol, setPlacingSymbol] = useState<{ id: string; name: string } | null>(null);
+  const symbolVersion = useSession((x) => x.version);
+  useEffect(() => { void listSymbols(false).then(setSymbols); }, [symbolVersion]);
+  // The remarks read from reviewed PDFs: shown over the paper (the screen alone; the sheet prints without them).
+  const showRemarks = useRemarkUi((s) => s.show);
+  const remarkCount = id ? countOpen(nodes, id) : 0;
+  // The overlay draws the open and the resolved ones (a closed remark leaves it): the toggle is there while any is drawn, its number the open ones.
+  const remarksDrawn = id ? remarksOf(nodes, id).some((r) => r.status !== 'closed') : false;
+
+  useEffect(() => {
+    if (!id) return;
+    let live = true;
+    const t = setTimeout(() => { void query<SheetDrawing>('sheet.drawing', { id }).then((r) => { if (live && r) setD(r); }); }, 100);
+    return () => { live = false; clearTimeout(t); };
+  }, [id, nodes]);
+  useEffect(() => { setZ(recall<Zoom>(id ?? 'sheet:none') ?? null); setD(null); setActive(null); setAlso([]); }, [id]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([e]) => setSize({ w: e.contentRect.width, h: e.contentRect.height }));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  /** A box of paper (mm) framed in the pane. */
+  const frame = useCallback((x0: number, y0: number, x1: number, y1: number, pad = 20) => {
+    if (!size.w) return;
+    const k = Math.min(size.w / (x1 - x0 + pad), size.h / (y1 - y0 + pad));
+    go({ k, ox: size.w / 2 - ((x0 + x1) / 2) * k, oy: size.h / 2 - ((y0 + y1) / 2) * k });
+  }, [size, go]);
+  const fit = useCallback(() => { if (d) frame(0, 0, d.w, d.h); }, [d, frame]);
+  useEffect(() => { if (!z && d) fit(); }, [d, z, fit]);
+
+  const moveTo = useCallback((vp: Vp, dx: number, dy: number) => {
+    if (!sheet) return;
+    void execute('sheet.updateViewport', { id: sheet.id, viewportId: vp.id, x: (vp.x0 + vp.x1) / 2 + dx, y: (vp.y0 + vp.y1) / 2 + dy }).then(() => notify(null));
+  }, [sheet]);
+
+  const startAlign = () => {
+    setAligning({ ref: null });
+    setAlignHover(null);
+    ref.current?.focus();
+    notify('Align: click a corner or a straight line in the view to line up with (Esc cancels).');
+  };
+  /** The two clicks of Align: the reference's corner or line, then the one that moves its view to meet it. */
+  const alignClick = (p: { x: number; y: number }) => {
+    if (!aligning || !d) return;
+    const hit = featureAt(d.pens, p, 8 / v.k);
+    if (!hit) return;
+    if (!aligning.ref) { setAligning({ ref: hit }); setAlignHover(null); notify('Now click the corner or line, in another view, that must line up with it (Esc cancels).'); return; }
+    if (hit.viewport === aligning.ref.viewport) { notify('Pick it in another view.'); return; }
+    const vp = d.viewports.find((b) => b.id === hit.viewport);
+    if (!vp) return;
+    if (vp.pinned) { notify('That view is pinned: unpin it to move it, or pick the other way round.'); return; }
+    const to = alignDelta(aligning.ref.feature, hit.feature);
+    if (!to) { notify('A horizontal line cannot line up with a vertical one: pick two of a kind, or a corner.'); return; }
+    if (Math.hypot(to.dx, to.dy) > 0.005) moveTo(vp, to.dx, to.dy);
+    setAligning(null);
+    setAlignHover(null);
+    notify(null);
+  };
+
+  const placedSymbols = id ? symbolsOn(nodes, id) : [];
+  const symbolKeys = placedSymbols.map(previewKey).join('|');
+  useEffect(() => {
+    for (const n of placedSymbols) {
+      const k = previewKey(n);
+      if (previews.current.has(k)) continue;
+      previews.current.set(k, [0, 0, 0, 0]);
+      void previewSymbol({ id: String(n.props.symbolId) }, previewArgs(n)).then((r) => { if (r) { previews.current.set(k, r.box); setPreviewTick((t) => t + 1); } });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbolKeys]);
+  void previewTick;
+  const symbolBoxes: SheetSymbol[] = placedSymbols.flatMap((n) => { const b = previews.current.get(previewKey(n)); return b ? [boxOnPaper(n, b)] : []; });
+
+  // Delete with views active takes those off the sheet (one undo step), never the sheet itself: it is deleted from the project browser (forum topic 91).
+  useEffect(() => {
+    if (!paneActive || !sheet) return;
+    setSheetDelete(() => {
+      const ids = [...(active ? [active] : []), ...also];
+      if (!deleteTakesViewports(ids, useUi.getState().selected, sheet.id)) return false;
+      const steps = removeSteps(sheet.id, ids);
+      void (steps.length === 1 ? execute(steps[0].command, steps[0].args) : execute('edit.batch', { steps })).then(() => notify(null));
+      setActive(null);
+      setAlso([]);
+      return true;
+    });
+    return () => setSheetDelete(null);
+  }, [paneActive, sheet, active, also]);
+
+  // The arrows nudge the active view: 1 mm, 10 mm with Shift; only in the active pane, and never under a dialog or a menu.
+  useEffect(() => {
+    if (!paneActive) return;
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.target as HTMLElement)?.closest('input, select, textarea, [role="dialog"], [role="menu"]') || !active || !d) return;
+      if (useUi.getState().dialog || document.querySelector('[role="dialog"]')) return;
+      const step = e.shiftKey ? 10 : 1;
+      const delta = ({ ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] } as Record<string, number[]>)[e.key];
+      const vp = d.viewports.find((b) => b.id === active);
+      if (!delta || !vp || vp.pinned) return;
+      e.preventDefault();
+      e.stopPropagation();
+      moveTo(vp, delta[0], delta[1]);
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [paneActive, active, d, moveTo]);
+
+  const v = z ?? { k: 1, ox: 0, oy: 0 };
+  const zoomAbout = (k: number, mx = size.w / 2, my = size.h / 2) => ({ k, ox: mx - (mx - v.ox) * (k / v.k), oy: my - (my - v.oy) * (k / v.k) });
+  const host: ZoomHost = {
+    fitAll: fit,
+    fitSelection: () => { const vp = d?.viewports.find((b) => b.id === active); if (!vp) return false; frame(vp.x0, vp.y0, vp.x1, vp.y1, 30); return true; },
+    zoomWindow: (a, b) => frame(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.max(a.x, b.x), Math.max(a.y, b.y), 0),
+    actual: () => go(zoomAbout(PX_PER_MM)),
+    zoomBy: (f) => go(zoomAbout(v.k * f)),
+    previous: () => { const p = popHistory<Zoom>(key); if (!p) return false; setZ(p); return true; },
+  };
+  useZoomHost(paneActive, host);
+  const middleTwice = useRef(middleDouble());
+  const wheelBurst = useRef(0);
+  const toScreen = useCallback((p: { x: number; y: number }) => ({ x: p.x * v.k + v.ox, y: p.y * v.k + v.oy }), [v.k, v.ox, v.oy]);
+  const paperAt = (e: { clientX: number; clientY: number }) => {
+    const r = ref.current!.getBoundingClientRect();
+    return { x: (e.clientX - r.left - v.ox) / v.k, y: (e.clientY - r.top - v.oy) / v.k };
+  };
+  /** The view under a paper point: the smallest box that holds it, a pinned one only when nothing else is there (the frame and title block are never picked). */
+  const pick = (p: { x: number; y: number }) => (d?.viewports ?? [])
+    .filter((b) => p.x >= b.x0 && p.x <= b.x1 && p.y >= b.y0 && p.y <= b.y1)
+    .sort((a, b) => Number(Boolean(a.pinned)) - Number(Boolean(b.pinned)) || (a.x1 - a.x0) * (a.y1 - a.y0) - (b.x1 - b.x0) * (b.y1 - b.y0))[0];
+  const placed = new Set(d?.viewports.map((x) => `${x.viewId}|${x.boundary ?? ''}`) ?? []);
+  const boundariesOf = (viewId: string) => [...nodes.values()].filter((n) => n.type === 'LapinViewBoundary' && n.props.viewId === viewId);
+  const views = [...nodes.values()].filter((n) => n.type === 'LapinView');
+  const storeyPlans = [...nodes.values()].filter((n) => n.type === 'IfcBuildingStorey').map((s) => ({ id: `plan:${s.id}`, name: `${s.name} (plan)` }));
+  const schedules = [...nodes.values()].filter((n) => n.type === 'LapinSchedule' || n.type === 'LapinProfileView').map((x) => ({ id: x.id, name: x.name }));
+  // Every view, and each of its named boundaries (one view may go on several sheets, a boundary each).
+  const placeable = [...storeyPlans, ...views.map((x) => ({ id: x.id, name: x.name })), ...schedules]
+    .flatMap((x) => [{ id: `${x.id}|`, name: x.name }, ...boundariesOf(x.id).map((b) => ({ id: `${x.id}|${b.id}`, name: `${x.name} › ${b.name}` }))])
+    .filter((x) => !placed.has(x.id));
+
+  /** A dragged view snapped: its edges and middle to the frame's and to the other views', with the guides it holds on (paper mm). */
+  const snapMove = (vp: Vp, dx: number, dy: number) => {
+    if (!d) return { dx, dy, guides: [] as number[][] };
+    const xs = [d.frame[0], d.frame[2], (d.frame[0] + d.frame[2]) / 2], ys = [d.frame[1], d.frame[3], (d.frame[1] + d.frame[3]) / 2];
+    for (const o of d.viewports) if (o.id !== vp.id) { xs.push(o.x0, o.x1, (o.x0 + o.x1) / 2); ys.push(o.y0, o.y1, (o.y0 + o.y1) / 2); }
+    const mine = (a: number, b: number) => [a, b, (a + b) / 2];
+    let bx: { d: number; at: number } | null = null, by: { d: number; at: number } | null = null;
+    for (const m of mine(vp.x0 + dx, vp.x1 + dx)) for (const t of xs) { const g = t - m; if (Math.abs(g) < SNAP && (!bx || Math.abs(g) < Math.abs(bx.d))) bx = { d: g, at: t }; }
+    for (const m of mine(vp.y0 + dy, vp.y1 + dy)) for (const t of ys) { const g = t - m; if (Math.abs(g) < SNAP && (!by || Math.abs(g) < Math.abs(by.d))) by = { d: g, at: t }; }
+    const guides: number[][] = [];
+    if (bx) guides.push([bx.at, 0, bx.at, d.h]);
+    if (by) guides.push([0, by.at, d.w, by.at]);
+    return { dx: dx + (bx?.d ?? 0), dy: dy + (by?.d ?? 0), guides };
+  };
+
+  const exportAs = async (kind: 'pdf' | 'dxf') => {
+    if (!sheet) return;
+    const base = `${sheet.props.number ?? ''} ${sheet.name}`.trim();
+    await exportFile(kind === 'pdf' ? 'export.pdf' : 'export.dxf', kind === 'pdf' ? { sheets: [sheet.id] } : { id: sheet.id }, `${base}.${kind}`, kind);
+  };
+
+  /** A schedule's next page on a new sheet. */
+  const continueOn = async (vp: Vp) => {
+    const r = await execute('sheet.create', { paper: sheet?.props.paper, orientation: sheet?.props.orientation, name: `${nodes.get(vp.viewId)?.name ?? 'Schedule'} (continued)` }) as { id?: string } | null;
+    if (r?.id) { await execute('sheet.addViewport', { id: r.id, viewId: vp.viewId, page: vp.page + 1 }); useUi.setState({ sheetId: r.id }); }
+  };
+
+  /** Opening what a viewport shows: a 3D view in the 3D pane with its camera (sheetOpen.ts). */
+  const open = (vp: Vp) => {
+    const to = openPlaced(vp.viewId, nodes.get(vp.viewId));
+    if (to) useUi.setState(to);
+  };
+
+  if (!sheet) return <div className="view-pane"><p className="muted">No sheet.</p></div>;
+  const problems = (d?.viewports ?? []).flatMap((b) => [
+    ...b.warnings.map((w) => ({ b, text: `${nodes.get(b.viewId)?.name ?? 'A view'} ${w === 'outside' ? 'runs past the frame' : 'lies over the title block'}` })),
+    ...(b.content && b.page < b.pages && !(d?.viewports ?? []).some((o) => o.viewId === b.viewId && o.page === b.page + 1)
+      ? [{ b, text: `${nodes.get(b.viewId)?.name ?? 'The schedule'} goes on: ${b.pages - b.page} more page(s)`, next: true }] : []),
+  ]);
+  const activeVp = active ? d?.viewports.find((b) => b.id === active) ?? null : null;
+  return (
+    <div className="view-pane">
+      <div className="view-toolbar sheet-toolbar">
+        <span className="view-title">{String(sheet.props.number ?? '')} · {sheet.name}</span>
+        <select value="" onChange={(e) => { const [viewId, boundaryId] = e.target.value.split('|'); if (viewId) void execute('sheet.addViewport', { id: sheet.id, viewId, ...(boundaryId ? { boundaryId } : {}) }); }} title="Place a view on the sheet (or one of its named boundaries)">
+          <option value="">Place view…</option>
+          {placeable.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}
+        </select>
+        <select value="" data-testid="sheet-place-symbol" title="Place a symbol on the sheet: then click where it goes (Esc cancels)"
+          onChange={(e) => { const sym = symbols.items.find((i) => i.id === e.target.value); if (sym) { rememberSymbol(sym.id); setPlacingSymbol({ id: sym.id, name: sym.name }); ref.current?.focus(); } }}>
+          <option value="">Place symbol…</option>
+          {byCategory(symbols.items, symbols.categories).map(([cat, items]) => <optgroup key={cat} label={cat}>{items.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</optgroup>)}
+        </select>
+        {placingSymbol && <span className="chip" data-no-i18n>{placingSymbol.name} <button type="button" className="link" onClick={() => setPlacingSymbol(null)}>×</button></span>}
+        <button type="button" className="icon" data-testid="sheet-annotate" title="Draw on the sheet itself: texts, leader notes, lines, clouds, hatches, symbols, a legend, a scale bar (in paper mm)"
+          onClick={() => useUi.setState(openPaper(sheet.id))}><PenLine size={14} /><span className="small">Annotate</span></button>
+        <button type="button" className={`icon${aligning ? ' on' : ''}`} data-testid="sheet-align" disabled={!d || d.viewports.filter((b) => !b.content).length < 2}
+          title="Align views by what they draw: click a corner or a straight line in one view, then the one in another that must line up with it; the second view moves (Esc cancels)"
+          onClick={() => (aligning ? (setAligning(null), setAlignHover(null), notify(null)) : startAlign())}><AlignHorizontalJustifyStart size={14} /><span className="small">Align</span></button>
+        <button type="button" className="icon" title="Export PDF" onClick={() => void exportAs('pdf')}><FileDown size={14} /><span className="small">PDF</span></button>
+        <button type="button" className="icon" title="Export DXF" onClick={() => void exportAs('dxf')}><FileDown size={14} /><span className="small">DXF</span></button>
+        <button type="button" className="icon" title="Print the sheet (a plotter at its paper size, 1:1)" data-testid="sheet-print" disabled={!d}
+          onClick={() => d && printSheet(d, `${String(sheet.props.number ?? '')} ${sheet.name}`.trim())}><Printer size={14} /><span className="small">Print</span></button>
+        {remarksDrawn && (
+          <button type="button" className={`icon${showRemarks ? ' on' : ''}`} title="Remarks read from PDFs: show or hide (they never print); the number counts the open ones" data-testid="sheet-remarks-toggle"
+            onClick={() => useRemarkUi.setState({ show: !showRemarks, highlight: null })}><MessageSquare size={14} />{remarkCount > 0 && <span className="small">{remarkCount}</span>}</button>
+        )}
+        {/* The selected view's scale on the sheet (decision 492): its view's own, so every sheet that shows it follows. */}
+        {activeVp && !activeVp.content && <ScalePicker viewId={activeVp.viewId} scale={activeVp.scale} />}
+        {/* Its partial structure display (decision 500): the view's own, so each placed drawing says it apart. */}
+        {activeVp && !activeVp.content && nodes.get(activeVp.viewId)?.props.kind !== '3d' && (
+          <StructurePicker viewId={activeVp.viewId} kind={typeof nodes.get(activeVp.viewId)?.props.kind === 'string' ? nodes.get(activeVp.viewId)!.props.kind as string : 'plan'} />
+        )}
+        <button type="button" className="chip scale" title="The sheet's size on screen against paper · click for paper size (ZA)" onClick={host.actual}>{Math.round((v.k / PX_PER_MM) * 100)} %</button>
+        <button type="button" className="icon" title="Fit (ZE)" onClick={fit}><Maximize size={14} /></button>
+      </div>
+      {problems.length > 0 && (
+        <div className="sheet-warnings">
+          {problems.map((p, i) => (
+            <span key={i} className="chip warn">{p.text}{'next' in p && p.next && <button type="button" className="link" onClick={() => void continueOn(p.b)}>place it on a new sheet</button>}</span>
+          ))}
+        </div>
+      )}
+      <svg ref={ref} className={`plan-svg sheet-svg${dropping ? ' drop-target' : ''}`} data-testid="sheet" tabIndex={0}
+        // A view or schedule dragged from the project browser (decision 287): placed where it is dropped.
+        onDragOver={(e) => { if (e.dataTransfer.types.includes(VIEW_DRAG)) { e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; setDropping(true); } }}
+        onDragLeave={() => setDropping(false)}
+        onDrop={(e) => {
+          setDropping(false);
+          const viewId = e.dataTransfer.getData(VIEW_DRAG);
+          if (!viewId) return;
+          e.preventDefault();
+          const p = paperAt(e);
+          void execute('sheet.addViewport', { id: sheet.id, viewId, x: p.x, y: p.y });
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape' && placingSymbol) { setPlacingSymbol(null); e.stopPropagation(); }
+          if (e.key === 'Escape' && aligning) { setAligning(null); setAlignHover(null); notify(null); e.stopPropagation(); }
+          if (e.key === 'Escape' && placing) { setPlacing(null); setPart(null); notify(null); e.stopPropagation(); }
+        }}
+        onContextMenu={(e) => {
+          const vp = pick(paperAt(e));
+          if (!vp || vp.content) return;
+          e.preventDefault();
+          openContextMenu(e.clientX, e.clientY, otherScales(scales, vp.scale).map((scale) => ({
+            label: placeAgainLabel(scale),
+            onSelect: () => {
+              setActive(vp.id);
+              setPlacing({ vp, scale });
+              ref.current?.focus();
+              notify('Drag a rectangle round the part to show, or click to keep the whole view (Esc cancels).');
+            },
+          })));
+        }}
+        onWheel={(e) => {
+          const r = ref.current!.getBoundingClientRect();
+          const now = performance.now();
+          if (now - wheelBurst.current > 400) pushHistory(key, v);
+          wheelBurst.current = now;
+          setZ(zoomAbout(v.k * wheelFactor(currentNavStyle(), wheelZoom(e, size.h)), e.clientX - r.left, e.clientY - r.top));
+        }}
+        onPointerDown={(e) => {
+          if (middleTwice.current(e)) { fit(); return; }
+          const p = paperAt(e);
+          if (aligning && e.button === 0) { alignClick(p); return; }
+          if (placingSymbol && e.button === 0) { void placeSymbol({ sheetId: sheet.id, symbolId: placingSymbol.id, at: [Math.round(p.x * 100) / 100, Math.round(p.y * 100) / 100] }).then((r) => { if (r?.id) { setActive(null); setAlso([]); select(r.id); } }); return; }
+          if (placing && e.button === 0) { drag.current = { kind: 'part', x: e.clientX, y: e.clientY, vp: placing.vp, from: p }; (e.target as Element).setPointerCapture?.(e.pointerId); return; }
+          // A placed symbol lies over the views: a click selects it, a drag moves it (one undo step), Delete deletes it (forum topic 106).
+          const sym = e.button === 0 ? pickSymbol(symbolBoxes, p) : null;
+          if (sym) {
+            drag.current = { kind: 'sym', x: e.clientX, y: e.clientY, sym };
+            setActive(null);
+            setAlso([]);
+            select(sym.id);
+            (e.target as Element).setPointerCapture?.(e.pointerId);
+            return;
+          }
+          const vp = pick(p);
+          // A pinned view is picked, not moved: the drag pans the paper.
+          if (vp && e.button === 0 && e.shiftKey && !vp.pinned && !vp.content) { drag.current = { kind: 'slide', x: e.clientX, y: e.clientY, vp }; setActive(vp.id); }
+          else if (vp && e.button === 0 && (e.ctrlKey || e.metaKey) && active && active !== vp.id) { setAlso((a) => (a.includes(vp.id) ? a.filter((x) => x !== vp.id) : [...a, vp.id])); select(sheet.id); }
+          else if (vp && e.button === 0 && !vp.pinned) { drag.current = { kind: 'vp', x: e.clientX, y: e.clientY, vp }; setActive(vp.id); setAlso([]); select(sheet.id); }
+          // The paper pans with the left button (as it always did) and with the style's pan buttons; its other buttons do nothing.
+          else if (e.button === 0 || pansIn2d(currentNavStyle(), e.button, modsOf(e))) { drag.current = { kind: 'pan', x: e.clientX, y: e.clientY, start: v }; if (e.button === 0) { setActive(vp?.id ?? null); setAlso([]); if (!vp && selected.some((x) => x !== sheet.id)) select(sheet.id); } }
+          (e.target as Element).setPointerCapture?.(e.pointerId);
+        }}
+        onPointerMove={(e) => {
+          const g = drag.current;
+          if (!g) {
+            if (aligning) { const h = featureAt(d?.pens ?? [], paperAt(e), 8 / v.k); setAlignHover(h && h.viewport === aligning.ref?.viewport ? null : h); return; }
+            const h = pickSymbol(symbolBoxes, paperAt(e))?.id ?? null;
+            setHoverSym((cur) => (cur === h ? cur : h));
+            return;
+          }
+          if (g.kind === 'sym') setSymMoved({ id: g.sym.id, dx: (e.clientX - g.x) / v.k, dy: (e.clientY - g.y) / v.k });
+          else if (g.kind === 'pan') setZ({ ...g.start, ox: g.start.ox + e.clientX - g.x, oy: g.start.oy + e.clientY - g.y });
+          else if (g.kind === 'vp') { const s = snapMove(g.vp, (e.clientX - g.x) / v.k, (e.clientY - g.y) / v.k); setMoved({ id: g.vp.id, ...s }); }
+          else if (g.kind === 'crop') {
+            const dx = (e.clientX - g.x) / v.k, dy = (e.clientY - g.y) / v.k;
+            const b = g.vp;
+            setCropped({ id: b.id, x0: b.x0 + (g.ex < 0 ? dx : 0), x1: b.x1 + (g.ex > 0 ? dx : 0), y0: b.y0 + (g.ey < 0 ? dy : 0), y1: b.y1 + (g.ey > 0 ? dy : 0) });
+          }
+          else if (g.kind === 'slide') setSlid({ id: g.vp.id, dx: (e.clientX - g.x) / v.k, dy: (e.clientY - g.y) / v.k });
+          else if (g.kind === 'part') setPart(partOf(g.from, paperAt(e)));
+          else {
+            const dx = (e.clientX - g.x) / v.k * g.side;
+            setWidened({ id: g.vp.id, w: Math.max(60, (g.vp.x1 - g.vp.x0) + 2 * dx) });
+          }
+        }}
+        onPointerCancel={() => { drag.current = null; setSymMoved(null); setMoved(null); setWidened(null); setCropped(null); setSlid(null); }}
+        onPointerUp={() => {
+          const g = drag.current;
+          drag.current = null;
+          if (g?.kind === 'vp' && moved && Math.hypot(moved.dx, moved.dy) > 0.5) moveTo(g.vp, moved.dx, moved.dy);
+          if (g?.kind === 'sym' && symMoved && Math.hypot(symMoved.dx, symMoved.dy) > 0.3) {
+            void execute('drafting.setSymbol', { ids: [g.sym.id], at: [Math.round((g.sym.at[0] + symMoved.dx) * 100) / 100, Math.round((g.sym.at[1] + symMoved.dy) * 100) / 100] });
+          }
+          if (g?.kind === 'width' && widened) void execute('sheet.updateViewport', { id: sheet.id, viewportId: g.vp.id, width: Math.round(widened.w) });
+          if (g?.kind === 'crop' && cropped) void execute('sheet.cropViewport', { id: sheet.id, viewportId: g.vp.id, x0: cropped.x0, y0: cropped.y0, x1: cropped.x1, y1: cropped.y1 }).then(() => notify(null));
+          if (g?.kind === 'slide' && slid && Math.hypot(slid.dx, slid.dy) > 0.5) void execute('sheet.panViewport', { id: sheet.id, viewportId: g.vp.id, dx: slid.dx, dy: slid.dy });
+          if (g?.kind === 'part' && placing) {
+            void execute('sheet.placeAtScale', { id: sheet.id, viewportId: placing.vp.id, scale: placing.scale, ...(part ?? {}) }).then((r) => {
+              const made = (r as { viewportId?: string } | null)?.viewportId;
+              if (made) { setActive(made); notify(null); }
+            });
+            setPlacing(null);
+            setPart(null);
+          }
+          setSymMoved(null);
+          setMoved(null);
+          setWidened(null);
+          setCropped(null);
+          setSlid(null);
+        }}
+        onPointerLeave={() => setHoverSym(null)}
+        onDoubleClick={(e) => {
+          const vp = pick(paperAt(e));
+          if (vp) open(vp);
+          // Outside the views: drawing on the sheet itself (decision 620).
+          else if (!pickSymbol(symbolBoxes, paperAt(e))) useUi.setState(openPaper(sheet.id));
+        }}>
+        {d && (
+          <>
+            <rect x={v.ox} y={v.oy} width={d.w * v.k} height={d.h * v.k} className="paper-sheet" />
+            {/* While a view is dragged, its own pens go with the pointer; the frame, the title block and the other views stay. */}
+            {moved ? (
+              <>
+                <DrawingLayer drawing={{ pens: d.pens.filter((p) => p.viewport !== moved.id), scale: 1000 }} toScreen={toScreen} pxPerMetre={v.k} minText={1} />
+                <g transform={`translate(${moved.dx * v.k} ${moved.dy * v.k})`}>
+                  <DrawingLayer drawing={{ pens: d.pens.filter((p) => p.viewport === moved.id), scale: 1000 }} toScreen={toScreen} pxPerMetre={v.k} minText={1} />
+                </g>
+              </>
+            ) : slid ? (() => {
+              // Sliding what a view shows: its pens go with the pointer, inside its box.
+              const b = d.viewports.find((x) => x.id === slid.id)!;
+              const a = toScreen({ x: b.x0, y: b.y0 });
+              return (
+                <>
+                  <DrawingLayer drawing={{ pens: d.pens.filter((p) => p.viewport !== slid.id), scale: 1000 }} toScreen={toScreen} pxPerMetre={v.k} minText={1} />
+                  <clipPath id="sheet-slide-clip"><rect x={a.x} y={a.y} width={(b.x1 - b.x0) * v.k} height={(b.y1 - b.y0) * v.k} /></clipPath>
+                  <g clipPath="url(#sheet-slide-clip)"><g transform={`translate(${slid.dx * v.k} ${slid.dy * v.k})`}>
+                    <DrawingLayer drawing={{ pens: d.pens.filter((p) => p.viewport === slid.id), scale: 1000 }} toScreen={toScreen} pxPerMetre={v.k} minText={1} />
+                  </g></g>
+                </>
+              );
+            })() : <DrawingLayer drawing={{ pens: d.pens, scale: 1000 }} toScreen={toScreen} pxPerMetre={v.k} minText={1} screen={size} />}
+            {aligning && [aligning.ref, alignHover].map((h, i) => h && <AlignMark key={i} f={h.feature} toScreen={toScreen} ref0={i === 0} />)}
+            {d.viewports.map((b) => {
+              const box = cropped?.id === b.id ? cropped : b;
+              const a = toScreen({ x: box.x0, y: box.y0 });
+              const dx = moved?.id === b.id ? moved.dx * v.k : 0, dy = moved?.id === b.id ? moved.dy * v.k : 0;
+              const w = (widened?.id === b.id ? widened.w : box.x1 - box.x0) * v.k;
+              const x = widened?.id === b.id ? a.x + ((b.x1 - b.x0) * v.k - w) / 2 : a.x;
+              const h = (box.y1 - box.y0) * v.k;
+              const bounds = b.content ? [] : boundariesOf(b.viewId);
+              return (
+                <g key={b.id} className={`sheet-viewport${b.warnings.length ? ' warn' : ''}${active === b.id || also.includes(b.id) ? ' active' : ''}${b.pinned ? ' pinned' : ''}`}>
+                  <rect x={x + dx} y={a.y + dy} width={w} height={h} />
+                  {/* The crop handles: the corners and the edges' middles; what the view shows stays where it is on the paper. */}
+                  {!b.content && !b.pinned && active === b.id && !moved && CROP.map(([ex, ey]) => (
+                    <rect key={`${ex}${ey}`} className="sheet-handle crop" x={x + (ex + 1) / 2 * w - 4} y={a.y + (ey + 1) / 2 * h - 4} width={8} height={8}
+                      style={{ cursor: ex === 0 ? 'ns-resize' : ey === 0 ? 'ew-resize' : ex === ey ? 'nwse-resize' : 'nesw-resize' }}
+                      onPointerDown={(e) => { e.stopPropagation(); drag.current = { kind: 'crop', x: e.clientX, y: e.clientY, vp: b, ex, ey }; (e.target as Element).setPointerCapture?.(e.pointerId); }}>
+                      <title>{b.boundary ? `Drag to crop: the boundary ${b.boundaryName ?? ''} follows in its view` : 'Drag to crop what the view shows (Shift-drag inside it to slide the drawing)'}</title>
+                    </rect>
+                  ))}
+                  {b.content && active === b.id && ([-1, 1] as const).map((side) => (
+                    <rect key={side} className="sheet-handle" x={(side < 0 ? x : x + w) + dx - 4} y={a.y + dy + h / 2 - 10} width={8} height={20}
+                      onPointerDown={(e) => { e.stopPropagation(); drag.current = { kind: 'width', x: e.clientX, y: e.clientY, vp: b, side }; (e.target as Element).setPointerCapture?.(e.pointerId); }}><title>Drag to set the width</title></rect>
+                  ))}
+                  <foreignObject x={x + dx + w - (active === b.id && bounds.length > 0 ? 200 : 66)} y={a.y + dy + 2} width={active === b.id && bounds.length > 0 ? 198 : 64} height={22}>
+                    <span className="row sheet-vp-tools" style={{ gap: 2, justifyContent: 'flex-end' }}>
+                      {active === b.id && bounds.length > 0 && (
+                        <select className="mini" value={b.boundary ?? ''} title="What the view shows: one of its named boundaries, or a box cropped here" onPointerDown={(e) => e.stopPropagation()}
+                          onChange={(e) => void execute('sheet.updateViewport', { id: sheet.id, viewportId: b.id, boundary: e.target.value || null })}>
+                          <option value="">Free crop</option>
+                          {bounds.map((n) => <option key={n.id} value={n.id}>{n.name}</option>)}
+                        </select>
+                      )}
+                      <button type="button" className={`icon mini${b.pinned ? ' on' : ''}`} title={b.pinned ? 'Pinned: it stays where it is. Click to unpin' : 'Pin it to the sheet: not moved, nudged or cropped by mistake'} onPointerDown={(e) => e.stopPropagation()}
+                        onClick={() => void execute('sheet.updateViewport', { id: sheet.id, viewportId: b.id, pinned: !b.pinned })}>{b.pinned ? <Pin size={11} /> : <PinOff size={11} />}</button>
+                      <button type="button" className="icon mini" title="Edit: open the view (or double-click it)" onPointerDown={(e) => e.stopPropagation()} onClick={() => open(b)}>✎</button>
+                      <button type="button" className="icon mini" title="Take the view off the sheet" onPointerDown={(e) => e.stopPropagation()}
+                        onClick={() => void execute('sheet.removeViewport', { id: sheet.id, viewportId: b.id })}>×</button>
+                    </span>
+                  </foreignObject>
+                </g>
+              );
+            })}
+            {symbolBoxes.map((b) => {
+              const lit = selected.includes(b.id), over = hoverSym === b.id;
+              if (!lit && !over && symMoved?.id !== b.id) return null;
+              const o = symMoved?.id === b.id ? symMoved : { dx: 0, dy: 0 };
+              const a = toScreen({ x: b.box[0] + o.dx, y: b.box[1] + o.dy });
+              return <rect key={`sym:${b.id}`} className={`sheet-symbol${lit ? ' selected' : ''}`} data-testid="sheet-symbol-box" x={a.x - 2} y={a.y - 2} width={(b.box[2] - b.box[0]) * v.k + 4} height={(b.box[3] - b.box[1]) * v.k + 4}
+                fill="none" stroke="var(--accent, #2b7de9)" strokeWidth={lit ? 1.5 : 1} strokeDasharray={lit ? undefined : '4 3'} pointerEvents="none" />;
+            })}
+            {part && (() => { const a = toScreen({ x: part.x0, y: part.y0 }); return <rect className="sheet-part" data-testid="sheet-place-part" x={a.x} y={a.y} width={(part.x1 - part.x0) * v.k} height={(part.y1 - part.y0) * v.k} fill="none" stroke="var(--accent, #2b7de9)" strokeDasharray="6 3" />; })()}
+            {moved?.guides.map((g, i) => { const p = toScreen({ x: g[0], y: g[1] }), q = toScreen({ x: g[2], y: g[3] }); return <line key={i} className="sheet-guide" x1={p.x} y1={p.y} x2={q.x} y2={q.y} />; })}
+            {showRemarks && <RemarksOverlay sheetId={sheet.id} toScreen={toScreen} k={v.k} />}
+          </>
+        )}
+      </svg>
+      {showRemarks && <RemarkCard sheetId={sheet.id} />}
+    </div>
+  );
+}
+
+/** The corner or line picked to align by: a square, or the line across its length, in the accent colour (the reference solid, the hover dashed). */
+function AlignMark({ f, toScreen, ref0 }: { f: Feature; toScreen: (p: { x: number; y: number }) => { x: number; y: number }; ref0: boolean }) {
+  const common = { className: 'sheet-align-mark', pointerEvents: 'none' as const, strokeDasharray: ref0 ? undefined : '5 3' };
+  if (f.kind === 'point') { const a = toScreen(f); return <rect {...common} x={a.x - 5} y={a.y - 5} width={10} height={10} />; }
+  if (f.kind === 'h') { const a = toScreen({ x: f.x0, y: f.y }), b = toScreen({ x: f.x1, y: f.y }); return <line {...common} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />; }
+  const a = toScreen({ x: f.x, y: f.y0 }), b = toScreen({ x: f.x, y: f.y1 });
+  return <line {...common} x1={a.x} y1={a.y} x2={b.x} y2={b.y} />;
+}

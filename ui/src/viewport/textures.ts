@@ -1,0 +1,471 @@
+/**
+ * Materials' looks in 3D: textures drawn here (no image files), tinted by the
+ * material's colour, laid on by box projection in metres (a brick course is
+ * 65 mm wherever the wall is). A material names its texture (`texture`), or
+ * it is guessed from its section hatch and its name.
+ */
+
+import * as THREE from 'three';
+import type { NodeDto } from '../engine/protocol';
+import { rotateUv } from './look';
+import { useSession } from '../engine/session';
+
+export type TextureKind = 'brick' | 'brick-end' | 'concrete' | 'wood' | 'wood-end' | 'plaster' | 'stone' | 'metal' | 'insulation' | 'earth' | 'tiles';
+/** Which face of a part a texture is for: along it, its ends (cut across), its top and bottom. */
+export type Face = 'side' | 'end' | 'top';
+
+/** A texture's repeat on the model (m per tile); wood is eight 150 mm boards, each 1.2 m long. */
+export const TILE: Record<TextureKind, number> = { brick: 0.52, 'brick-end': 0.5, concrete: 1, wood: 1.2, 'wood-end': 0.4, plaster: 1, stone: 0.8, metal: 0.5, insulation: 0.4, earth: 2, tiles: 0.6 };
+
+/** What a material looks like in 3D on a face (null: plain): its own texture for that face, else the faces' (the ends of brick and wood show their section). */
+export function textureOf(material: NodeDto | undefined, face: Face = 'side'): TextureKind | null {
+  if (!material) return null;
+  if (face !== 'side') {
+    const key = face === 'end' ? 'textureEnd' : 'textureTop';
+    const ownFace = material.props[key] ?? (face === 'top' ? material.props.textureEnd : undefined);
+    if (ownFace === 'none') return null;
+    if (typeof ownFace === 'string' && ownFace in TILE) return ownFace as TextureKind;
+    const side = textureOf(material, 'side');
+    return side === 'brick' ? 'brick-end' : side === 'wood' ? 'wood-end' : side;
+  }
+  const own = material.props.texture;
+  if (own === 'none') return null;
+  if (typeof own === 'string' && own in TILE) return own as TextureKind;
+  const hatch = String((material.props.section as { hatch?: string } | undefined)?.hatch ?? '').toUpperCase();
+  const byHatch: Record<string, TextureKind> = { BRICK: 'brick', CONCRETE: 'concrete', RCONCRETE: 'concrete', MASONRY: 'brick', RIGID: 'insulation', GYPSUM: 'plaster', SAND: 'earth', WOOD: 'wood', WOODCROSS: 'wood', INSULATION: 'insulation', BATT: 'insulation', FOAMBOARD: 'insulation', REFLECTIVE: 'insulation', BLANKET: 'insulation', FIBERGLASS: 'insulation', BLOWNIN: 'insulation', RIGIDFOAM: 'insulation', ACOUSTIC: 'insulation', RIGIDFIBER: 'insulation', COTTONFIBER: 'insulation', EARTH: 'earth', TILES: 'tiles', STEEL: 'metal', GRAVEL: 'earth', BOARDS: 'wood', STONE: 'stone', VERTICAL: 'metal' };
+  if (byHatch[hatch]) return byHatch[hatch];
+  const n = material.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+  if (/brick|caramid|masonry|zidari/.test(n)) return 'brick';
+  if (/concrete|beton|screed|sapa/.test(n)) return 'concrete';
+  // Floors of wood by any name (report #76: parquet and laminate came out plain grey).
+  if (/timber|wood|lemn|clt|osb|parquet|parchet|laminat|plank|scandur|deck|oak|stejar|pine|beech|walnut|plywood|placaj/.test(n)) return 'wood';
+  if (/insul|wool|eps|xps|vata|polistiren/.test(n)) return 'insulation';
+  if (/plaster|render|tencu|gips/.test(n)) return 'plaster';
+  if (/stone|piatra|granit|marmur/.test(n)) return 'stone';
+  if (/steel|metal|otel|alumin|zinc/.test(n)) return 'metal';
+  if (/earth|soil|pamant|ground/.test(n)) return 'earth';
+  if (/tile|ceramic|gresie|faianta/.test(n)) return 'tiles';
+  return null;
+}
+
+const cache = new Map<string, THREE.Texture>();
+
+function shade(hex: string, k: number): string {
+  const c = new THREE.Color(hex);
+  c.multiplyScalar(k);
+  return `#${c.getHexString()}`;
+}
+
+/** A seeded noise, so a texture comes out the same each time. */
+function rng(seed: number) { return () => ((seed = (seed * 16807) % 2147483647) / 2147483647); }
+
+function draw(kind: TextureKind, color: string): HTMLCanvasElement {
+  const S = 256;
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = S;
+  const g = cv.getContext('2d')!;
+  const r = rng(kind.length * 977 + 13);
+  g.fillStyle = color;
+  g.fillRect(0, 0, S, S);
+  const speckle = (n: number, dark: number, light: number, size = 2) => {
+    for (let i = 0; i < n; i++) { g.fillStyle = r() < 0.5 ? shade(color, dark) : shade(color, light); g.fillRect(r() * S, r() * S, size, size); }
+  };
+  switch (kind) {
+    case 'brick': {
+      // 250 × 65 bricks, 10 mm joints: 2 bricks a tile across (0.52 m), 8 courses up (75 mm each, 0.6 m → drawn on the square).
+      const rows = 8, cols = 2, jh = S / rows, jw = S / cols;
+      for (let y = 0; y < rows; y++)
+        for (let x = -1; x < cols; x++) {
+          const off = y % 2 ? jw / 2 : 0;
+          g.fillStyle = shade(color, 0.85 + r() * 0.3);
+          g.fillRect(x * jw + off + 2, y * jh + 2, jw - 4, jh - 4);
+        }
+      g.fillStyle = shade(color, 1.45);
+      for (let y = 0; y <= rows; y++) g.fillRect(0, y * jh - 1, S, 2);
+      break;
+    }
+    case 'brick-end': {
+      // A hollow block seen across: 2 blocks a tile, each with three rows of holes in its web.
+      const cols = 2, rows = 4, bw = S / cols, bh = S / rows;
+      for (let y = 0; y < rows; y++)
+        for (let x = 0; x < cols; x++) {
+          const off = y % 2 ? bw / 2 : 0;
+          const bx = x * bw + off, by = y * bh;
+          g.fillStyle = shade(color, 0.9 + r() * 0.2);
+          g.fillRect(bx + 2, by + 2, bw - 4, bh - 4);
+          g.fillStyle = shade(color, 0.45);
+          for (let hy = 0; hy < 3; hy++) for (let hx = 0; hx < 4; hx++) g.fillRect(bx + 8 + hx * (bw - 16) / 4 + 2, by + 6 + hy * (bh - 12) / 3 + 2, (bw - 16) / 4 - 4, (bh - 12) / 3 - 4);
+          if (off) { g.fillStyle = shade(color, 0.9); g.fillRect(bx - bw + 2, by + 2, bw - 4, bh - 4); }
+        }
+      g.fillStyle = shade(color, 1.45);
+      for (let y = 0; y <= rows; y++) g.fillRect(0, y * bh - 1, S, 2);
+      break;
+    }
+    case 'wood-end': {
+      // End grain: rings about a point off the tile, every few millimetres.
+      g.strokeStyle = shade(color, 0.72); g.lineWidth = 1.5;
+      for (let i = 0; i < 40; i++) { g.beginPath(); g.arc(S * 0.15, S * 1.1, 10 + i * 9 + r() * 3, 0, 7); g.stroke(); }
+      speckle(600, 0.9, 1.08);
+      break;
+    }
+    case 'concrete': speckle(2600, 0.85, 1.12); for (let i = 0; i < 40; i++) { g.fillStyle = shade(color, 0.75); g.beginPath(); g.arc(r() * S, r() * S, 1 + r() * 2, 0, 7); g.fill(); } break;
+    case 'plaster': speckle(1800, 0.93, 1.06, 3); break;
+    case 'stone': {
+      for (let i = 0; i < 26; i++) { g.fillStyle = shade(color, 0.8 + r() * 0.4); g.fillRect(r() * S, r() * S, 30 + r() * 60, 20 + r() * 40); }
+      speckle(1200, 0.85, 1.1);
+      break;
+    }
+    case 'wood': {
+      // Planks: eight boards a tile (150 mm of 1.2 m), each its own shade, end joints staggered, the grain along them.
+      const rows = 8, h = S / rows;
+      for (let y = 0; y < rows; y++) {
+        const joints = [((y * 0.37) % 1) * S, (((y * 0.37) % 1 + 0.5 + (y % 3) * 0.07) % 1) * S].sort((a, b) => a - b);
+        const cuts = [0, ...joints, S];
+        for (let k = 0; k + 1 < cuts.length; k++) {
+          const [x0, x1] = [cuts[k], cuts[k + 1]];
+          g.fillStyle = shade(color, 0.86 + r() * 0.24);
+          g.fillRect(x0, y * h, x1 - x0, h);
+          g.strokeStyle = shade(color, 0.78); g.lineWidth = 1;
+          for (let i = 0; i < 4; i++) {
+            const gy = y * h + 3 + r() * (h - 6), ph = r() * 6;
+            g.beginPath(); g.moveTo(x0, gy);
+            for (let x = x0; x <= x1; x += 8) g.lineTo(x, gy + Math.sin(x * 0.05 + ph) * 1.2);
+            g.stroke();
+          }
+        }
+        // The joint between boards along, and the board ends.
+        g.fillStyle = shade(color, 0.55);
+        g.fillRect(0, y * h, S, 1);
+        for (const x of joints) g.fillRect(x, y * h, 1, h);
+      }
+      break;
+    }
+    case 'metal': for (let x = 0; x < S; x += S / 8) { g.fillStyle = shade(color, 0.82); g.fillRect(x, 0, 3, S); g.fillStyle = shade(color, 1.15); g.fillRect(x + 3, 0, 2, S); } break;
+    case 'insulation': {
+      g.strokeStyle = shade(color, 0.75); g.lineWidth = 2;
+      for (let y = 8; y < S; y += 16) { g.beginPath(); for (let x = 0; x <= S; x += 8) g.lineTo(x, y + Math.sin(x * 0.2) * 5); g.stroke(); }
+      break;
+    }
+    case 'earth': speckle(4200, 0.75, 1.2, 3); break;
+    case 'tiles': g.fillStyle = shade(color, 0.7); for (let i = 0; i <= 4; i++) { g.fillRect(i * S / 4 - 1, 0, 2, S); g.fillRect(0, i * S / 4 - 1, S, 2); } break;
+  }
+  return cv;
+}
+
+/** The texture of a kind in a colour (made once). */
+export function textureFor(kind: TextureKind, color: string): THREE.Texture {
+  const key = `${kind}:${color}`;
+  let t = cache.get(key);
+  if (!t) {
+    t = new THREE.CanvasTexture(draw(kind, color));
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    // Shared by every mesh in that material: a mesh that goes leaves it.
+    t.userData.shared = true;
+    cache.set(key, t);
+  }
+  return t;
+}
+
+/**
+ * Box-projected texture coordinates (metres / the texture's tile) for a geometry with normals; the tile's size given
+ * (a material's own, width × height in metres) or the texture's, turned by `rotation` degrees.
+ */
+export function boxUv(geometry: THREE.BufferGeometry, kind: TextureKind, size?: [number, number] | null, rotation = 0): void {
+  const [tw, th] = size ?? [TILE[kind], TILE[kind]];
+  boxUvSized(geometry, tw, th, rotation);
+}
+
+/** A material's own size for its drawn texture, when it sets one (textureSize). */
+export function tileOf(material: NodeDto | undefined): [number, number] | null {
+  const size = material?.props.textureSize;
+  return Array.isArray(size) && size.length === 2 && size.every((x) => typeof x === 'number' && x > 0) ? [size[0] as number, size[1] as number] : null;
+}
+
+
+/**
+ * A part's triangles by the face they lie on: top and bottom (horizontal),
+ * its sides (the vertical faces of the direction with the most area: a wall's
+ * faces along it) and its ends (the vertical faces across that direction).
+ */
+export function splitByFace(positions: Float32Array, indices: Uint32Array): Record<Face, Uint32Array> {
+  const n = indices.length / 3;
+  const nx = new Float64Array(n), ny = new Float64Array(n), nz = new Float64Array(n), area = new Float64Array(n);
+  for (let t = 0; t < n; t++) {
+    const [a, b, c] = [indices[3 * t] * 3, indices[3 * t + 1] * 3, indices[3 * t + 2] * 3];
+    const ux = positions[b] - positions[a], uy = positions[b + 1] - positions[a + 1], uz = positions[b + 2] - positions[a + 2];
+    const vx = positions[c] - positions[a], vy = positions[c + 1] - positions[a + 1], vz = positions[c + 2] - positions[a + 2];
+    const x = uy * vz - uz * vy, y = uz * vx - ux * vz, z = ux * vy - uy * vx;
+    const l = Math.hypot(x, y, z) || 1;
+    nx[t] = x / l; ny[t] = y / l; nz[t] = z / l; area[t] = l / 2;
+  }
+  // The sides' direction: the horizontal normal direction (folded over 180°) carrying the most area, in 5° bins.
+  const bins = new Float64Array(36);
+  for (let t = 0; t < n; t++) {
+    if (Math.abs(nz[t]) > 0.7) continue;
+    const ang = (Math.atan2(ny[t], nx[t]) * 180) / Math.PI;
+    bins[Math.floor((((ang % 180) + 180) % 180) / 5) % 36] += area[t];
+  }
+  let best = 0;
+  for (let i = 1; i < 36; i++) if (bins[i] > bins[best]) best = i;
+  const side = ((best + 0.5) * 5 * Math.PI) / 180;
+  const sx = Math.cos(side), sy = Math.sin(side);
+  const out: Record<Face, number[]> = { side: [], end: [], top: [] };
+  for (let t = 0; t < n; t++) {
+    const face: Face = Math.abs(nz[t]) > 0.7 ? 'top' : Math.abs(nx[t] * sx + ny[t] * sy) < 0.5 ? 'end' : 'side';
+    out[face].push(indices[3 * t], indices[3 * t + 1], indices[3 * t + 2]);
+  }
+  return { side: Uint32Array.from(out.side), end: Uint32Array.from(out.end), top: Uint32Array.from(out.top) };
+}
+
+// ─── A material's own image (Materials → Own image): the user's file, laid on in metres ───
+
+/** A material's own image: its id, its file as a data URL, and how large it lies on the model (metres). */
+export interface OwnImage { id: string; url: string; width: number; height: number }
+
+/** The attributes a material names its images by: its own texture, its normal map, its bump map, its roughness and occlusion maps (Images.MaterialKeys). */
+export type ImageKey = 'textureImage' | 'normalImage' | 'bumpImage' | 'roughnessImage' | 'aoImage';
+
+/** The image a material brings (by default its own texture), or null (then its drawn texture, or its colour). */
+export function imageOf(material: NodeDto | undefined, nodes: Map<string, NodeDto>, key: ImageKey = 'textureImage'): OwnImage | null {
+  const id = material?.props[key];
+  if (typeof id !== 'string') return null;
+  const img = nodes.get(id);
+  const data = img?.props.data, mime = img?.props.mime;
+  if (typeof data !== 'string' || typeof mime !== 'string') return null;
+  const size = material?.props.textureSize;
+  const [w, h] = Array.isArray(size) && size.length === 2 && size.every((x) => typeof x === 'number' && x > 0) ? (size as number[]) : [1, 1];
+  return { id, url: `data:${mime};base64,${data}`, width: w, height: h };
+}
+
+/**
+ * A material's relief and surface maps: its normal map and its bump map, its roughness map and its ambient occlusion map
+ * (docs/plan-render.md, S1), each laid on as its own image is (its size in metres, its turn).
+ */
+export interface Relief { normal: OwnImage | null; bump: OwnImage | null; roughness?: OwnImage | null; ao?: OwnImage | null }
+
+export function reliefOf(material: NodeDto | undefined, nodes: Map<string, NodeDto>): Relief {
+  return {
+    normal: imageOf(material, nodes, 'normalImage'), bump: imageOf(material, nodes, 'bumpImage'),
+    roughness: imageOf(material, nodes, 'roughnessImage'), ao: imageOf(material, nodes, 'aoImage'),
+  };
+}
+
+/** Whether a relief has any map (its faces then need texture coordinates). */
+export const hasRelief = (r: Relief): boolean => !!(r.normal || r.bump || r.roughness || r.ao);
+
+/**
+ * Whether the surface maps (roughness, occlusion) show (docs/plan-render.md, S1): in the medium and realistic views, not in the
+ * drawing one, which keeps its flat light; switched in place on the materials (surfaceMaps), as glass is.
+ */
+let surfaceOn = false;
+
+/** A material's roughness and occlusion maps put on or taken off, by the view's profile. */
+function applySurface(m: THREE.MeshStandardMaterial, on: boolean): void {
+  const s = m.userData.surface as { roughness?: THREE.Texture; ao?: THREE.Texture; aoStrength: number } | undefined;
+  if (!s) return;
+  const roughness = on ? s.roughness ?? null : null, ao = on ? s.ao ?? null : null;
+  if (m.roughnessMap === roughness && m.aoMap === ao) return;
+  m.roughnessMap = roughness;
+  m.aoMap = ao;
+  m.aoMapIntensity = s.aoStrength;
+  m.needsUpdate = true;
+}
+
+/** The surface maps on (medium, realistic) or off (drawing), through the scene and for the materials made from now on. */
+export function surfaceMaps(root: THREE.Object3D, on: boolean): void {
+  surfaceOn = on;
+  root.traverse((o) => {
+    const mat = (o as THREE.Mesh).material as THREE.Material | THREE.Material[] | undefined;
+    for (const m of Array.isArray(mat) ? mat : mat ? [mat] : []) if (m.userData.surface) applySurface(m as THREE.MeshStandardMaterial, on);
+  });
+}
+
+/**
+ * What a relief map's import sets on the material: the image, and the size its images lie at when it has none yet
+ * (1 m wide, high as the picture's proportion), so the map and the texture share one size.
+ */
+export function reliefArgs(key: string, imageId: string, aspect: number, size: unknown): Record<string, unknown> {
+  const args: Record<string, unknown> = { [key]: imageId };
+  if (!(Array.isArray(size) && size.length === 2)) args.textureSize = [1, Math.round(aspect * 1000) / 1000];
+  return args;
+}
+
+/** The size a material's images lie at, metres: its textureSize, else 1 × 1 (Images.SizeOf). */
+export function sizeOf(material: NodeDto | undefined): [number, number] {
+  return tileOf(material) ?? [1, 1];
+}
+
+/**
+ * A material given its relief (report #76): the normal map tilting its shading at its strength, the bump map raising
+ * its white at its own; read as data (no colour space), repeated as its texture is. The face needs its uv.
+ */
+export function withRelief<M extends THREE.MeshStandardMaterial>(m: M, relief: Relief, normalStrength: number, bumpStrength: number, copy?: (t: THREE.Texture) => THREE.Texture, aoStrength = 1, surface: boolean = surfaceOn): M {
+  // The roughness map (its roughness multiplies it, as glTF's factor) and the occlusion map: data, kept on the material and
+  // shown by the profile (surfaceMaps); a preview passes its own `surface`.
+  if (relief.roughness || relief.ao) {
+    const tex = (img: OwnImage) => { const t = imageTexture(img, THREE.RepeatWrapping, true); return copy ? copy(t) : t; };
+    m.userData.surface = { roughness: relief.roughness ? tex(relief.roughness) : undefined, ao: relief.ao ? tex(relief.ao) : undefined, aoStrength };
+    applySurface(m, surface);
+  }
+  if (relief.normal) {
+    const t = imageTexture(relief.normal, THREE.RepeatWrapping, true);
+    m.normalMap = copy ? copy(t) : t;
+    m.normalScale = new THREE.Vector2(normalStrength, normalStrength);
+  }
+  if (relief.bump) {
+    const t = imageTexture(relief.bump, THREE.RepeatWrapping, true);
+    m.bumpMap = copy ? copy(t) : t;
+    // three's bumpScale is in the scene's units per the image's full range; a few millimetres at strength 1.
+    m.bumpScale = 0.005 * bumpStrength;
+  }
+  if (relief.normal || relief.bump) m.needsUpdate = true;
+  return m;
+}
+
+/** An entourage picture's coordinates on its card: the whole image across the card's width (turned by the figure's rotation) and up its height. */
+export function pictureUv(geometry: THREE.BufferGeometry, rotation = 0): void {
+  const pos = geometry.getAttribute('position');
+  if (!pos?.count) return;
+  const angle = rotation * Math.PI / 180;
+  const c = Math.cos(angle), s = Math.sin(angle);
+  let left = Infinity, right = -Infinity, bottom = Infinity, top = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i) * c + pos.getY(i) * s, z = pos.getZ(i);
+    left = Math.min(left, x); right = Math.max(right, x);
+    bottom = Math.min(bottom, z); top = Math.max(top, z);
+  }
+  const width = right - left || 1, height = top - bottom || 1;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    uv[2 * i] = (pos.getX(i) * c + pos.getY(i) * s - left) / width;
+    uv[2 * i + 1] = (pos.getZ(i) - bottom) / height;
+  }
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+/** The picture an entourage figure of a picture kind wears (decision 468), or null (a built-in kind, or its picture missing). */
+export function pictureOf(figureId: string, nodes: Map<string, NodeDto>): OwnImage | null {
+  const figure = nodes.get(figureId);
+  if (!figure || figure.type !== 'LapinEntourage') return null;
+  const kindId = figure.props.kind;
+  const kind = typeof kindId === 'string' ? nodes.get(kindId) : undefined;
+  if (!kind || kind.type !== 'LapinEntourageKind') return null;
+  const imageId = kind.props.image;
+  const img = typeof imageId === 'string' ? nodes.get(imageId) : undefined;
+  const data = img?.props.data, mime = img?.props.mime;
+  if (typeof data !== 'string' || typeof mime !== 'string') return null;
+  const width = typeof kind.props.width === 'number' ? kind.props.width : 0.7;
+  const height = typeof kind.props.height === 'number' ? kind.props.height : 1.75;
+  return { id: String(imageId), url: `data:${mime};base64,${data}`, width, height };
+}
+
+/** The images' textures, by image and wrap: repeated on a material's faces, clamped on an orthophoto. */
+const images = new Map<string, THREE.Texture>();
+const listeners = new Set<() => void>();
+
+/** Called when an image has loaded (the 3D view draws only when told). */
+export function whenImagesLoad(f: () => void): () => void {
+  listeners.add(f);
+  return () => { listeners.delete(f); };
+}
+
+/** The image's length and a sample of its bytes: what tells one picture from another under one id. */
+export function imageSignature(url: string): string {
+  let h = 0;
+  const step = Math.max(1, Math.floor(url.length / 64));
+  for (let i = 0; i < url.length; i += step) h = (Math.imul(h, 31) + url.charCodeAt(i)) | 0;
+  return `${url.length}.${(h >>> 0).toString(36)}`;
+}
+
+/** Free the image textures whose image id `keep` refuses. */
+export function dropImageTextures(keep: (id: string) => boolean): void {
+  for (const [k, t] of images) {
+    if (keep(k.slice(0, k.indexOf('@')))) continue;
+    t.dispose();
+    images.delete(k);
+  }
+}
+
+// An image whose node is gone (the project closed, the image deleted) frees its texture.
+let lastNodes: unknown = null;
+if (typeof useSession?.subscribe === 'function') {
+  useSession.subscribe((st) => {
+    if (st.nodes === lastNodes) return;
+    lastNodes = st.nodes;
+    if (images.size) dropImageTextures((id) => st.nodes.has(id));
+  });
+}
+
+/** The texture of an image (loaded once per image and wrap), repeated; shared by every mesh, so never freed with one. */
+export function imageTexture(img: OwnImage, wrap: THREE.Wrapping = THREE.RepeatWrapping, data = false): THREE.Texture {
+  // A relief map is data, not a colour: loaded on its own, with no colour space.
+  // Keyed by the image's id and its content, so a picture replaced under the same id is loaded again, not shown as it was.
+  const sig = `${img.id}@${imageSignature(img.url)}`;
+  const key = sig + (wrap === THREE.RepeatWrapping ? '' : `:${wrap}`) + (data ? ':data' : '');
+  let t = images.get(key);
+  if (!t) {
+    // What an older version of this image left behind is freed.
+    for (const [k, old] of images) if (k.startsWith(`${img.id}@`) && !k.startsWith(`${sig}:`) && k !== sig) { old.dispose(); images.delete(k); }
+    t = new THREE.TextureLoader().load(img.url, () => { for (const f of listeners) f(); });
+    t.wrapS = t.wrapT = wrap;
+    t.colorSpace = data ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+    t.anisotropy = 4;
+    t.userData.shared = true;
+    images.set(key, t);
+  }
+  return t;
+}
+
+/** Box-projected coordinates for an image <paramref name="width"/> × <paramref name="height"/> metres (as the exports lay it). */
+export function boxUvSized(geometry: THREE.BufferGeometry, width: number, height: number, rotation = 0): void {
+  const pos = geometry.getAttribute('position');
+  const nrm = geometry.getAttribute('normal');
+  if (!pos || !nrm) return;
+  const uv = new Float32Array(pos.count * 2);
+  for (let i = 0; i < pos.count; i++) {
+    const [x, y, z] = [pos.getX(i), pos.getY(i), pos.getZ(i)];
+    const [ax, ay, az] = [Math.abs(nrm.getX(i)), Math.abs(nrm.getY(i)), Math.abs(nrm.getZ(i))];
+    let u: number, v: number;
+    if (az >= ax && az >= ay) { u = x; v = y; } else if (ax >= ay) { u = y; v = z; } else { u = x; v = z; }
+    [u, v] = rotateUv(u, v, rotation);
+    uv[2 * i] = u / width;
+    uv[2 * i + 1] = v / height;
+  }
+  geometry.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+}
+
+// ─── An orthophoto (Site → Import → Orthophoto): an image laid on the plan by its four corners ───
+
+/** An orthophoto: its image and its corners in plan (top left, top right, bottom right, bottom left), its opacity. */
+export interface Ortho { id: string; image: OwnImage; corners: [number, number][]; opacity: number; storeyId: string | null }
+
+/** The project's orthophotos whose image is there. */
+export function orthophotos(nodes: Map<string, NodeDto>): Ortho[] {
+  const o: Ortho[] = [];
+  for (const n of nodes.values()) {
+    if (n.type !== 'LapinOrthophoto') continue;
+    const img = typeof n.props.image === 'string' ? nodes.get(n.props.image) : undefined;
+    const data = img?.props.data, mime = img?.props.mime;
+    const corners = Array.isArray(n.props.corners) ? (n.props.corners as unknown[]).filter((c): c is [number, number] => Array.isArray(c) && c.length >= 2).map((c) => [Number(c[0]), Number(c[1])] as [number, number]) : [];
+    if (typeof data !== 'string' || typeof mime !== 'string' || corners.length !== 4) continue;
+    o.push({ id: n.id, image: { id: img!.id, url: `data:${mime};base64,${data}`, width: 1, height: 1 }, corners, opacity: Number(n.props.opacity ?? 1), storeyId: n.parentId ?? null });
+  }
+  return o;
+}
+
+/** Where a plan point falls on an orthophoto, as texture coordinates (0–1 inside it). */
+export function orthoUv(o: Ortho, x: number, y: number): [number, number] {
+  const [tl, tr, , bl] = o.corners;
+  const [ux, uy, vx, vy] = [tr[0] - tl[0], tr[1] - tl[1], bl[0] - tl[0], bl[1] - tl[1]];
+  const det = ux * vy - uy * vx;
+  if (Math.abs(det) < 1e-12) return [0, 0];
+  const [dx, dy] = [x - tl[0], y - tl[1]];
+  // p = tl + s·(tr − tl) + t·(bl − tl); the image's top row is v = 1.
+  const s = (dx * vy - dy * vx) / det, t = (ux * dy - uy * dx) / det;
+  return [s, 1 - t];
+}
+
+/** The orthophoto's texture: clamped at its edges, loaded once (its own, so a material using the same picture keeps repeating). */
+export const orthoTexture = (o: Ortho): THREE.Texture => imageTexture(o.image, THREE.ClampToEdgeWrapping);

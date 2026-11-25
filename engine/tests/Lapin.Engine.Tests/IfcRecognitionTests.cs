@@ -1,0 +1,727 @@
+using System.Text.Json.Nodes;
+using Lapin.Architecture;
+using Lapin.Architecture.Roofs;
+using Lapin.Civil;
+using Lapin.Drafting;
+using Lapin.Geometry;
+using Lapin.Ifc;
+using Lapin.Model;
+using Lapin.Phases;
+using Lapin.Platform;
+using Lapin.Structure;
+using Lapin.Studio;
+using Xunit.Abstractions;
+using static Lapin.Ifc.Step;
+
+namespace Lapin.Engine.Tests;
+
+/// <summary>
+/// A foreign IFC file (no Lapin intent) read into native elements
+/// (docs/spec-ifc.md, Recunoașterea): walls with their axes, openings, doors
+/// and windows from extrusions and B-rep boxes; floors with their holes;
+/// columns, beams and pad footings; what is not a prism stays a reference.
+/// </summary>
+public partial class IfcRecognitionTests(ITestOutputHelper output) : IDisposable
+{
+    readonly string _dir = Directory.CreateTempSubdirectory("lapin-ifc-recognition").FullName;
+    public void Dispose() => Directory.Delete(_dir, true);
+
+    static Fixture Full() => new(new ArchitectureModule(), new StructureModule(), new DraftingModule(), new CivilModule(), new PhasesModule(), new StudioModule());
+
+    /// <summary>A foreign file as another program would write it: millimetres, a storey, bodies as extrusions and B-reps, no intent.</summary>
+    sealed class Foreign
+    {
+        public readonly Step F = new();
+        public readonly string Ctx, StoreyPlacement, Storey;
+        readonly List<string> _contained = [];
+        public readonly string Brick;
+
+        public Foreign()
+        {
+            var origin = F.Add("IFCCARTESIANPOINT", "(0.,0.,0.)");
+            var world = F.Add("IFCAXIS2PLACEMENT3D", origin, Null, Null);
+            Ctx = F.Add("IFCGEOMETRICREPRESENTATIONCONTEXT", Null, S("Model"), "3", "1.E-05", world, Null);
+            var mm = F.Add("IFCSIUNIT", Derived, E("LENGTHUNIT"), E("MILLI"), E("METRE"));
+            var units = F.Add("IFCUNITASSIGNMENT", L([mm]));
+            var project = F.Add("IFCPROJECT", G("project"), Null, S("Foreign"), Null, Null, Null, Null, L([Ctx]), units);
+            var sitePl = F.Add("IFCLOCALPLACEMENT", Null, world);
+            var site = F.Add("IFCSITE", G("site"), Null, S("Site"), Null, Null, sitePl, Null, Null, E("ELEMENT"), Null, Null, Null, Null, Null);
+            var bPl = F.Add("IFCLOCALPLACEMENT", sitePl, world);
+            var building = F.Add("IFCBUILDING", G("building"), Null, S("Building"), Null, Null, bPl, Null, Null, E("ELEMENT"), Null, Null, Null);
+            StoreyPlacement = F.Add("IFCLOCALPLACEMENT", bPl, world);
+            Storey = F.Add("IFCBUILDINGSTOREY", G("storey"), Null, S("Ground"), Null, Null, StoreyPlacement, Null, Null, E("ELEMENT"), "0.");
+            F.Add("IFCRELAGGREGATES", G("agg1"), Null, Null, Null, project, L([site]));
+            F.Add("IFCRELAGGREGATES", G("agg2"), Null, Null, Null, site, L([building]));
+            F.Add("IFCRELAGGREGATES", G("agg3"), Null, Null, Null, building, L([Storey]));
+            Brick = F.Add("IFCMATERIAL", S("Brick"), Null, Null);
+        }
+
+        public string G(string key) => S(Guid("foreign-test", key));
+        public string Gid(string key) => Guid("foreign-test", key);
+
+        public string Place(double x, double y, double z, double angleDeg = 0, string? relTo = null)
+        {
+            var p = F.Add("IFCCARTESIANPOINT", $"({R(x)},{R(y)},{R(z)})");
+            var zDir = F.Add("IFCDIRECTION", "(0.,0.,1.)");
+            var xDir = F.Add("IFCDIRECTION", $"({R(Math.Cos(angleDeg * Math.PI / 180))},{R(Math.Sin(angleDeg * Math.PI / 180))},0.)");
+            return F.Add("IFCLOCALPLACEMENT", relTo ?? StoreyPlacement, F.Add("IFCAXIS2PLACEMENT3D", p, zDir, xDir));
+        }
+
+        /// <summary>A rectangle extruded up from (cx, cy, z0), the rectangle's x side at <paramref name="angleDeg"/>.</summary>
+        public string Box(double cx, double cy, double z0, double dx, double dy, double h, double angleDeg = 0)
+        {
+            var p2 = F.Add("IFCCARTESIANPOINT", $"({R(cx)},{R(cy)})");
+            var d2 = F.Add("IFCDIRECTION", $"({R(Math.Cos(angleDeg * Math.PI / 180))},{R(Math.Sin(angleDeg * Math.PI / 180))})");
+            var prof = F.Add("IFCRECTANGLEPROFILEDEF", E("AREA"), Null, F.Add("IFCAXIS2PLACEMENT2D", p2, d2), R(dx), R(dy));
+            var at = F.Add("IFCAXIS2PLACEMENT3D", F.Add("IFCCARTESIANPOINT", $"(0.,0.,{R(z0)})"), Null, Null);
+            return F.Add("IFCEXTRUDEDAREASOLID", prof, at, F.Add("IFCDIRECTION", "(0.,0.,1.)"), R(h));
+        }
+
+        public string Shape(string item, string kind = "SweptSolid") =>
+            F.Add("IFCPRODUCTDEFINITIONSHAPE", Null, Null, L([F.Add("IFCSHAPEREPRESENTATION", Ctx, S("Body"), S(kind), L([item]))]));
+
+        public string Element(string type, string key, string name, string placement, string shape, params string[] tail)
+        {
+            var id = F.Add(type, [G(key), Null, S(name), Null, Null, placement, shape, Null, .. tail]);
+            _contained.Add(id);
+            return id;
+        }
+
+        public void Material(string element, string material) => F.Add("IFCRELASSOCIATESMATERIAL", G("mat-" + element), Null, Null, Null, L([element]), material);
+
+        public string Write(string path)
+        {
+            F.Add("IFCRELCONTAINEDINSPATIALSTRUCTURE", G("contained"), Null, Null, Null, L(_contained), Storey);
+            F.Write(path, Path.GetFileName(path), "ViewDefinition [ReferenceView_V1.2]");
+            return path;
+        }
+    }
+
+    /// <summary>A B-rep box: eight points, six faces, a closed shell.</summary>
+    static string BrepBox(Foreign x, double x0, double y0, double z0, double x1, double y1, double z1)
+    {
+        var f = x.F;
+        string P(double a, double b, double c) => f.Add("IFCCARTESIANPOINT", $"({R(a)},{R(b)},{R(c)})");
+        var p = new[] { P(x0, y0, z0), P(x1, y0, z0), P(x1, y1, z0), P(x0, y1, z0), P(x0, y0, z1), P(x1, y0, z1), P(x1, y1, z1), P(x0, y1, z1) };
+        string Face(params int[] ix) => f.Add("IFCFACE", L([f.Add("IFCFACEOUTERBOUND", f.Add("IFCPOLYLOOP", L(ix.Select(i => p[i]))), True)]));
+        var faces = new[] { Face(0, 3, 2, 1), Face(4, 5, 6, 7), Face(0, 1, 5, 4), Face(1, 2, 6, 5), Face(2, 3, 7, 6), Face(3, 0, 4, 7) };
+        return f.Add("IFCFACETEDBREP", f.Add("IFCCLOSEDSHELL", L(faces)));
+    }
+
+    string House()
+    {
+        var x = new Foreign();
+        // A wall 5 m long, 300 thick, 2.8 high, from (1, 2) along x, in millimetres.
+        var wallPl = x.Place(1000, 2000, 0);
+        var wall = x.Element("IFCWALL", "wall", "W1", wallPl, x.Shape(x.Box(2500, 0, 0, 5000, 300, 2800)), E("STANDARD"));
+        x.Material(wall, x.Brick);
+        // A door opening 900 × 2100 at 2 m along, a window opening 1200 × 1500 at 4 m along, sill 900.
+        var doorOp = x.Element("IFCOPENINGELEMENT", "door-op", "Door opening", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(2000, 0, 0, 900, 500, 2100)), E("OPENING"));
+        var door = x.Element("IFCDOOR", "door", "D1", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(2000, 0, 0, 900, 100, 2100)), "2100.", "900.", E("DOOR"), E("SINGLE_SWING_RIGHT"), Null);
+        x.F.Add("IFCRELVOIDSELEMENT", x.G("v1"), Null, Null, Null, wall, doorOp);
+        x.F.Add("IFCRELFILLSELEMENT", x.G("f1"), Null, Null, Null, doorOp, door);
+        var winOp = x.Element("IFCOPENINGELEMENT", "win-op", "Window opening", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(4000, 0, 900, 1200, 500, 1500)), E("OPENING"));
+        var win = x.Element("IFCWINDOW", "win", "F1", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(4000, 0, 900, 1200, 100, 1500)), "1500.", "1200.", E("WINDOW"), E("SINGLE_PANEL"), Null);
+        x.F.Add("IFCRELVOIDSELEMENT", x.G("v2"), Null, Null, Null, wall, winOp);
+        x.F.Add("IFCRELFILLSELEMENT", x.G("f2"), Null, Null, Null, winOp, win);
+        // A B-rep wall 4 m long, 250 thick, along x at y = -3.
+        x.Element("IFCWALL", "brep-wall", "W2", x.Place(0, 0, 0), x.Shape(BrepBox(x, 0, -3125, 0, 4000, -2875, 2800), "Brep"), E("STANDARD"));
+        // A floor 6 × 4, 200 thick, its top at the storey, with a 1 × 1 hole.
+        var outer = x.F.Add("IFCPOLYLINE", L(new[] { "(0.,0.)", "(6000.,0.)", "(6000.,4000.)", "(0.,4000.)", "(0.,0.)" }.Select(p => x.F.Add("IFCCARTESIANPOINT", p))));
+        var hole = x.F.Add("IFCPOLYLINE", L(new[] { "(2000.,1000.)", "(3000.,1000.)", "(3000.,2000.)", "(2000.,2000.)", "(2000.,1000.)" }.Select(p => x.F.Add("IFCCARTESIANPOINT", p))));
+        var prof = x.F.Add("IFCARBITRARYPROFILEDEFWITHVOIDS", E("AREA"), Null, outer, L([hole]));
+        var slabSolid = x.F.Add("IFCEXTRUDEDAREASOLID", prof, x.F.Add("IFCAXIS2PLACEMENT3D", x.F.Add("IFCCARTESIANPOINT", "(0.,0.,-200.)"), Null, Null), x.F.Add("IFCDIRECTION", "(0.,0.,1.)"), "200.");
+        x.Element("IFCSLAB", "slab", "Floor", x.Place(0, 0, 0), x.Shape(slabSolid), E("FLOOR"));
+        // A column 300 × 400 turned 30° at (3, 2), 3 m high.
+        x.Element("IFCCOLUMN", "column", "C1", x.Place(3000, 2000, 0), x.Shape(x.Box(0, 0, 0, 300, 400, 3000, 30)), E("COLUMN"));
+        // A beam 250 wide, 400 deep, from (0, 0) to (5, 0) with its top at 3 m: the profile in a vertical plane, swept along x.
+        var bp = x.F.Add("IFCRECTANGLEPROFILEDEF", E("AREA"), Null, x.F.Add("IFCAXIS2PLACEMENT2D", x.F.Add("IFCCARTESIANPOINT", "(0.,0.)"), Null), "250.", "400.");
+        var bAt = x.F.Add("IFCAXIS2PLACEMENT3D", x.F.Add("IFCCARTESIANPOINT", "(0.,0.,2800.)"), x.F.Add("IFCDIRECTION", "(1.,0.,0.)"), x.F.Add("IFCDIRECTION", "(0.,1.,0.)"));
+        var beamSolid = x.F.Add("IFCEXTRUDEDAREASOLID", bp, bAt, x.F.Add("IFCDIRECTION", "(0.,0.,1.)"), "5000.");
+        x.Element("IFCBEAM", "beam", "B1", x.Place(0, 0, 0), x.Shape(beamSolid), E("BEAM"));
+        // A pad footing 1.5 × 1.5 × 0.5 at (8, 0), its bottom 1.5 m down.
+        x.Element("IFCFOOTING", "footing", "F1", x.Place(8000, 0, 0), x.Shape(x.Box(0, 0, -1500, 1500, 1500, 500)), E("PAD_FOOTING"));
+        // A railing as a pyramid: not a prism, a reference.
+        var f = x.F;
+        string P(string c) => f.Add("IFCCARTESIANPOINT", c);
+        var apex = P("(500.,500.,1000.)"); var b0 = P("(0.,0.,0.)"); var b1 = P("(1000.,0.,0.)"); var b2 = P("(1000.,1000.,0.)"); var b3 = P("(0.,1000.,0.)");
+        string Tri(params string[] pts) => f.Add("IFCFACE", L([f.Add("IFCFACEOUTERBOUND", f.Add("IFCPOLYLOOP", L(pts)), True)]));
+        var pyramid = f.Add("IFCFACETEDBREP", f.Add("IFCCLOSEDSHELL", L([Tri(b0, b3, b2, b1), Tri(b0, b1, apex), Tri(b1, b2, apex), Tri(b2, b3, apex), Tri(b3, b0, apex)])));
+        x.Element("IFCRAILING", "railing", "Rail", x.Place(10000, 10000, 0), x.Shape(pyramid, "Brep"), E("HANDRAIL"));
+        return x.Write(Path.Combine(_dir, "foreign.ifc"));
+    }
+
+    /// <summary>
+    /// How the file's doors and windows open comes in with them (docs/spec-ifc.md,
+    /// "Deschiderea ușilor și ferestrelor"): the hand from the OperationType (the
+    /// element's, else its type's), the way it opens from the placement's +Y, a
+    /// window's panels from its PartitioningType and its panels' properties.
+    /// </summary>
+    [Fact]
+    public void Doors_and_windows_open_as_the_file_says()
+    {
+        var x = new Foreign();
+        var wallPl = x.Place(1000, 2000, 0);
+        var wall = x.Element("IFCWALL", "wall", "W1", wallPl, x.Shape(x.Box(2500, 0, 0, 5000, 300, 2800)), E("STANDARD"));
+        x.Material(wall, x.Brick);
+        string Fill(string key, string cls, double along, double sill, double width, double height, string placement, params string[] tail)
+        {
+            var op = x.Element("IFCOPENINGELEMENT", key + "-op", "Opening", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(along, 0, sill, width, 500, height)), E("OPENING"));
+            var fill = x.Element(cls, key, key.ToUpperInvariant(), placement, x.Shape(x.Box(0, 0, 0, width, 100, height)), [R(height), R(width), .. tail]);
+            x.F.Add("IFCRELVOIDSELEMENT", x.G(key + "-v"), Null, Null, Null, wall, op);
+            x.F.Add("IFCRELFILLSELEMENT", x.G(key + "-f"), Null, Null, Null, op, fill);
+            return fill;
+        }
+        string Typed(string key, string cls, string operation, params string[] sets)
+        {
+            var t = x.F.Add(cls, x.G(key), Null, S(key), Null, Null, sets.Length > 0 ? L(sets) : Null, Null, Null, Null, E(cls == "IFCDOORTYPE" ? "DOOR" : "WINDOW"), E(operation), False, Null);
+            return t;
+        }
+        // A left-hand door that opens towards −Y (its placement turned round).
+        Fill("a", "IFCDOOR", 1500, 0, 900, 2100, x.Place(1500, 0, 0, 180, wallPl), E("DOOR"), E("SINGLE_SWING_LEFT"), Null);
+        // A pair of doors, what they are said by their type.
+        var bId = Fill("b", "IFCDOOR", 3000, 0, 1400, 2100, x.Place(3000, 0, 0, 0, wallPl), E("DOOR"), E("NOTDEFINED"), Null);
+        var pair = Typed("pair", "IFCDOORTYPE", "DOUBLE_DOOR_SINGLE_SWING");
+        x.F.Add("IFCRELDEFINESBYTYPE", x.G("pair-rel"), Null, Null, Null, L([bId]), pair);
+        // A window of two panels: side-hung on the left, tilt-and-turn on the right.
+        var cId = Fill("c", "IFCWINDOW", 4500, 900, 1000, 1500, x.Place(4500, 0, 0, 0, wallPl), E("WINDOW"), E("NOTDEFINED"), Null);
+        var p1 = x.F.Add("IFCWINDOWPANELPROPERTIES", x.G("p1"), Null, S("P1"), Null, E("SIDEHUNGLEFTHAND"), E("LEFT"), Null, Null, Null);
+        var p2 = x.F.Add("IFCWINDOWPANELPROPERTIES", x.G("p2"), Null, S("P2"), Null, E("TILTANDTURNRIGHTHAND"), E("RIGHT"), Null, Null, Null);
+        var twin = Typed("twin", "IFCWINDOWTYPE", "DOUBLE_PANEL_VERTICAL", p1, p2);
+        x.F.Add("IFCRELDEFINESBYTYPE", x.G("twin-rel"), Null, Null, Null, L([cId]), twin);
+
+        var f = Full();
+        IfcImport.Run(f.Session, x.Write(Path.Combine(_dir, "joinery.ifc")), null, out _);
+        var m = f.Session.Model;
+        var ifc = new JoineryIfc();
+        (string Operation, Vec3 Opens, JoinerySpec Spec) Read(string key)
+        {
+            var e = m.Get(Guid("foreign-test", key))!;
+            var at = ifc.Place(m, e)!;
+            return (ifc.Type(m, m.RelatingOf(e.Id, IfcClass.RelDefinesByType)!, at.Mirrored)!.Operation, at.Y, Openings.SpecOf(m, e.Id)!);
+        }
+
+        var a = Read("a");
+        Assert.Equal("SINGLE_SWING_LEFT", a.Operation);
+        Assert.Equal(-1, a.Opens.Y, 6);
+        Assert.Equal(["swing-left"], a.Spec.Panels.Select(p => p.Operation));
+        var door = m.Get(Guid("foreign-test", "a"))!;
+        Assert.True(door.Bool("flipSide") && door.Bool("flipHand"));
+
+        var b = Read("b");
+        Assert.Equal("DOUBLE_DOOR_SINGLE_SWING", b.Operation);
+        Assert.Equal(1, b.Opens.Y, 6);
+        Assert.Equal(["swing-left", "swing-right"], b.Spec.Panels.Select(p => p.Operation));
+        Assert.Equal("pair", m.RelatingOf(Guid("foreign-test", "b"), IfcClass.RelDefinesByType)!.Name);
+
+        var c = Read("c");
+        Assert.Equal("DOUBLE_PANEL_VERTICAL", c.Operation);
+        Assert.Equal(["side-left", "tilt-turn-right"], c.Spec.Panels.OrderBy(p => p.Col).Select(p => p.Operation));
+    }
+
+    /// <summary>A slab of a roof 10 × 6 m from (0, 0), from <paramref name="z0"/> up <paramref name="h"/> (mm), aggregated under nothing yet, of a material.</summary>
+    static string RoofSlab(Foreign x, string key, double z0, double h, string material, double size = 1)
+    {
+        var slab = x.F.Add("IFCSLAB", x.G(key), Null, S(key), Null, Null, x.Place(0, 0, 0), x.Shape(x.Box(5000 * size, 3000 * size, z0, 10000 * size, 6000 * size, h)), Null, E("ROOF"));
+        x.Material(slab, x.F.Add("IFCMATERIAL", S(material), Null, Null));
+        return slab;
+    }
+
+    static (Vec3 Min, Vec3 Max) PartBox(Fixture f, string id, string key) => Measure.Bounds(f.Session.Geometry(id)!.Parts.Single(p => p.Key == key).Solid)!.Value;
+
+    /// <summary>
+    /// A foreign flat roof, two stacked slabs aggregated by an IfcRoof (decision 334): a native roof, its deck the lower slab
+    /// (its material, its thickness), its covering the top one (its material, its own thickness), the outline the deck's at
+    /// the deck's underside, no overhang; its slabs not brought on their own. A roof of one slab stays its slab (a floor).
+    /// </summary>
+    [Fact]
+    public void A_foreign_roof_of_two_stacked_slabs_comes_in_as_a_deck_under_its_covering()
+    {
+        var x = new Foreign();
+        var roof = x.Element("IFCROOF", "roof", "Main roof", x.Place(0, 0, 0), Null, E("FLAT_ROOF"));
+        var deck = RoofSlab(x, "deck", 3000, 200, "Concrete C25/30");
+        var cover = RoofSlab(x, "cover", 3200, 50, "Bitumen");
+        x.F.Add("IFCRELAGGREGATES", x.G("roof-agg"), Null, Null, Null, roof, L([deck, cover]));
+        // A roof of one slab: not a deck under a covering, its slab a floor of the kind ROOF as before.
+        var lone = x.Element("IFCROOF", "lone", "Canopy", x.Place(0, 0, 0), Null, E("FLAT_ROOF"));
+        var canopy = x.F.Add("IFCSLAB", x.G("canopy"), Null, S("Canopy slab"), Null, Null, x.Place(20000, 0, 0), x.Shape(x.Box(2000, 1000, 2500, 4000, 2000, 150)), Null, E("ROOF"));
+        x.F.Add("IFCRELAGGREGATES", x.G("lone-agg"), Null, Null, Null, lone, L([canopy]));
+        var f = Full();
+        var r = IfcImport.Run(f.Session, x.Write(Path.Combine(_dir, "roof.ifc")), null, out _);
+        output.WriteLine(r.ToJson().ToJsonString());
+        var m = f.Session.Model;
+        var e = m.Get(Guid("foreign-test", "roof"))!;
+        Assert.Equal(IfcClass.Roof, e.Class);
+        Assert.Equal("Main roof", e.Name);
+        Assert.Equal("flat", e.Str("shape"));
+        Assert.Equal("Concrete C25/30", e.Str(RoofCoverings.DeckKey));
+        Assert.Equal("Bitumen", e.Str(RoofCoverings.Key));
+        Assert.Equal(0.2, e.Num("deckThickness"), 6);
+        Assert.Equal(0.05, e.Num("coveringThickness"), 6);
+        Assert.Equal(60, Math.Abs(Polygon2.SignedArea(Roof.Contour(e).ToList())), 6);
+        // Where the file has them: the deck 3,00–3,20, the covering 3,20–3,25, over the same 10 × 6.
+        var (d0, d1) = PartBox(f, e.Id, "deck");
+        var (c0, c1) = PartBox(f, e.Id, "covering");
+        Assert.Equal((3.0, 3.2), (Math.Round(d0.Z, 6), Math.Round(d1.Z, 6)));
+        Assert.Equal((3.2, 3.25), (Math.Round(c0.Z, 6), Math.Round(c1.Z, 6)));
+        Assert.Equal((0, 0, 10, 6), (Math.Round(d0.X, 6), Math.Round(d0.Y, 6), Math.Round(d1.X, 6), Math.Round(d1.Y, 6)));
+        // The materials made, each part of its own.
+        var concrete = Materials.Find(m, "Concrete C25/30")!;
+        Assert.Equal(concrete.Id, f.Session.Geometry(e.Id)!.Parts.Single(p => p.Key == "deck").Material);
+        Assert.Equal(Materials.Find(m, "Bitumen")!.Id, f.Session.Geometry(e.Id)!.Parts.Single(p => p.Key == "covering").Material);
+        // Its slabs are the roof's: not brought again, neither as floors nor as references.
+        Assert.Null(m.Get(Guid("foreign-test", "deck")));
+        Assert.Null(m.Get(Guid("foreign-test", "cover")));
+        // The canopy of one slab: no roof of its own, the slab a floor of the kind ROOF as before.
+        Assert.NotEqual(IfcClass.Roof, m.Get(Guid("foreign-test", "lone"))?.Class);
+        Assert.Equal(IfcClass.Slab, m.Get(Guid("foreign-test", "canopy"))!.Class);
+    }
+
+    /// <summary>A foreign roof of one body with a layer set (decision 334): its top layer the covering, the layers under it the deck.</summary>
+    [Fact]
+    public void A_foreign_roof_of_one_body_with_a_layer_set_comes_in_as_a_deck_under_its_covering()
+    {
+        var x = new Foreign();
+        var roof = x.Element("IFCROOF", "roof", "Roof", x.Place(0, 0, 0), x.Shape(x.Box(5000, 3000, 3000, 10000, 6000, 300)), E("FLAT_ROOF"));
+        string Layer(string name, double t) => x.F.Add("IFCMATERIALLAYER", x.F.Add("IFCMATERIAL", S(name), Null, Null), R(t), Null, S(name), Null, Null, Null);
+        var set = x.F.Add("IFCMATERIALLAYERSET", L([Layer("Concrete", 180), Layer("Mineral wool", 100), Layer("Green roof substrate", 20)]), S("Roof build-up"), Null);
+        x.Material(roof, x.F.Add("IFCMATERIALLAYERSETUSAGE", set, E("AXIS3"), E("POSITIVE"), "0.", Null));
+        var f = Full();
+        IfcImport.Run(f.Session, x.Write(Path.Combine(_dir, "roof-layers.ifc")), null, out _);
+        var e = f.Session.Model.Get(Guid("foreign-test", "roof"))!;
+        Assert.Equal(IfcClass.Roof, e.Class);
+        // The deck the concrete and the wool together (of the thickest's material), the covering the substrate on top, a green roof.
+        Assert.Equal("Concrete", e.Str(RoofCoverings.DeckKey));
+        Assert.Equal(0.28, e.Num("deckThickness"), 6);
+        Assert.Equal("Green roof substrate", e.Str(RoofCoverings.Key));
+        Assert.Equal("Green roof", e.Str("covering"));
+        Assert.Equal(0.02, e.Num("coveringThickness"), 6);
+        var (d0, d1) = PartBox(f, e.Id, "deck");
+        var (_, c1) = PartBox(f, e.Id, "covering");
+        Assert.Equal(3.0, d0.Z, 6);
+        Assert.Equal(3.28, d1.Z, 6);
+        Assert.Equal(3.3, c1.Z, 6);
+    }
+
+    /// <summary>
+    /// What the recognisers make of each kind, the gate reporting only: W1 differs from the file by +0.8 % (the precast lintels
+    /// Lapin lays over its door and window, which the column standing in its door does not cut), and enforcing (the default)
+    /// would bring it as a reference; the others are the file's either way.
+    /// </summary>
+    [Fact]
+    public void Walls_floors_columns_beams_and_footings_come_in_native_and_the_rest_as_references()
+    {
+        var f = Full();
+        var path = House();
+        var enforced = Full();
+        IfcImport.Run(enforced.Session, path, null, out _);
+        foreach (var key in new[] { "brep-wall", "slab", "column", "beam", "footing" })
+            Assert.False(StoredBodies.Has(enforced.Model.Get(Guid("foreign-test", key))!), key);
+        var r = IfcImport.Run(f.Session, path, new IfcImportOptions(Fidelity: new FidelityOptions(FidelityOptions.Report)), out _);
+        output.WriteLine(r.ToJson().ToJsonString());
+        var m = f.Session.Model;
+        Assert.Equal(6, r.Recognized);
+        Assert.Equal(1, r.References);
+        Assert.Equal(2, r.RecognizedByClass!["IfcWall"]);
+
+        // The extruded wall: its axis, thickness, height, type and material; the file's GlobalId kept.
+        var w1 = m.Get(Guid("foreign-test", "wall"));
+        Assert.NotNull(w1);
+        Assert.Equal(IfcClass.Wall, w1!.Class);
+        var axis = PathCurve.Of(w1);
+        Assert.Equal(1, Math.Min(axis.Start.X, axis.End.X), 3);
+        Assert.Equal(6, Math.Max(axis.Start.X, axis.End.X), 3);
+        Assert.Equal(2, axis.Start.Y, 3);
+        Assert.Equal(2.8, w1.Num("height"), 6);
+        Assert.Equal(0, w1.Num("baseOffset"), 6);
+        var type = m.RelatingOf(w1.Id, IfcClass.RelDefinesByType);
+        Assert.NotNull(type);
+        Assert.Equal("Brick 300", type!.Name);
+        Assert.Equal(0.3, LayerSets.BandsOf(m, w1.Id)!.Sum(b => b.To - b.From), 6);
+        Assert.Equal("IfcWall", (string?)w1.Attrs["imported"]?["ifcClass"]);
+        // The construction the file gave, kept for the IFC tree: a rectangle 5 × 0.3 extruded 2.8 up.
+        var shape = w1.Attrs["imported"]!["shape"]!.AsArray();
+        Assert.Equal("IfcExtrudedAreaSolid", (string?)shape[0]!["type"]);
+        Assert.Equal((5.0, 0.3, 2.8), ((double)shape[0]!["profile"]!["x"]!, (double)shape[0]!["profile"]!["y"]!, (double)shape[0]!["depth"]!));
+
+        // The door and the window: on the wall, where and as big as the file said; the door's GlobalId kept; the hand from the operation.
+        var door = m.Get(Guid("foreign-test", "door"));
+        Assert.NotNull(door);
+        var dSpec = Openings.SpecOf(m, door!.Id)!;
+        Assert.Equal((0.9, 2.1), (dSpec.Width, dSpec.Height));
+        var dOpening = Openings.OpeningOf(m, door.Id)!;
+        Assert.Equal(2.0, dOpening.Num("along"), 3);
+        Assert.Equal(0, dOpening.Num("sill"), 3);
+        // The file's hand and the way it opens (its placement's +Y, here the world's +Y) are the door's as it stands.
+        var at = new JoineryIfc().Place(m, door)!;
+        Assert.Equal(1, at.Y.Y, 6);
+        Assert.Equal("SINGLE_SWING_RIGHT", new JoineryIfc().Type(m, m.RelatingOf(door.Id, IfcClass.RelDefinesByType)!, at.Mirrored)!.Operation);
+        Assert.Equal(w1.Id, Openings.WallOf(m, dOpening.Id)!.Id);
+        var win = m.Get(Guid("foreign-test", "win"))!;
+        var wSpec = Openings.SpecOf(m, win.Id)!;
+        Assert.Equal((1.2, 1.5), (wSpec.Width, wSpec.Height));
+        Assert.Equal(4.0, Openings.OpeningOf(m, win.Id)!.Num("along"), 3);
+        Assert.Equal(0.9, Openings.OpeningOf(m, win.Id)!.Num("sill"), 3);
+        Assert.Equal(2, Openings.Of(m, w1.Id).Count());
+
+        // The B-rep wall: the same from six faces.
+        var w2 = m.Get(Guid("foreign-test", "brep-wall"))!;
+        var a2 = PathCurve.Of(w2);
+        Assert.Equal(4, (a2.End - a2.Start).Length, 3);
+        Assert.Equal(-3, a2.Start.Y, 3);
+        Assert.Equal(0.25, LayerSets.BandsOf(m, w2.Id)!.Sum(b => b.To - b.From), 6);
+
+        // The floor: its contour, its hole, its thickness, its top at the storey.
+        var slab = m.Get(Guid("foreign-test", "slab"))!;
+        Assert.Equal(IfcClass.Slab, slab.Class);
+        Assert.Equal(4, slab.Attrs["contour"]!.AsArray().Count);
+        Assert.Equal(0, slab.Num("offset"), 6);
+        Assert.Single(m.RelatedOf(slab.Id, IfcClass.RelVoidsElement));
+        Assert.Equal(0.2, LayerSets.BandsOf(m, slab.Id)!.Sum(b => b.To - b.From), 6);
+
+        // The column, the beam, the footing.
+        var col = m.Get(Guid("foreign-test", "column"))!;
+        Assert.Equal((3.0, 2.0), (col.Attrs["at"]![0]!.GetValue<double>(), col.Attrs["at"]![1]!.GetValue<double>()));
+        Assert.Equal(30, col.Num("rotation"), 3);
+        var cs = Columns.Spec(m, col);
+        Assert.Equal((0.3, 0.4, 3.0), (cs.Section.Width, cs.Section.Depth, cs.Height));
+        var beam = m.Get(Guid("foreign-test", "beam"))!;
+        var bs = Beams.Spec(m, beam);
+        Assert.Equal((0.25, 0.4), (bs.Section.Width, bs.Section.Depth));
+        Assert.Equal(5, (Args.Point(beam.Attrs["end"], "end") - Args.Point(beam.Attrs["start"], "start")).Length, 3);
+        Assert.Equal(0, beam.Num("topOffset"), 6);
+        var footing = m.Get(Guid("foreign-test", "footing"))!;
+        Assert.Equal("PAD_FOOTING", footing.PredefinedType);
+        var ft = m.RelatingOf(footing.Id, IfcClass.RelDefinesByType)!;
+        Assert.Equal(-1.5, ft.Num("bottom"), 6);
+
+        // The railing: a reference, with the reason counted.
+        var rail = m.Get(Guid("foreign-test", "railing"))!;
+        Assert.True((bool?)rail.Attrs["reference"]);
+        Assert.Equal("IfcFacetedBrep", (string?)rail.Attrs["shape"]![0]!["type"]);
+        Assert.Equal(5, (int)rail.Attrs["shape"]![0]!["faces"]!);
+        Assert.Equal(1, r.ReferencesByClass!["IfcRailing"]);
+
+        // Exported again, the wall keeps the file's GlobalId.
+        var again = Path.Combine(_dir, "again.ifc");
+        IfcExport.Write(f.Session, again, null);
+        Assert.Contains($"IFCWALL('{Guid("foreign-test", "wall")}'", File.ReadAllText(again));
+    }
+
+    [Fact]
+    public void A_second_import_of_the_same_file_does_not_double_the_elements()
+    {
+        var f = Full();
+        var path = House();
+        IfcImport.Run(f.Session, path, null, out _);
+        var walls = f.Session.Model.OfClass(IfcClass.Wall).Count();
+        var doors = f.Session.Model.OfClass(IfcClass.Door).Count();
+        var r = IfcImport.Run(f.Session, path, null, out _);
+        output.WriteLine(r.ToJson().ToJsonString());
+        Assert.Equal(walls, f.Session.Model.OfClass(IfcClass.Wall).Count());
+        Assert.Equal(doors, f.Session.Model.OfClass(IfcClass.Door).Count());
+    }
+
+    [Fact]
+    public void In_reference_mode_nothing_is_recognised()
+    {
+        var f = Full();
+        var r = IfcImport.Run(f.Session, House(), new IfcImportOptions("reference"), out _);
+        Assert.Equal(0, r.Recognized);
+        Assert.True(r.References >= 8);
+    }
+
+    /// <summary>
+    /// Finishes exported as walls of their own (docs/spec-ifc.md, Î7) become a layer of the wall they cover: a render
+    /// on one face wrapping its corners, with the door's opening, and a plaster on the other; the wall's core stays
+    /// where it was, the type made for the bare wall goes. A finish standing off its wall, and one over part of a wall,
+    /// stay thin walls.
+    /// </summary>
+    [Fact]
+    public void Finishes_exported_as_walls_become_layers_of_the_wall_they_cover()
+    {
+        var x = new Foreign();
+        var render = x.F.Add("IFCMATERIAL", S("Lime render"), Null, Null);
+        var plaster = x.F.Add("IFCMATERIAL", S("Plaster"), Null, Null);
+        // A wall 5 m long, 300 thick, from (1, 2) along x; a door opening 900 × 2100 at 2 m.
+        var wallPl = x.Place(1000, 2000, 0);
+        var wall = x.Element("IFCWALL", "wall", "W1", wallPl, x.Shape(x.Box(2500, 0, 0, 5000, 300, 2800)), E("STANDARD"));
+        x.Material(wall, x.Brick);
+        void Opening(string host, string key, double cy) =>
+            x.F.Add("IFCRELVOIDSELEMENT", x.G("v-" + key), Null, Null, Null, host,
+                x.Element("IFCOPENINGELEMENT", key, "Opening", x.Place(0, 0, 0, 0, wallPl), x.Shape(x.Box(2000, cy, 0, 900, 400, 2100)), E("OPENING")));
+        Opening(wall, "op-wall", 0);
+        // The render on the +y face, 25 mm, 25 mm past each end (round the corners); its own opening over the door's.
+        var outside = x.Element("IFCWALL", "render", "Finish — lime render", wallPl, x.Shape(x.Box(2500, 162.5, 0, 5050, 25, 2800)), E("STANDARD"));
+        x.Material(outside, render);
+        Opening(outside, "op-render", 162.5);
+        // The plaster on the −y face, 15 mm, written the other way along.
+        var inside = x.Element("IFCWALL", "plaster", "Finish — plaster", x.Place(6000, 2000 - 157.5, 0, 180), x.Shape(x.Box(2500, 0, 0, 5000, 15, 2800)), E("STANDARD"));
+        x.Material(inside, plaster);
+        // Its own opening over the door's too, as a program that exports finishes writes it (one the file runs across the door stays a thin wall).
+        Opening(inside, "op-plaster", -157.5);
+        // A wall 4 m at y = 8 with a render 25 mm away from its face, and another over only 2 m of it.
+        var w2Pl = x.Place(0, 8000, 0);
+        x.Material(x.Element("IFCWALL", "wall2", "W2", w2Pl, x.Shape(x.Box(2000, 0, 0, 4000, 250, 2800)), E("STANDARD")), x.Brick);
+        x.Material(x.Element("IFCWALL", "standoff", "Finish off the wall", w2Pl, x.Shape(x.Box(2000, 125 + 25 + 12.5, 0, 4000, 25, 2800)), E("STANDARD")), render);
+        x.Material(x.Element("IFCWALL", "partial", "Finish on part", w2Pl, x.Shape(x.Box(1000, -125 - 12.5, 0, 2000, 25, 2800)), E("STANDARD")), render);
+        var path = x.Write(Path.Combine(_dir, "finishes.ifc"));
+
+        var f = Full();
+        var r = IfcImport.Run(f.Session, path, null, out _);
+        Assert.Contains(r.Notes, n => n.StartsWith("2 finishes exported as walls of their own became a layer"));
+        var w = f.Model.Get(x.Gid("wall"))!;
+        Assert.Null(f.Model.Get(x.Gid("render")));
+        Assert.Null(f.Model.Get(x.Gid("plaster")));
+        // The render outside (+y), the plaster inside, the brick where it was: 1.85 to 2.15 across.
+        var bands = Walls.Section(f.Model, w);
+        var start = Walls.Start(w);
+        var left = (Walls.End(w) - start).Normalized().Perp;
+        double Y(double across) => start.Y + left.Y * across;
+        var byName = bands.ToDictionary(b => f.Model.Get(b.Material!)!.Name, b => (Lo: Math.Min(Y(b.From), Y(b.To)), Hi: Math.Max(Y(b.From), Y(b.To))));
+        Assert.Equal(1.85, byName["Brick"].Lo, 6); Assert.Equal(2.15, byName["Brick"].Hi, 6);
+        Assert.Equal(2.15, byName["Lime render"].Lo, 6); Assert.Equal(2.175, byName["Lime render"].Hi, 6);
+        Assert.Equal(1.835, byName["Plaster"].Lo, 6); Assert.Equal(1.85, byName["Plaster"].Hi, 6);
+        Assert.Single(bands, b => b.Core);
+        // The core's ends the file's (1 to 6), the render round the free corners 25 mm past each, as the file has it: the wall
+        // and the finishes it took, measured together, are the file's (the gate, enforcing by default, keeps them native).
+        Assert.Equal(1, Math.Min(Walls.Start(w).X, Walls.End(w).X), 6);
+        Assert.Equal(6, Math.Max(Walls.Start(w).X, Walls.End(w).X), 6);
+        var (lo, hi) = f.Bounds(w.Id);
+        Assert.Equal(0.975, lo.X, 6); Assert.Equal(6.025, hi.X, 6);
+        Assert.True(CheckOf(r, w.Id).Pass, CheckOf(r, w.Id).Reason);
+        // One door opening still, through every layer; the finishes' ids kept in the wall's record.
+        Assert.Single(Openings.PlacedOn(f.Model, w.Id));
+        Assert.Contains(x.Gid("render"), w.Attrs["imported"]!["absorbed"]!.ToJsonString());
+        Assert.Equal(3, LayerSets.LayersOf(f.Model, Walls.TypeOf(f.Model, w.Id)!.Id).Count);
+        // What lies off its wall, or over part of it, stays a wall of its own.
+        Assert.NotNull(f.Model.Get(x.Gid("standoff")));
+        Assert.NotNull(f.Model.Get(x.Gid("partial")));
+        Assert.Single(LayerSets.LayersOf(f.Model, Walls.TypeOf(f.Model, x.Gid("wall2"))!.Id));
+        // The bare wall's type, used by W1 alone, is gone; W2 keeps its own.
+        Assert.DoesNotContain(f.Model.OfClass(IfcClass.WallType), t => t.Name == "Brick 300");
+    }
+
+    /// <summary>A file whose walls are of a type named <paramref name="typeName"/>: one 4 m wall, 300 thick, its axis on its −y face (the file's reference line).</summary>
+    string TypedWall(string file, string key, string typeName, double y)
+    {
+        var x = new Foreign();
+        var wall = x.Element("IFCWALL", key, "W", x.Place(0, y * 1000, 0), x.Shape(x.Box(2000, 150, 0, 4000, 300, 2800)), E("STANDARD"));
+        x.Material(wall, x.Brick);
+        var type = x.F.Add("IFCWALLTYPE", x.G("type-" + key), Null, S(typeName), Null, Null, Null, Null, Null, Null, E("STANDARD"));
+        x.F.Add("IFCRELDEFINESBYTYPE", x.G("deftype-" + key), Null, Null, Null, L([wall]), type);
+        return x.Write(Path.Combine(_dir, file));
+    }
+
+    /// <summary>
+    /// An imported type mapped onto the project's (docs/spec-ifc.md, Î9): its walls take the project's type, their core's
+    /// middle where it was; the imported type goes; the choice is remembered, and the next file with a type of that name
+    /// takes the project's at once.
+    /// </summary>
+    [Fact]
+    public void Imported_types_are_mapped_onto_the_projects_and_the_choice_is_remembered()
+    {
+        var f = Full();
+        var own = (string)f.Run("architecture.createWallType", new JsonObject { ["name"] = "Masonry 250 rendered", ["layers"] = new JsonArray(
+            new JsonObject { ["material"] = "Render", ["thickness"] = 0.02 }, new JsonObject { ["material"] = "Brick", ["thickness"] = 0.25, ["core"] = true }, new JsonObject { ["material"] = "Plaster", ["thickness"] = 0.015 }) })!["id"]!;
+        IfcImport.Run(f.Session, TypedWall("a.ifc", "wall-a", "EXT-30", 0), null, out _);
+        var list = (JsonObject)f.Session.Query("types.imported", [])!;
+        var imported = list["types"]!.AsArray().Single(t => (string?)t!["sourceName"] == "EXT-30")!;
+        Assert.Equal("a.ifc", (string?)imported["file"]);
+        Assert.Equal(1, (int)imported["count"]!);
+        Assert.Contains(imported["candidates"]!.AsArray(), c => (string?)c!["id"] == own);
+        var wallA = f.Model.OfClass(IfcClass.Wall).Single();
+        // The core in the middle of the file's 300: 0.15 off the reference line.
+        double CoreMiddle(Entity w) => Walls.Section(f.Model, w).Single(b => b.Core) is var c ? (c.From + c.To) / 2 : 0;
+        var before = CoreMiddle(wallA);
+
+        f.Run("types.map", new JsonObject { ["map"] = new JsonArray(new JsonObject { ["from"] = (string)imported["id"]!, ["to"] = own }) });
+        Assert.Equal(own, Walls.TypeOf(f.Model, wallA.Id)!.Id);
+        Assert.Equal(before, CoreMiddle(f.Model.Get(wallA.Id)!), 6);
+        Assert.Null(f.Model.Get((string)imported["id"]!));
+        var remembered = Assert.Single(((JsonObject)f.Session.Query("types.imported", [])!)["remembered"]!.AsArray())!;
+        Assert.Equal("Masonry 250 rendered", (string?)remembered["toName"]);
+        // Kept in the project's file; an IFC export leaves it out.
+        using (var ms = new MemoryStream())
+        {
+            Lapin.Protocol.ProjectPackage.Write(f.Session, ms);
+            ms.Position = 0;
+            Assert.Contains(Lapin.Package.LapinPackage.Read(ms).Entities, e => e.Class == TypeMappings.Class && e.Attrs["map"]!.ToJsonString().Contains(own));
+        }
+        var ifc = Path.Combine(_dir, "out.ifc");
+        IfcExport.Write(f.Session, ifc);
+        Assert.DoesNotContain(TypeMappings.Class, File.ReadAllText(ifc), StringComparison.OrdinalIgnoreCase);
+
+        // Another file with a type of that name: its wall comes in of the project's type, and says so.
+        var r = IfcImport.Run(f.Session, TypedWall("b.ifc", "wall-b", "EXT-30", 6), null, out _);
+        Assert.Contains(r.Notes, n => n.StartsWith("1 imported type became the project's"));
+        Assert.All(f.Model.OfClass(IfcClass.Wall), w => Assert.Equal(own, Walls.TypeOf(f.Model, w.Id)!.Id));
+        Assert.DoesNotContain(f.Model.OfClass(IfcClass.WallType), t => t.Name == "EXT-30");
+        // Forgotten, the next one keeps its own again.
+        f.Run("types.forget", []);
+        IfcImport.Run(f.Session, TypedWall("c.ifc", "wall-c", "EXT-30", 12), null, out _);
+        Assert.Contains(f.Model.OfClass(IfcClass.WallType), t => t.Name == "EXT-30");
+    }
+
+    /// <summary>
+    /// A column given as a B-rep cut at its top by a slope (no prism standing): recognition reads a column of its bottom face, up
+    /// to its highest point; not the file's body (flat where the file's falls 200 mm), the gate enforcing by default keeps it the
+    /// reference it is.
+    /// </summary>
+    [Fact]
+    public void A_B_rep_column_cut_by_a_slope_is_a_column()
+    {
+        var x = new Foreign();
+        var f = x.F;
+        string P(double a, double b, double c) => f.Add("IFCCARTESIANPOINT", $"({R(a)},{R(b)},{R(c)})");
+        var p = new[] { P(0, 0, 0), P(400, 0, 0), P(400, 300, 0), P(0, 300, 0), P(0, 0, 3000), P(400, 0, 2800), P(400, 300, 2800), P(0, 300, 3000) };
+        string Face(params int[] ix) => f.Add("IFCFACE", L([f.Add("IFCFACEOUTERBOUND", f.Add("IFCPOLYLOOP", L(ix.Select(i => p[i]))), True)]));
+        var brep = f.Add("IFCFACETEDBREP", f.Add("IFCCLOSEDSHELL", L([Face(0, 3, 2, 1), Face(4, 5, 6, 7), Face(0, 1, 5, 4), Face(1, 2, 6, 5), Face(2, 3, 7, 6), Face(3, 0, 4, 7)])));
+        x.Element("IFCCOLUMN", "column", "C1", x.Place(2000, 1000, 0), x.Shape(brep, "Brep"), E("COLUMN"));
+        var path = x.Write(Path.Combine(_dir, "column.ifc"));
+        var e = Full();
+        var enforced = IfcImport.Run(e.Session, path, null, out _);
+        var kept = e.Model.Get(x.Gid("column"))!;
+        Assert.True(StoredBodies.Has(kept));
+        Assert.Equal("IfcColumn", kept.Str("ifcClass"));
+        // Its B-rep read from its triangles, after the file's representations (decision 214).
+        var check = enforced.Fidelity!.Checks.Single(c => c.Id == kept.Id);
+        Assert.Equal("triangles", check.Source);
+        Assert.True(check.Reverted);
+        Assert.StartsWith("volume +3.4", check.Reason);
+        // Reporting only, recognition's reading.
+        var g = Full();
+        IfcImport.Run(g.Session, path, new IfcImportOptions(Fidelity: new FidelityOptions(FidelityOptions.Report)), out _);
+        var c = g.Model.Get(x.Gid("column"))!;
+        Assert.Equal(IfcClass.Column, c.Class);
+        Assert.False(StoredBodies.Has(c));
+        var (lo, hi) = g.Bounds(c.Id);
+        Assert.Equal(2, lo.X, 3); Assert.Equal(2.4, hi.X, 3); Assert.Equal(1, lo.Y, 3); Assert.Equal(1.3, hi.Y, 3); Assert.Equal(3, hi.Z, 3);
+    }
+
+    /// <summary>A real file, when one is given (LAPIN_IFC_SAMPLE=/path/to/file.ifc): the report, for the eye.</summary>
+    [Fact]
+    public void A_sample_file_when_given()
+    {
+        var path = Environment.GetEnvironmentVariable("LAPIN_IFC_SAMPLE");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;
+        var f = Full();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var r = IfcImport.Run(f.Session, path, null, out _);
+        output.WriteLine($"{Path.GetFileName(path)} in {sw.ElapsedMilliseconds} ms");
+        output.WriteLine(r.ToJson().ToJsonString(new System.Text.Json.JsonSerializerOptions { WriteIndented = true }));
+        Assert.True(r.Recognized > 0);
+    }
+}
+
+/// <summary>A real file's plans and a section on a sheet, as a PDF, for the eye (LAPIN_IFC_SAMPLE and LAPIN_IFC_PDF=/path/out.pdf).</summary>
+public class IfcRecognitionSheetTests
+{
+    [Fact]
+    public void A_sample_file_drawn_when_asked()
+    {
+        var path = Environment.GetEnvironmentVariable("LAPIN_IFC_SAMPLE");
+        var outPath = Environment.GetEnvironmentVariable("LAPIN_IFC_PDF");
+        if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(outPath) || !File.Exists(path)) return;
+        var f = new Fixture(new ArchitectureModule(), new StructureModule(), new DraftingModule(), new CivilModule(), new PhasesModule(), new StudioModule());
+        IfcImport.Run(f.Session, path, Environment.GetEnvironmentVariable("LAPIN_IFC_MODE") is { } mode ? new IfcImportOptions(mode) : null, out _);
+        var storeys = Spatial.Storeys(f.Model).OrderBy(s => s.Num("elevation")).ToList();
+        var storey = storeys.Skip(Math.Min(1, storeys.Count - 1)).First();
+        // The plan framed on what the storey holds (walls' axes, references' bodies).
+        var pts = new List<Vec2>();
+        foreach (var e in f.Model.OfClass(IfcClass.Wall).Where(w => Spatial.StoreyOf(f.Model, w.Id)?.Id == storey.Id)) { var c = PathCurve.Of(e); pts.Add(c.Start); pts.Add(c.End); }
+        foreach (var e in f.Model.OfClass(IfcClass.Wall).Where(w => StoredBodies.Has(w) && Spatial.StoreyOf(f.Model, w.Id)?.Id == storey.Id))
+            if (StoredBodies.Geometry(e, f.Model, f.Session.Catalog) is { } g) foreach (var part in g.Parts) foreach (var v in part.Solid.Vertices) pts.Add(new Vec2(v.X, v.Y));
+        var cx = pts.Count > 0 ? (pts.Min(p => p.X) + pts.Max(p => p.X)) / 2 : 0;
+        var cy = pts.Count > 0 ? (pts.Min(p => p.Y) + pts.Max(p => p.Y)) / 2 : 0;
+        var sheet = (string)f.Run("sheet.create", new JsonObject { ["name"] = "Plan", ["paper"] = "A1" })!["id"]!;
+        var vp = (string)f.Run("sheet.addViewport", new JsonObject { ["id"] = sheet, ["viewId"] = "plan:" + storey.Id, ["x"] = 30, ["y"] = 30 })!["viewportId"]!;
+        f.Run("sheet.updateViewport", new JsonObject { ["id"] = sheet, ["viewportId"] = vp, ["width"] = 780, ["height"] = 520, ["center"] = new JsonArray(cx, cy) });
+        var pdf = Sheets.Pdf(f.Session.Reader, [f.Model.Get(sheet)!]);
+        File.WriteAllBytes(outPath, pdf);
+        Assert.True(pdf.Length > 1000);
+    }
+}
+
+/// <summary>A real file's plan and an elevation as SVG files, for the eye (LAPIN_IFC_SAMPLE and LAPIN_IFC_SVG_DIR).</summary>
+public class IfcRecognitionSvgTests
+{
+    [Fact]
+    public void A_sample_file_as_svgs_when_asked()
+    {
+        var path = Environment.GetEnvironmentVariable("LAPIN_IFC_SAMPLE");
+        var dir = Environment.GetEnvironmentVariable("LAPIN_IFC_SVG_DIR");
+        if (string.IsNullOrEmpty(path) || string.IsNullOrEmpty(dir) || !File.Exists(path)) return;
+        Directory.CreateDirectory(dir);
+        var f = new Fixture(new ArchitectureModule(), new StructureModule(), new DraftingModule(), new CivilModule(), new PhasesModule(), new StudioModule());
+        IfcImport.Run(f.Session, path, Environment.GetEnvironmentVariable("LAPIN_IFC_MODE") is { } mode ? new IfcImportOptions(mode) : null, out _);
+        var storeys = Spatial.Storeys(f.Model).OrderBy(s => s.Num("elevation")).ToList();
+        var storey = storeys.Skip(Math.Min(1, storeys.Count - 1)).First();
+        // The building's extent in plan, from every wall.
+        var pts = new List<Vec2>();
+        foreach (var e in f.Model.OfClass(IfcClass.Wall)) { if (StoredBodies.Has(e)) continue; var c = PathCurve.Of(e); pts.Add(c.Start); pts.Add(c.End); }
+        double x0 = pts.Min(p => p.X), x1 = pts.Max(p => p.X), y0 = pts.Min(p => p.Y), y1 = pts.Max(p => p.Y);
+        var plan = (string)f.Run("view.create", new JsonObject { ["kind"] = "plan", ["storeyId"] = storey.Id, ["name"] = "Plan", ["scale"] = 50 })!["id"]!;
+        Write(Path.Combine(dir, "plan.svg"), Views.Drawing(f.Session.Reader, f.Model.Get(plan)!));
+        // An elevation looking at the south face (from below the building, up the page), and a section through the middle.
+        string? elev = null;
+        try { elev = (string)f.Run("view.create", new JsonObject { ["kind"] = "elevation", ["start"] = new JsonArray(x0 - 2, y0 - 5), ["end"] = new JsonArray(x1 + 2, y0 - 5), ["name"] = "South", ["scale"] = 50 })!["id"]!; }
+        catch (CommandException) { }
+        if (elev != null) Write(Path.Combine(dir, "elevation.svg"), Views.Drawing(f.Session.Reader, f.Model.Get(elev)!));
+        var section = (string)f.Run("view.create", new JsonObject { ["kind"] = "section", ["start"] = new JsonArray(x0 - 2, (y0 + y1) / 2), ["end"] = new JsonArray(x1 + 2, (y0 + y1) / 2), ["name"] = "A", ["scale"] = 50 })!["id"]!;
+        Write(Path.Combine(dir, "section.svg"), Views.Drawing(f.Session.Reader, f.Model.Get(section)!));
+    }
+
+    /// <summary>A layered wall with insulation, in plan and in section, as SVG (LAPIN_IFC_SVG_DIR): the batt line, for the eye.</summary>
+    [Fact]
+    public void A_wall_with_insulation_as_svgs_when_asked()
+    {
+        var dir = Environment.GetEnvironmentVariable("LAPIN_IFC_SVG_DIR");
+        if (string.IsNullOrEmpty(dir)) return;
+        Directory.CreateDirectory(dir);
+        var f = new Fixture(new ArchitectureModule(), new DraftingModule());
+        var type = f.Type("Insulated 37", ("Lime plaster", 0.02, false), ("Brick", 0.25, true), ("Mineral wool", 0.1, false), ("Render", 0.01, false));
+        var wall = f.Wall(0, 0, 4, 0, type);
+        f.Wall(4, 0, 4, 3, type);
+        f.Run("architecture.addWindow", new JsonObject { ["wallId"] = wall, ["along"] = 2 });
+        var plan = (string)f.Run("view.create", new JsonObject { ["kind"] = "plan", ["storeyId"] = f.Storey, ["name"] = "Plan", ["scale"] = 20 })!["id"]!;
+        Write(Path.Combine(dir, "wall-plan.svg"), Views.Drawing(f.Session.Reader, f.Model.Get(plan)!));
+        var section = (string)f.Run("view.create", new JsonObject { ["kind"] = "section", ["start"] = new JsonArray(1, -2), ["end"] = new JsonArray(1, 2), ["name"] = "A", ["scale"] = 20 })!["id"]!;
+        Write(Path.Combine(dir, "wall-section.svg"), Views.Drawing(f.Session.Reader, f.Model.Get(section)!));
+    }
+
+    static void Write(string file, JsonObject d)
+    {
+        var pens = d["pens"]?.AsArray() ?? [];
+        double minX = double.MaxValue, minY = double.MaxValue, maxX = double.MinValue, maxY = double.MinValue;
+        void See(double x, double y) { minX = Math.Min(minX, x); maxX = Math.Max(maxX, x); minY = Math.Min(minY, y); maxY = Math.Max(maxY, y); }
+        var sb = new System.Text.StringBuilder();
+        foreach (var pen in pens.OfType<JsonObject>())
+        {
+            var stroke = (string?)pen["stroke"] ?? "#000";
+            var width = (Json.Number(pen["width"]) ?? 0.18) * 0.02; // paper mm, drawn here in metres at about 1:50
+            var fill = (string?)pen["fill"];
+            var dash = pen["dash"] is JsonArray da && da.Count > 0 ? $" stroke-dasharray=\"{string.Join(' ', da.Select(v => Json.Number(v) ?? 1))}\"" : "";
+            if (pen["loops"] is JsonArray loops)
+                foreach (var loop in loops.OfType<JsonArray>())
+                {
+                    var c = loop.Select(v => Json.Number(v) ?? 0).ToList();
+                    for (var i = 0; i + 1 < c.Count; i += 2) See(c[i], c[i + 1]);
+                    sb.Append($"<polygon points=\"{string.Join(' ', c.Select(v => v.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)))}\" fill=\"{(fill is { } fc && fc != "none" ? fc : "#d9d9d9")}\" fill-opacity=\"0.6\" stroke=\"none\"/>\n");
+                }
+            if (pen["segments"] is JsonArray seg)
+            {
+                var c = seg.Select(v => Json.Number(v) ?? 0).ToList();
+                for (var i = 0; i + 3 < c.Count; i += 4)
+                {
+                    See(c[i], c[i + 1]); See(c[i + 2], c[i + 3]);
+                    sb.Append($"<line x1=\"{c[i]:0.###}\" y1=\"{c[i + 1]:0.###}\" x2=\"{c[i + 2]:0.###}\" y2=\"{c[i + 3]:0.###}\" stroke=\"{stroke}\" stroke-width=\"{width}\"{dash}/>\n");
+                }
+            }
+        }
+        if (minX > maxX) { minX = 0; minY = 0; maxX = 10; maxY = 10; }
+        var w = maxX - minX; var h = maxY - minY;
+        var svg = $"<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"{minX - 1:0.###} {-(maxY + 1):0.###} {w + 2:0.###} {h + 2:0.###}\" width=\"{(w + 2) * 70:0}\" height=\"{(h + 2) * 70:0}\" style=\"background:#fff\"><g transform=\"scale(1,-1)\">{sb}</g></svg>";
+        File.WriteAllText(file, svg, System.Text.Encoding.UTF8);
+    }
+}

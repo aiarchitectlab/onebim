@@ -1,0 +1,1026 @@
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+
+namespace Lapin.Platform;
+
+/// <summary>
+/// The platform's own module, in every product: the spatial structure
+/// (IfcProject, IfcSite, IfcBuilding, IfcBuildingStorey), the materials and
+/// the commands every element answers to (rename, delete).
+/// </summary>
+public sealed class CoreModule : ILapinModule
+{
+    /// <summary>A storey's height from its base and top levels: the top must be above the base.</summary>
+    static double TopToHeight(double @base, double top) =>
+        top - @base > 1e-6 ? CheckHeight(Math.Round((top - @base) * 1e6) / 1e6) : throw new CommandException($"The top level ({top:0.00}) must be above the base level ({@base:0.00}).");
+
+    /// <summary>
+    /// The tallest a storey may be (m): a level typed in the wrong unit (a tester's report, #73) made storeys
+    /// kilometres high, and what is built to them (stairs, columns with their bars) froze the program.
+    /// </summary>
+    public const double MaxStoreyHeight = 100;
+
+    /// <summary>A storey's number as a command gives it: none when left out or not a number, refused when non-finite ("NaN", "Infinity").</summary>
+    static double? Given(double? number, JsonNode? given, string key) =>
+        number is { } v ? v
+            : given is JsonValue jv && jv.TryGetValue<string>(out var s) && double.TryParse(s, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var d) && !double.IsFinite(d)
+                ? throw new CommandException($"The storey's {key} is a number of metres.") : null;
+
+    /// <summary>A storey's base level: a number, within ±10 km of ±0.00.</summary>
+    static double CheckLevel(double z) =>
+        double.IsFinite(z) && Math.Abs(z) <= 10_000 ? z : throw new CommandException($"A storey's level must be within ±10 km of ±0.00 (asked {z:0.##} m).");
+
+    static double CheckHeight(double h)
+    {
+        if (!(h > 0)) throw new CommandException("A storey's height must be positive.");
+        if (h > MaxStoreyHeight) throw new CommandException($"A storey is at most {MaxStoreyHeight:0} m high (asked {h:0.##} m). Check the unit the level was typed in.");
+        return h;
+    }
+
+    public const string ModuleId = "core";
+    public string Id => ModuleId;
+    public string Name => "Core";
+
+    static readonly HashSet<string> PlatformClasses =
+    [
+        IfcClass.Project, IfcClass.Site, IfcClass.Building, IfcClass.BuildingStorey,
+        IfcClass.Material, IfcClass.MaterialLayerSet, IfcClass.MaterialLayerSetUsage, Views.Class, Sheets.Class, Links.Class, StoredBodies.SharedClass, IfcSource.RecordClass, Cde.CdeIssues.Class, Cde.Remarks.Remarks.Class, Documents.Documents.Class,
+    ];
+
+    public static bool Owns(string ifcClass) => PlatformClasses.Contains(ifcClass) || ifcClass.StartsWith("IfcRel", StringComparison.Ordinal);
+
+    public void Register(IModuleRegistry r)
+    {
+        // Booleans for whatever cannot be built constructively (openings through walls); none: callers degrade with a diagnostic.
+        if (Lapin.Booleans.ManifoldBooleans.Available) r.Service<Lapin.Geometry.ISolidBooleans>(new Lapin.Booleans.ManifoldBooleans());
+
+        r.Class(new(IfcClass.BuildingStorey, "Storey",
+            // The bounds storey.update keeps, declared so element.update (scripts, MCP, the assistant) keeps them too (audit 22.11.2026, G16).
+            [new("elevation", "Elevation", "length", Min: -10_000, Max: 10_000), new("height", "Height", "length", Min: 0.1, Max: MaxStoreyHeight)], "#6c5ce7", Kind: "spatial"));
+        r.Class(new(IfcClass.Material, "Material", [new("color", "Colour", "color"), new("category", "Category", "text")], Kind: "resource"));
+        DraftingResources.Register(r);
+        // Line types of the project's own and the standards as a library (docs/plan-user-extensibility.md §3.6–3.7).
+        StandardsLibrary.Register(r);
+        MaterialStandards.Register(r);
+        MaterialGraphicsSets.Register(r);
+        // Rule packs: the norms the configurators use, as data (docs/plan-user-extensibility.md §5.4).
+        RulePacks.Register(r);
+        // Classifications, keynotes and shared parameter definitions (docs/plan-user-extensibility.md §7.3).
+        Classifications.Register(r);
+        ParamFormulas.Register(r);
+        // Every field a tag or a formula can read on an element, for the Parameters inspector (forum topic 84).
+        FieldCatalog.Register(r);
+        // Marks the user builds per category: a prefix, a suffix and a pattern of live text, numbers kept on the elements (decision 737).
+        MarkRules.Register(r);
+        // The R and U-value of layered walls, floors and roofs, worked out from their layers (issue #67, decision 717).
+        Thermal.Register(r);
+        r.Service<IIfcElementSets>(new ThermalIfcSets());
+        Images.Register(r);
+        // Light fixtures, lamps and glowing materials as lights (docs/plan-render.md, S2).
+        Lighting.Lights.Register(r);
+        Views.Register(r);
+        // Every module's elements as lines for the temporary dimensions in plan (decision 733).
+        DimLines.Register(r);
+        // The type configurators' preview, drawn as the drawings are (decision 529).
+        TypePreviews.Register(r);
+        r.Service<IProjectUpgrade>(new StoreyPlans.DefaultPlanUpgrade());
+        r.Service<IProjectUpgrade>(new ViewDetail.LevelUpgrade());
+        r.Service<IProjectUpgrade>(new MaterialHatchUpgrade());
+        r.Service<IProjectUpgrade>(new ViewFilterUpgrade());
+        r.Service<IProjectUpgrade>(new ViewStyles.StructureUpgrade());
+        // The standards' own layers merged into the project's one list of drafting layers (forum #168, decision 714).
+        r.Service<IProjectUpgrade>(new DraftLayers.ListUpgrade());
+        // A site plan's north arrow and scale bar as annotations of its own (decision 722, issue #111).
+        r.Service<IProjectUpgrade>(new SitePlans.KeysUpgrade());
+        // References move, turn, mirror, copy and rise like any element (decision 448).
+        var references = new ReferencePlacement();
+        r.Service<IElementPlacement>(references);
+        r.Service<IElementRise>(references);
+        // The doors and windows in a reference's kept openings go with it, and with its deletion (docs/spec-ifc.md, Golurile referințelor).
+        var fills = new ReferenceFills();
+        r.Service<IHostedPlacement>(fills);
+        r.Service<IDeletion>(fills);
+        // Sections and elevations moved in plan: a section with its cut, an elevation's marker alone (decision 460).
+        r.Service<IElementPlacement>(new ViewMarkerPlacement());
+        GraphicsSets.Register(r);
+        ViewFilters.Register(r);
+        BrowserSets.Register(r);
+        ViewLinework.Register(r);
+        Location.Register(r);
+        DisplayQuality.Register(r);
+        ColourPalette.Register(r);
+        // Where the sun is for the project's place (docs/plan-visualisation.md): the 3D view's sun, a sun study's.
+        Sun.Register(r);
+        // A view's sun shadows, drawn as filled areas under elevations, sections and site plans.
+        ViewShadows.Register(r);
+        Groups.Register(r);
+        Arrays.Register(r);
+        // Split, trim/extend and offset on walls, beams and strip footings (audit 2026-11-15, §6).
+        PathEdits.Register(r);
+        // A top or bottom attached to bodies or a level, for every class with an IAttachable (docs/plan-attach-to.md, A1).
+        Attachments.Register(r);
+        OutlineSplits.Register(r);
+        HatchOrigins.Register(r);
+        Components.Register(r);
+        // The wholes an element is a part of, for drill-down picking.
+        Assemblies.Register(r);
+        TypeMappings.Register(r);
+        TypePacks.Register(r);
+        TypeDefaults.Register(r);
+        // Any type duplicated, and each class's types in an order of the user's (forum #71).
+        TypeOrder.Register(r);
+        Sheets.Register(r);
+        // What is drawn on a sheet itself, in paper coordinates: its paper as a view, legends and scale bars (decision 620).
+        PaperViews.Register(r);
+        DrawingKeys.Register(r);
+        // Material keys (forum topic 255): each material's number or code, for material key tags and keyed legends.
+        MaterialKeys.Register(r);
+        TitleBlocks.Register(r);
+        // 2D symbols of the user's own (docs/plan-user-extensibility.md §3).
+        Symbols.Register(r);
+        // The library files' one envelope, preview and import (audit D13).
+        LibraryImports.Register(r);
+        SymbolSlots.Register(r);
+        // The table import (docs/plan-user-extensibility.md §7.1) and its first target, property values.
+        TableImport.Register(r);
+        r.Service<TableTarget>(PropertyTable.Target);
+        MaterialTable.Register(r);
+        CutOrder.Register(r);
+        StoreyMove.Register(r);
+        StoreyCopy.Register(r);
+        Links.Register(r);
+        // Point clouds linked, indexed outside the model, streamed to the views (docs/point-clouds.md).
+        PointCloudLinks.Register(r);
+        // The project folder as a CDE: naming, checks, issues (docs/plan-cde.md); the remarks on the model exchanged as BCF.
+        Cde.Cde.Register(r);
+        Cde.Remarks.Remarks.Register(r);
+        // The written documents filled from the project (docs/plan-documents.md), and the project's information they and the title blocks read.
+        Documents.Documents.Register(r);
+        // Openings as solid voids, and MEP checked against them (decision 289).
+        Coordination.OpeningVoids.Register(r);
+        // A body many references share (docs/plan-instancing.md): drawn by its instances, never on its own.
+        r.Class(new(StoredBodies.SharedClass, "Shared body", [], "#888888", Kind: "resource", Template: false));
+        // What foreign elements share in their file (a type, a system, a material), kept for the export.
+        r.Class(new(IfcSource.RecordClass, "IFC record", [], "#888888", Kind: "resource", Template: false));
+        ViewStyles.Register(r);
+        Coordination.VoidDrawings.Register(r);
+        ElementFaces.Register(r);
+        Profiles.Register(r);
+        ProfileLibraries.ProfileLibraryCommands.Register(r);
+        Dependencies.Register(r);
+        // Bodies an external program computes (docs/plan-external-geometry.md, L1): element.createBody, element.setBody.
+        ExternalBodies.Register(r);
+        Analysis.JgExchange.Register(r);
+
+        r.Command("storey.create", "New storey", (ctx, a) =>
+        {
+            var building = Spatial.EnsureBuilding(ctx);
+            var storeys = Spatial.Storeys(ctx.Model).ToList();
+            var top = storeys.LastOrDefault();
+            var elevation = CheckLevel(Given(Json.Number(a["elevation"]), a["elevation"], "elevation") ?? (top == null ? 0 : top.Num("elevation") + top.Num("height", 3)));
+            var name = (string?)a["name"] ?? (storeys.Count == 0 ? "Ground floor" : $"Level {storeys.Count}");
+            var storey = new Entity(ctx.NewId(), IfcClass.BuildingStorey, name, new JsonObject
+            {
+                ["elevation"] = elevation,
+                ["height"] = Given(Json.Number(a["top"]), a["top"], "top") is { } t ? TopToHeight(elevation, t) : CheckHeight(Given(Json.Number(a["height"]), a["height"], "height") ?? 3.0),
+            });
+            ctx.Add(storey);
+            ctx.Relate(IfcClass.RelAggregates, building.Id, storey.Id);
+            return new JsonObject { ["id"] = storey.Id };
+        });
+
+        // Several storeys at once (issue #83): one on another from `elevation` (default: the top of the highest storey), each as
+        // high as its entry in `heights`; named by the pattern `name` ({n} the number, from `start`; default "Level {n}" from the
+        // number of storeys there are, as storey.create counts). The storeys already there are left as they are. One undo step.
+        r.Command("storey.createMany", "New storeys", (ctx, a) =>
+        {
+            var heights = a["heights"] is JsonArray arr ? arr.Select(v => Json.Number(v) ?? double.NaN).ToList() : [];
+            if (heights.Count == 0) throw new CommandException("Give the storeys' heights.");
+            if (heights.Count > 200) throw new CommandException("At most 200 storeys at once.");
+            foreach (var h in heights) CheckHeight(h);
+            var storeys = Spatial.Storeys(ctx.Model).ToList();
+            var top = storeys.LastOrDefault();
+            var elevation = CheckLevel(Given(Json.Number(a["elevation"]), a["elevation"], "elevation") ?? (top == null ? 0 : top.Num("elevation") + top.Num("height", 3)));
+            var pattern = ((string?)a["name"])?.Trim() is { Length: > 0 } p ? p : "Level {n}";
+            if (heights.Count > 1 && !pattern.Contains("{n}")) throw new CommandException("Name several storeys with {n} in the name: Level {n}.");
+            var start = Json.Number(a["start"]) is { } st ? (long)Math.Round(st) : storeys.Count;
+            var building = Spatial.EnsureBuilding(ctx);
+            var ids = new JsonArray();
+            for (var i = 0; i < heights.Count; i++)
+            {
+                CheckLevel(elevation);
+                var name = pattern.Replace("{n}", (start + i).ToString(System.Globalization.CultureInfo.InvariantCulture));
+                var storey = new Entity(ctx.NewId(), IfcClass.BuildingStorey, name, new JsonObject { ["elevation"] = elevation, ["height"] = heights[i] });
+                ctx.Add(storey);
+                ctx.Relate(IfcClass.RelAggregates, building.Id, storey.Id);
+                ids.Add((JsonNode)storey.Id);
+                elevation = Math.Round((elevation + heights[i]) * 1e6) / 1e6;
+            }
+            return new JsonObject { ["ids"] = ids };
+        });
+
+        r.Command("storey.update", "Change storey", (ctx, a) =>
+        {
+            var s = Spatial.Require(ctx.Model, (string?)a["id"], IfcClass.BuildingStorey);
+            var attrs = s.CloneAttrs();
+            // A storey lies between its base level (elevation) and its top level; its height is what lies between. Either may be below ±0.00.
+            var (oldBase, oldTop) = (s.Num("elevation"), s.Num("elevation") + s.Num("height", 3));
+            var keepTop = a["keepTop"] is JsonValue kt && kt.TryGetValue<bool>(out var k) && k;
+            var @base = CheckLevel(Given(Json.Number(a["elevation"]), a["elevation"], "elevation") ?? oldBase);
+            attrs["elevation"] = @base;
+            if (Given(Json.Number(a["top"]), a["top"], "top") is { } top) attrs["height"] = TopToHeight(@base, top);
+            else if (Given(Json.Number(a["height"]), a["height"], "height") is { } h) attrs["height"] = CheckHeight(h);
+            else if (keepTop) attrs["height"] = TopToHeight(@base, oldTop);
+            ctx.Replace(s.With(name: (string?)a["name"], attrs: attrs));
+            return null;
+        });
+
+        r.Command("element.rename", "Rename", (ctx, a) =>
+        {
+            var e = ctx.Model.Get((string?)a["id"] ?? "") ?? throw new CommandException("Nothing to rename.");
+            // An element a module drives: its module first (docs/overrides.md, Driven elements).
+            if (Driven.Before(ctx, new DrivenEdit("element.rename", [e.Id], a)).Handled.Contains(e.Id)) return null;
+            var name = ((string?)a["name"])?.Trim();
+            if (string.IsNullOrEmpty(name)) throw new CommandException("A name cannot be empty.");
+            // A drafted shape's name is unique on its view (Studio finds its profiles and paths by it).
+            if (e.PredefinedType == "DRAFT" && e.Str("viewId") is { } view
+                && ctx.Model.OfClass(e.Class).Any(x => x.Id != e.Id && x.PredefinedType == "DRAFT" && x.Str("viewId") == view && string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase)))
+                throw new CommandException($"Another shape on this view is called „{name}”.");
+            ctx.Replace(e.With(name: name));
+            return null;
+        });
+
+        // The mark of elements or of types (forum topic 177, decision 731): {ids, mark}; empty clears it (an element then shows its
+        // type's, a type its name). Tags ({mark}, {type.mark}, {TypeMark}), schedules and IFC read it; a door's or window's type keeps
+        // it in its spec too, where its editor reads it.
+        r.Command("element.setMark", "Set mark", (ctx, a) =>
+        {
+            var ids = Driven.Rest(Args.Ids(a), Driven.Before(ctx, new DrivenEdit("element.setMark", Args.Ids(a), a)));
+            if (ids.Count == 0) throw new CommandException("Which element?");
+            if (a["mark"] is { } given && (given is not JsonValue gv || !gv.TryGetValue<string>(out _))) throw new CommandException("A mark is a text.");
+            var mark = ((string?)a["mark"])?.Trim() is { Length: > 0 } m ? m : null;
+            if (mark is { Length: > 80 }) throw new CommandException("A mark is 80 characters at most.");
+            foreach (var id in ids)
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Which element?");
+                if (e.Class is IfcClass.Project or IfcClass.Site or IfcClass.Building or IfcClass.BuildingStorey or IfcClass.Annotation)
+                    throw new CommandException($"{e.Class} has no mark.");
+                var attrs = e.CloneAttrs();
+                if (mark == null) attrs.Remove("mark"); else attrs["mark"] = mark;
+                if (attrs["spec"] is JsonObject spec && spec.ContainsKey("mark")) spec["mark"] = mark ?? "";
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // The user's own parameters on any element, drafted shape or Studio solid: a name, a kind, a value (exported as Lapin_Parameters).
+        // With `pset`, in that property set: a standard one (Pset_DoorCommon) only with its own property names, held as their kind;
+        // one of the user's never „Pset_…” (StandardPsets). On a type, `instance: true` makes it an instance default (TypeDefaults).
+        r.Command("element.setParam", "Set parameter", (ctx, a) =>
+        {
+            var ids = Driven.Rest(Args.Ids(a), Driven.Before(ctx, new DrivenEdit("element.setParam", Args.Ids(a), a)));
+            if (ids.Count == 0) throw new CommandException("Which element?");
+            var name = ((string?)a["name"])?.Trim() is { Length: > 0 } n ? n : throw new CommandException("A parameter needs a name.");
+            foreach (var id in ids)
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Which element?");
+                // A shared definition of that name gives its set and kind when the command gives none (docs/plan-user-extensibility.md §7.3).
+                var shared = a["pset"] == null && a["kind"] == null ? ParamDefs.Find(ctx.Model, name) : null;
+                var (pset, standardKind) = StandardPsets.Check(e.Class, (string?)a["pset"] ?? shared?.Pset, name);
+                var list = e.Attrs["params"] is JsonArray old ? (JsonArray)old.DeepClone() : new JsonArray();
+                var existing = list.OfType<JsonObject>().FirstOrDefault(p => Params.Same(p, pset, name));
+                // A formula instead of a value (docs/plan-user-extensibility.md §5.3): worked out on every ask, never stored.
+                var formula = (string?)a[ParamFormulas.Key] is { Length: > 0 } fx ? ParamFormulas.Check(fx) : null;
+                // A new parameter given only a formula is a text when it gives one (decision 550), else a number.
+                var kind = standardKind ?? (string?)a["kind"] ?? (string?)existing?["kind"] ?? shared?.Kind ?? (formula != null ? ParamFormulas.KindOf(ctx.Model, e, formula) : null) ?? throw new CommandException($"A new parameter needs its kind ({string.Join(", ", Params.Kinds)}).");
+                var options = a["options"] as JsonArray ?? existing?["options"] as JsonArray;
+                if (formula != null && kind is not ("number" or "length" or "area" or "angle" or "bool" or "text")) throw new CommandException("A formula gives a number or a text: its parameter is a number, a length, an area, an angle, a yes/no or a text.");
+                if (formula != null && ParamFormulas.IsTemplate(formula) && kind != "text") throw new CommandException("A formula with {fields} writes a text: its parameter is a text.");
+                var value = formula != null ? null : Params.Check(kind, a["value"], options);
+                var entry = new JsonObject { ["name"] = name, ["kind"] = kind, ["value"] = value };
+                if (formula != null) entry[ParamFormulas.Key] = formula;
+                if (pset != null) entry["pset"] = pset;
+                if (kind == "choice" && options != null) entry["options"] = options.DeepClone();
+                // A type's instance default (TypeDefaults): `instance` given sets or clears it, else the parameter keeps what it was.
+                var instance = a[Params.InstanceKey] is JsonValue iv && iv.TryGetValue<bool>(out var inst) ? inst : existing != null && Params.IsInstanceDefault(existing);
+                if (instance) entry[Params.InstanceKey] = true;
+                if (existing != null) list[list.IndexOf(existing)] = entry; else list.Add((JsonNode)entry);
+                var attrs = e.CloneAttrs();
+                attrs["params"] = list;
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+        r.Command("element.removeParam", "Remove parameter", (ctx, a) =>
+        {
+            var name = (string?)a["name"] ?? throw new CommandException("Which parameter?");
+            var pset = (string?)a["pset"] is { Length: > 0 } ps && ps != StandardPsets.Own ? ps : null;
+            foreach (var id in Driven.Rest(Args.Ids(a), Driven.Before(ctx, new DrivenEdit("element.removeParam", Args.Ids(a), a))))
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Which element?");
+                if (e.Attrs["params"] is not JsonArray old) continue;
+                var list = new JsonArray(old.OfType<JsonObject>().Where(p => !Params.Same(p, pset, name)).Select(p => (JsonNode)p.DeepClone()).ToArray());
+                var attrs = e.CloneAttrs();
+                if (list.Count == 0) attrs.Remove("params"); else attrs["params"] = list;
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+        r.Command("element.removePset", "Remove property set", (ctx, a) =>
+        {
+            var pset = (string?)a["pset"] is { Length: > 0 } ps && ps != StandardPsets.Own ? ps : null;
+            foreach (var id in Driven.Rest(Args.Ids(a), Driven.Before(ctx, new DrivenEdit("element.removePset", Args.Ids(a), a))))
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Which element?");
+                if (e.Attrs["params"] is not JsonArray old) continue;
+                var list = new JsonArray(old.OfType<JsonObject>().Where(p => !string.Equals(Params.SetOf(p), pset, StringComparison.OrdinalIgnoreCase)).Select(p => (JsonNode)p.DeepClone()).ToArray());
+                var attrs = e.CloneAttrs();
+                if (list.Count == 0) attrs.Remove("params"); else attrs["params"] = list;
+                ctx.Replace(e.With(attrs: attrs));
+            }
+            return null;
+        });
+
+        // A closed outline with every edge offset (ArcOutline.Offset, Archicad's "Offset all edges"): {points, arcs?, ellipses?, distance (m, outward
+        // positive)} → {points, arcs (none when straight), from (each new edge's old one)}, or {problem} when it cannot be; nothing changes
+        // in the model: the element's own update command writes it (the grips' "Offset outline", live while dragged).
+        r.Query("outline.offset", (_, a) =>
+        {
+            try
+            {
+                var pts = Args.Points(a);
+                // An elliptical edge (audit S4) becomes the true curve at that distance laid in chords (no ellipse is one): straight edges.
+                var (c, rises, from) = ArcOutline.Offset(pts, ArcOutline.Rises(a[ArcOutline.Key], pts.Count), Args.Number(a, "distance"), EllipseEdge.Read(a[EllipseEdge.Key], pts.Count));
+                return new JsonObject
+                {
+                    ["points"] = new JsonArray([.. c.Select(p => (JsonNode)new JsonArray(Math.Round(p.X, 9), Math.Round(p.Y, 9)))]),
+                    ["arcs"] = ArcOutline.ToJson(rises),
+                    ["from"] = new JsonArray([.. from.Select(i => (JsonNode)i)]),
+                };
+            }
+            catch (CommandException e) { return new JsonObject { ["problem"] = e.Message }; }
+        });
+
+        // The standard property sets the user's parameters may go into, with their properties (StandardPsets).
+        r.Query("params.standardSets", (_, _) => StandardPsets.ToJson());
+
+        r.Command("element.update", "Change", (ctx, a) =>
+        {
+            // One element, or several (ids): each takes the same values.
+            var ids = Args.Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Nothing to change.");
+            var values = a["attrs"] as JsonObject ?? throw new CommandException("Nothing to change.");
+            // What a module drives is its module's first: it may refuse a field, or set it in its own terms (docs/overrides.md, Driven elements).
+            foreach (var id in Driven.Rest(ids, Driven.Before(ctx, new DrivenEdit("element.update", ids, a))))
+            {
+                var e = ctx.Model.Get(id) ?? throw new CommandException("Nothing to change.");
+                if (StoredBodies.Has(e)) throw new CommandException($"„{e.Name}” is a reference from an IFC file: it can be deleted, not changed.");
+                var d = ctx.Describe(e.Class) ?? throw new CommandException($"{e.Class} cannot be changed here.");
+                // A pinned element keeps where it stands; its other fields still change (decision 449).
+                Pins.RefuseMove(e, values.Select(kv => kv.Key));
+                var attrs = e.CloneAttrs();
+                foreach (var (key, value) in values)
+                {
+                    var f = d.Fields.FirstOrDefault(x => x.Key == key) ?? throw new CommandException($"{d.Label} has no field „{key}”.");
+                    if (f.ReadOnly) throw new CommandException($"{f.Label} cannot be changed.");
+                    if (value is null) { attrs.Remove(key); continue; }
+                    attrs[key] = Fields.Check(f, value, ctx.Model);
+                }
+                ctx.Replace(e.With(attrs: attrs));
+                // What follows the element (the runs on a node moved by its x) is told, in the same step.
+                foreach (var u in ctx.Services.All<IElementUpdate>()) u.Updated(ctx, e, ctx.Model.Get(id)!);
+            }
+            return null;
+        });
+
+        // Move, copy, rotate or mirror elements and annotations in plan (one undo step); a copy returns the new ids.
+        // Several commands as one edit (one undo step): a grip shared by two walls moves both ends; each step keeps its own rules.
+        // `label` names the step ("Facades" for a script's batch; Session.LabelOf), else it is "Edit".
+        r.Command("edit.batch", "Edit", (ctx, a) =>
+        {
+            var catalog = ctx.Services as ModuleCatalog ?? throw new CommandException("No commands to batch here.");
+            if (a["steps"] is not JsonArray steps || steps.Count == 0) throw new CommandException("A batch needs its steps.");
+            if (a["label"] is { } label && (label is not JsonValue lv || !lv.TryGetValue<string>(out _))) throw new CommandException("A batch's label is a text.");
+            var results = new JsonArray();
+            foreach (var step in steps)
+            {
+                var name = (string?)step?["command"] ?? throw new CommandException("A step needs its command.");
+                if (name == "edit.batch") throw new CommandException("A batch cannot hold another batch.");
+                var entry = catalog.Command(name) ?? throw new CommandException($"Unknown command „{name}”.");
+                results.Add(entry.Handler(ctx, step!["args"] as JsonObject ?? [])?.DeepClone());
+            }
+            return results;
+        });
+
+        // Pinned where it is, or let go (decision 449): {ids, pinned}; a group's members with it. Any element, a reference too.
+        r.Command("element.pin", "Pin", (ctx, a) =>
+        {
+            var ids = Args.Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Select what to pin.");
+            var pinned = a["pinned"] is not JsonValue pv || !pv.TryGetValue<bool>(out var pb) || pb;
+            return new JsonObject { ["changed"] = Pins.Set(ctx, ids, pinned) };
+        });
+
+        // Link a locked element to a grid axis or reference plane (issue #37): {ids, target: {kind: "axis", gridId, tag} | {kind: "plane", id} | null}.
+        r.Command("element.lockTo", "Lock to axis or reference plane", (ctx, a) =>
+        {
+            var ids = Args.Ids(a).ToList();
+            if (ids.Count == 0) throw new CommandException("Select what to link.");
+            var target = a["target"] as JsonObject;
+            if (target != null)
+            {
+                var kind = (string?)target["kind"];
+                if (kind == "axis")
+                {
+                    if ((string?)target["gridId"] is not { Length: > 0 } gid || (string?)target["tag"] is not { Length: > 0 } || ctx.Model.Get(gid)?.Class != IfcClass.Grid)
+                        throw new CommandException("There is no such grid axis.");
+                }
+                else if (kind == "plane")
+                {
+                    if ((string?)target["id"] is not { Length: > 0 } pid || ctx.Model.Get(pid) is not { Class: Views.Class } pv || pv.Str("kind") != "plane")
+                        throw new CommandException("There is no such reference plane.");
+                }
+                else throw new CommandException("Target kind must be axis or plane.");
+            }
+            return new JsonObject { ["changed"] = Pins.LockTo(ctx, ids, target) };
+        });
+
+        // Each end of walls, beams and strip footings joining automatically or not (the forum's topic #50, decision 546):
+        // {ids, start?, end?} (what is not given stays). An end turned off keeps the joins it has; one turned on joins what it meets now.
+        r.Command("element.setAutoJoin", "Join automatically", (ctx, a) =>
+        {
+            static bool? Flag(JsonNode? n) => n is JsonValue v && v.TryGetValue<bool>(out var b) ? b : null;
+            var (start, end) = (Flag(a["start"]), Flag(a["end"]));
+            if (start == null && end == null) throw new CommandException("Say which end: start, end or both.");
+            var paths = ctx.Services.Get<IPathElements>();
+            var (ids, _) = Groups.Expand(ctx.Model, Args.Ids(a).ToList());
+            var targets = ids.Select(ctx.Model.Get).OfType<Entity>()
+                .Where(e => paths?.IsPath(e.Class) == true && e.Attrs["start"] is JsonArray && e.Attrs["end"] is JsonArray).ToList();
+            if (targets.Count == 0) throw new CommandException("Select walls, beams or strip footings.");
+            var changed = 0;
+            foreach (var e in targets)
+            {
+                if ((start == null || Joins.AutoAt(e, 0) == start) && (end == null || Joins.AutoAt(e, 1) == end) && e.Attrs[Joins.AutoKey] != null) continue;
+                var attrs = e.CloneAttrs();
+                Joins.SetAuto(attrs, e, start, end);
+                ctx.Replace(e.With(attrs: attrs));
+                changed++;
+            }
+            if (start == true || end == true)
+                foreach (var e in targets)
+                    try { Joins.Auto(ctx, paths!, e.Id); }
+                    catch (CommandException) { }
+            return new JsonObject { ["changed"] = changed };
+        });
+
+        r.Command("element.transform", "Transform", (ctx, a) =>
+        {
+            var t = ElementTransform.Run(ctx, a);
+            // Walls, beams and strip footings moved or copied join what they now meet, as drawing does (forum 47, decision 531).
+            ElementTransform.JoinWhatMeets(ctx, t);
+            var o = new JsonObject { ["ids"] = t.Made };
+            // A 3D move's vertical part left out on what has no height of its own (docs/plan-3d-modelling.md).
+            if (t.Kept.Count > 0) o["kept"] = new JsonArray(t.Kept.Select(x => (JsonNode)x).ToArray());
+            return o;
+        });
+
+        // Align (Revit's; forum topics 109, 170, 171): {ids, reference: [a, b], line: [a, b], referenceId?, lock?, frame?}: the
+        // elements moved square to the reference until the line picked on them lies on it, by element.transform's move.
+        r.Command("element.align", "Align", (ctx, a) => ElementAlign.Run(ctx, a));
+
+        // Copies in a row or round a centre (decision 448), or along a path, kept as an arrangement (decision 481, Arrays):
+        // {ids, count (with the first), step: [x, y, z] | fit: [x, y, z]} or {kind: "polar", count, angle filled (degrees,
+        // 360 a full turn), center: [x, y]} or {kind: "grid", count (the columns), step, rows, rowStep, levels, levelStep;
+        // forum 90} or {kind: "path", along | points, count | spacing, start, end, offset, orient,
+        // flip, base}; each copy as element.transform copies, one undo step. Returns the copies and the array.
+        r.Command("element.array", "Array", (ctx, a) => Arrays.Make(ctx, a));
+
+        r.Command("element.delete", "Delete", (ctx, a) =>
+        {
+            // What a module drives (and the groups it owns) it deletes in its own terms, or refuses (docs/overrides.md, Driven elements).
+            var driven = Driven.Before(ctx, new DrivenEdit("element.delete", Args.Ids(a), a));
+            var given = Driven.Rest(Args.Ids(a), driven);
+            // A group deleted goes with its members; a group its last member left goes too (docs/groups.md).
+            var (ids, groups) = Groups.Expand(ctx.Model, given);
+            ids = Driven.Rest(ids, driven);
+            // What is pinned stays (decision 449).
+            Pins.Refuse(ids.Concat(groups).Select(id => ctx.Model.Get(id)).OfType<Entity>());
+            var groupsTouched = groups.Concat(ids.Select(id => Groups.Of(ctx.Model, id)?.Id).OfType<string>()).Distinct().ToList();
+            // What a module's elements still use stays (an entourage kind with figures, its picture), whatever the order asked.
+            var deleting = ids.ToHashSet();
+            // A view on a sheet stays until it is taken off the sheet (forum topic 207): the whole deletion is refused, one step.
+            Sheets.RefuseDeletingPlaced(ctx.Model, deleting);
+            foreach (var id in deleting)
+                if (ctx.Model.Get(id) is { } x) foreach (var d in ctx.Services.All<IDeletion>()) d.Check(ctx.Model, x, deleting);
+            // What names the elements going (a room's finish, a bar's host) is put right while they are all still there.
+            foreach (var f in ctx.Services.All<IDeletionFollowers>()) f.Deleting(ctx, deleting);
+            var bodies = new HashSet<string>();
+            foreach (var id in ids.Distinct())
+            {
+                if (ctx.Model.Get(id) is not { } e)
+                {
+                    foreach (var d in ctx.Services.All<IDeletion>()) if (d.Delete(ctx, id)) break;
+                    continue;
+                }
+                if (e.Class is IfcClass.Project or IfcClass.Site or IfcClass.Building) throw new CommandException($"The {e.Class} cannot be deleted.");
+                // A storey with elements on it stays, unless they go in the same call (whatever the order asked).
+                if (e.Class == IfcClass.BuildingStorey && ctx.Model.RelatedOf(e.Id, IfcClass.RelContainedInSpatialStructure).Any(x => !deleting.Contains(x.Id)))
+                    throw new CommandException($"„{e.Name}” still has elements on it.");
+                // A type in use stays: the elements built with it would be left without one.
+                if (ctx.Describe(e.Class)?.Kind == "type" && ctx.Model.RelatedOf(e.Id, IfcClass.RelDefinesByType).Count(x => !deleting.Contains(x.Id)) is var n and > 0)
+                    throw new CommandException($"„{e.Name}” is used by {n} element(s): give them another type first.");
+                // A module may take its own element down with what hangs on it (a stair with the opening it asked of the floor above).
+                if (ctx.Services.All<IDeletion>().Any(d => d.Delete(ctx, id))) continue;
+                if (StoredBodies.InstanceOf(e) is var (body, _)) bodies.Add(body);
+                ctx.Remove(id);
+            }
+            // A shared body its last instance left goes with it (docs/plan-instancing.md).
+            if (bodies.Count > 0)
+            {
+                // In any order: what is still built from each body is all that is asked, not the creation order.
+                foreach (var e in ctx.Model.AnyOrder)
+                {
+                    if ((string?)e.Attrs[StoredBodies.BodyOf] is { } body) bodies.Remove(body);
+                    if (bodies.Count == 0) break;
+                }
+                foreach (var body in bodies) ctx.Remove(body);
+            }
+            foreach (var g in groups) if (ctx.Model.Get(g) is { } x && !Groups.KeptForAbsent(ctx, x)) ctx.Remove(g);
+            Groups.DropEmpty(ctx, groupsTouched);
+            return null;
+        });
+    }
+}
+
+/// <summary>
+/// element.transform's work: elements moved, copied, turned or mirrored in plan, with what they host, their tags and
+/// their joins among themselves; Copy to storeys copies through it too (each copied id's copy, the groups' twins).
+/// </summary>
+public static class ElementTransform
+{
+    public sealed record Result(JsonArray Made, IReadOnlyDictionary<string, string> Copies, IReadOnlyDictionary<string, string> Groups)
+    {
+        /// <summary>What a move's <c>up</c> could not raise (it has no height of its own): the ids moved or copied.</summary>
+        public IReadOnlyList<string> Kept { get; init; } = [];
+
+        /// <summary>The elements moved, turned or mirrored (not copied) as a whole, each carried on its own.</summary>
+        public IReadOnlyList<string> Moved { get; init; } = [];
+    }
+
+    /// <summary>
+    /// After a move, a turn, a mirror, a copy or an array (forum 47, decision 531): each path element carried (a wall, a beam,
+    /// a strip footing) joins what it now meets, as one drawn there would (<see cref="Joins.Auto"/>), and a moved one's joins
+    /// with what stayed are worked out again (one that no longer meets goes), as a wall's ends edited are (updateWall). What
+    /// was carried together keeps its joins among them as they were: none is made between two of them. A copy is the user's
+    /// own new element, so a copy of one recognised from a file joins too (its ends set to join, decision 546); one recognised
+    /// from a file (its <c>imported</c> record) moved keeps its joins as the file had them, and joins nothing new
+    /// (docs/spec-ifc.md, the import reproduces the file). Each end joins only as its <see cref="Joins.AutoKey"/> says.
+    /// </summary>
+    /// <param name="together">More that counts as carried with it (an array's items: none joins another).</param>
+    public static void JoinWhatMeets(ICommandContext ctx, Result r, IReadOnlySet<string>? together = null)
+    {
+        if (ctx.Services.Get<IPathElements>() is not { } paths) return;
+        bool IsPath(string id) => ctx.Model.Get(id) is { } e && paths.IsPath(e.Class) && e.Attrs["start"] is JsonArray && e.Attrs["end"] is JsonArray;
+        // A component's walls (an apartment type's inner walls) stop in the building's as its instances say (docs/plan-units.md), not joined here.
+        var units = Components.InstanceMemberIds(ctx.Model).ToHashSet();
+        var moved = r.Moved.Where(id => IsPath(id) && !units.Contains(id)).ToList();
+        var copied = r.Copies.Values.Where(id => IsPath(id) && !units.Contains(id)).ToList();
+        if (moved.Count == 0 && copied.Count == 0) return;
+        // A copy of one recognised from a file is the user's own: its ends join, unless they were set otherwise.
+        foreach (var id in copied)
+            if (ctx.Model.Get(id) is { } c && c.Attrs["imported"] != null && c.Attrs[Joins.AutoKey] == null)
+            {
+                var attrs = c.CloneAttrs();
+                Joins.SetAuto(attrs, c, true, true);
+                ctx.Replace(c.With(attrs: attrs));
+            }
+        var with = r.Moved.Concat(r.Copies.Values).Concat(together ?? Enumerable.Empty<string>()).Concat(units).ToHashSet();
+        var refreshed = moved.Where(id => ctx.Model.Get(id)!.Attrs["imported"] == null).ToList();
+        try { Joins.Refresh(ctx, paths, refreshed, j => !(with.Contains(j.Relating) && j.Related.All(with.Contains))); }
+        catch (CommandException) { }
+        var thickness = new Dictionary<string, double>();
+        foreach (var id in moved.Concat(copied))
+            try { Joins.Auto(ctx, paths, id, skip: with, thickness: thickness); }
+            catch (CommandException) { }
+    }
+
+    /// <param name="keepLinks">The attributes a copy leaves naming the originals (Copy to storeys without relations: a wall's roofs).</param>
+    public static Result Run(ICommandContext ctx, JsonObject a, Placement2D? given = null, IReadOnlySet<string>? keepLinks = null)
+    {
+        static Lapin.Geometry.Vec2 V(JsonNode? n, string what) => Args.Point(n, what);
+        // A group selected is its members (docs/groups.md).
+        var (ids, groups) = Groups.Expand(ctx.Model, Args.Ids(a));
+        var op = (string?)a["op"] ?? "move";
+        // A move's height (rise, or world's third value: an elevation's or a section's move in the model, decision 298).
+        var world = a["world"] is JsonArray { Count: >= 2 } wv ? wv : null;
+        // A 3D move's vertical part (docs/plan-3d-modelling.md): what has a height of its own goes up or down by it.
+        var up = op is "move" or "copy" ? Json.Number(a["up"]) ?? 0 : 0;
+        var rise = Json.Number(a["rise"]) ?? (world is { Count: >= 3 } ? Json.Number(world[2]) : null) ?? up;
+        // A section's or an elevation's frame (decision 453): the command's points are the view's (x along it, y up), which
+        // is what its drafted shapes take; the model's elements are carried by the same edit in the model instead.
+        var frame = a["frame"] is JsonObject fo && Args.TryPoint3(fo["right"]) is { } fr && Args.TryPoint3(fo["up"]) is { } fu
+            ? (Origin: Args.TryPoint3(fo["origin"]) ?? default, Right: fr, Up: fu) : ((Vec3 Origin, Vec3 Right, Vec3 Up)?)null;
+        if (given == null && frame is { } fm && op is "move" or "copy" && world == null)
+        {
+            var by = V(a["by"], "displacement");
+            var w = fm.Right * by.X + fm.Up * by.Y;
+            world = new JsonArray(w.X, w.Y, w.Z);
+            rise = Json.Number(a["rise"]) ?? w.Z;
+        }
+        var t = given ?? op switch
+        {
+            "move" or "copy" => Placement2D.Move(V(a["by"], "displacement"), rise),
+            "rotate" => Placement2D.Rotate(V(a["center"], "centre"), (Json.Number(a["angle"]) ?? 0) * Math.PI / 180),
+            "mirror" => (V(a["a"], "mirror line's start") - V(a["b"], "mirror line's end")).Length < 1e-9
+                ? throw new CommandException("A mirror line needs two different points.") : Placement2D.Mirror(V(a["a"], "start"), V(a["b"], "end")),
+            _ => throw new CommandException($"„{op}” is not move, copy, rotate or mirror."),
+        };
+        var copy = op == "copy" || (a["copy"] is JsonValue cv && cv.TryGetValue<bool>(out var cb) && cb);
+        // What a module drives (its groups whole, or members alone) it moves or copies in its own terms, or refuses (docs/overrides.md, Driven elements).
+        var driven = Driven.Before(ctx, new DrivenEdit("element.transform", Args.Ids(a), a) { Transform = t, Up = up, Copy = copy });
+        if (driven.Handled.Count > 0)
+        {
+            (ids, groups) = Groups.Expand(ctx.Model, Driven.Rest(Args.Ids(a), driven));
+            ids = Driven.Rest(ids, driven);
+        }
+        var all = ids.Select(id => ctx.Model.Get(id)).OfType<Entity>()
+            .Where(e => e.Class is not (IfcClass.Project or IfcClass.Site or IfcClass.Building or IfcClass.BuildingStorey)).ToList();
+        // The model's own edit when the view's is not it (a section's or an elevation's): a move along the view and up, a mirror
+        // about a vertical line across the plane through it square to the view. A turn there would tip the elements over, and a
+        // mirror about any other line turn them upside down: refused for the model's elements, drafted shapes still take them.
+        Placement2D? inModel = null;
+        double lift = 0;
+        // A move given in the model alone (world, an older caller's) carries the elements by it too.
+        if (given == null && (frame != null || world != null && op is "move" or "copy"))
+        {
+            var modelSelected = all.Any(e => !OnView(e)) || ids.Any(id => ctx.Model.Get(id) == null);
+            switch (op)
+            {
+                case "move" or "copy":
+                    inModel = Placement2D.Move(Args.PointOf(world), rise);
+                    lift = world is { Count: >= 3 } ? Json.Number(world[2]) ?? 0 : 0;
+                    break;
+                case "rotate" when modelSelected:
+                    throw new CommandException("Elements turn in a plan or in 3D: in a section or an elevation a turn would tip them over (drafted shapes turn here).");
+                case "mirror" when modelSelected && frame is { } fm2:
+                {
+                    var (pa, pb) = (V(a["a"], "start"), V(a["b"], "end"));
+                    var d = pb - pa;
+                    var r = new Vec2(fm2.Right.X, fm2.Right.Y);
+                    if (Math.Abs(d.X) > 1e-3 * d.Length || r.Length < 1e-9)
+                        throw new CommandException("In a section or an elevation, elements mirror about a vertical line (across the plane through it, square to the view).");
+                    // The view's x is measured along its right (a unit vector, level in a section or an elevation): the line's foot in plan.
+                    var at = new Vec2(fm2.Origin.X, fm2.Origin.Y) + r * ((pa.X + pb.X) / 2);
+                    inModel = Placement2D.Mirror(at, at + new Vec2(-r.Y, r.X));
+                    break;
+                }
+            }
+        }
+        // How each one is carried: a drafted shape (or a bar drawn on the view) as the view's points say, the rest in the model.
+        Placement2D Of(Entity e) => inModel != null && !OnView(e) ? inModel : t;
+        // What is pinned is not moved, turned or mirrored; it is copied, and its copies are not pinned (decision 449).
+        if (!copy) Pins.Refuse(all);
+        // What a module places in a host (a door in its opening, the opening in its wall) is not moved on its own like the rest.
+        var hosting = ctx.Services.All<IHostedPlacement>().ToList();
+        string? HostOf(Entity e) => ctx.Model.RelatingOf(e.Id, IfcClass.RelFillsElement) is { } opening
+            ? ctx.Model.RelatingOf(opening.Id, IfcClass.RelVoidsElement)?.Id ?? opening.Id
+            : ctx.Model.RelatingOf(e.Id, IfcClass.RelVoidsElement)?.Id ?? hosting.Select(h => h.HostOf(ctx.Model, e)).FirstOrDefault(x => x != null);
+        var entities = all.Where(e => HostOf(e) == null).ToList();
+        var moving = entities.Select(e => e.Id).ToHashSet();
+        if (!copy) Components.Leaving(ctx, groups, moving);
+        // One whose host moves too goes with it; one whose host stays is its module's to move in a host (report #82: MOVE
+        // and COPY on a window slide it along its wall), once: an opening selected with its door is the door's.
+        var hostedIds = all.Where(e => HostOf(e) is { } h && !moving.Contains(h)).Select(e => e.Id).ToHashSet();
+        var hosted = all.Where(e => hostedIds.Contains(e.Id) && !ctx.Model.RelatedOf(e.Id, IfcClass.RelFillsElement).Any(f => hostedIds.Contains(f.Id))).ToList();
+        var made = new JsonArray();
+        var copies = new Dictionary<string, string>();
+        var twins = new Dictionary<string, string>();
+        // In a section or an elevation the view's edit is given in the model too: what is placed in a host moves by it.
+        var inHost = inModel ?? t;
+        // What follows the elements without being selected (their tags, report #93) is told before and after.
+        var selected = all.Select(e => e.Id).ToHashSet();
+        var followers = ctx.Services.All<ITransformFollowers>().Select(f => (f, State: f.Before(ctx, moving, selected))).ToList();
+        foreach (var e in entities)
+        {
+            if (ctx.Model.Get(e.Id) is not { } now) continue;
+            if (copy) { var c = Placement.Copy(ctx, now, Of(now)); made.Add((JsonNode)c); copies[e.Id] = c; }
+            else
+            {
+                var tr = Of(now);
+                Placement.Transform(ctx, now, tr, moving);
+                if (now.Class == Views.Class && now.Str("kind") == "plane") Pins.FollowPlane(ctx, now.Id, tr, moving);
+            }
+        }
+        foreach (var own in ctx.Services.All<IHostedPlacement>())
+            if (hosted.Where(e => own.Handles(ctx.Model, e)).ToList() is { Count: > 0 } mine)
+                foreach (var c in own.Transform(ctx, mine, inHost, copy)) made.Add((JsonNode)c);
+        // Copied together, a copy names the copies of what its original named (a finish its room, a wall its roof; audit 15.11.2026).
+        if (copy) CopyLinks.Remap(ctx, copies, keepLinks);
+        foreach (var (f, state) in followers) f.After(ctx, state, t, inHost, moving, selected, copies);
+        // Elements copied together keep their joins: a corner or a T between two of them joins their copies the same way.
+        if (copy)
+            foreach (var r in copies.Keys.SelectMany(id => ctx.Model.RelationsOf(id, IfcClass.RelConnectsPathElements)).DistinctBy(r => r.Id).Where(r => copies.ContainsKey(r.Relating) && r.Related.All(copies.ContainsKey)).ToList())
+                ctx.AddRelation(new Relation(ctx.NewId(), r.Class, copies[r.Relating], r.Related.Select(x => copies[x]).ToList(), r.Attrs?.DeepClone() as JsonObject));
+        // A group copied: its members' copies make a group of their own, with its name.
+        if (copy)
+            foreach (var g in groups)
+                if (ctx.Model.Get(g) is { } group && Groups.Make(ctx, group.Name, Groups.MembersOf(ctx.Model, g).Where(copies.ContainsKey).Select(x => copies[x]).ToList()) is { } twin)
+                {
+                    made.Add((JsonNode)twin.Id);
+                    twins[g] = twin.Id;
+                    Components.CopiedInstance(ctx, group, twin, inModel ?? t, up + lift);
+                }
+        // Parts selected on their own (a grid's axis): their module carries them.
+        // One whose element goes as a whole goes with it, once.
+        foreach (var id in ids.Distinct().Where(id => ctx.Model.Get(id) == null && !(id.IndexOf('#') is var h and > 0 && moving.Contains(id[..h]))))
+            foreach (var part in ctx.Services.All<IPartPlacement>())
+                if (part.Transform(ctx, id, inModel ?? t, copy) is { } after)
+                {
+                    if (copy) made.Add((JsonNode)after);
+                    break;
+                }
+        var kept = new List<string>();
+        foreach (var e in entities)
+        {
+            // A section's or an elevation's move up raises the model's elements by their offset from the level, not what lies on the view.
+            var dz = up + (OnView(e) ? 0 : lift);
+            if (Math.Abs(dz) <= 1e-9) continue;
+            var id = copy ? copies.GetValueOrDefault(e.Id) : e.Id;
+            if (id == null || ctx.Model.Get(id) is not { } now) continue;
+            if (!ElementRise.Lift(ctx, now, dz)) kept.Add(id);
+        }
+        // An instance moved as a whole says where it stands now (docs/components.md).
+        if (!copy) foreach (var g in groups) Components.MovedInstance(ctx, g, inModel ?? t, up + lift);
+        if (copy) Pins.Unpinned(ctx, made.Select(x => (string?)x).OfType<string>());
+        foreach (var id in driven.Made) made.Add((JsonNode)id);
+        return new Result(made, copies, twins) { Kept = kept, Moved = copy ? [] : entities.Select(e => e.Id).ToList() };
+    }
+
+    /// <summary>What lies on a view and takes the view's points (a drafted shape, a dimension, a bar drawn on it), not the model's.</summary>
+    public static bool OnView(Entity e) => e.Class == IfcClass.Annotation || e.Str("viewId") is { Length: > 0 };
+}
+
+/// <summary>The spatial structure: one project, site and building; the storeys, lowest first.</summary>
+public static class Spatial
+{
+    public static Entity? Project(IModelView m) => m.OfClass(IfcClass.Project).FirstOrDefault();
+    public static Entity? Building(IModelView m) => m.OfClass(IfcClass.Building).FirstOrDefault();
+
+    public static IEnumerable<Entity> Storeys(IModelView m) =>
+        m.OfClass(IfcClass.BuildingStorey).OrderBy(s => s.Num("elevation")).ThenBy(s => m.Order(s.Id));
+
+    /// <summary>The storey an element stands on.</summary>
+    public static Entity? StoreyOf(IModelView m, string elementId) => m.RelatingOf(elementId, IfcClass.RelContainedInSpatialStructure);
+
+    /// <summary>
+    /// The storey an element stands on (audit D4, the one rule): its own; with <paramref name="followHost"/>, for one that is
+    /// not contained itself, its host's — an opening's (never contained, as IFC has it) the element it voids, a door's or a
+    /// window's the element its opening voids. So a door the file left off every storey is on its wall's.
+    /// </summary>
+    public static Entity? StoreyOf(IModelView m, Entity e, bool followHost) =>
+        StoreyOf(m, e.Id) ?? (followHost && HostOf(m, e) is { } host ? StoreyOf(m, host.Id) : null);
+
+    /// <summary>The element an opening voids, or the one a door's or window's opening voids; null for anything else.</summary>
+    public static Entity? HostOf(IModelView m, Entity e)
+    {
+        var opening = e.Class == IfcClass.OpeningElement ? e : m.RelatingOf(e.Id, IfcClass.RelFillsElement);
+        return opening != null ? m.RelatingOf(opening.Id, IfcClass.RelVoidsElement) : null;
+    }
+
+    /// <summary>
+    /// The storey an element is drawn on (<see cref="StoreyOf(IModelView, Entity, bool)"/> following its host): an opening on
+    /// the storey of the element it voids, so a plan shows and picks a wall's bare opening on the wall's storey only (decision
+    /// 312), and a door or window the file left off every storey on its wall's.
+    /// </summary>
+    public static Entity? ShownOn(IModelView m, Entity e) => StoreyOf(m, e, followHost: true);
+
+    /// <summary>The spatial parent: an element's storey, a storey's building, a building's site.</summary>
+    public static Entity? ParentOf(IModelView m, string id) =>
+        StoreyOf(m, id) ?? m.RelatingOf(id, IfcClass.RelAggregates);
+
+    public static Entity Require(IModelView m, string? id, string ifcClass) =>
+        id != null && m.Get(id) is { } e && e.Class == ifcClass ? e : throw new CommandException($"There is no {ifcClass} {id}.");
+
+    /// <summary>The project, site and building, made when the model has none yet.</summary>
+    public static Entity EnsureBuilding(IEdit edit) => EnsureBuilding(edit, null);
+
+    /// <summary>
+    /// The project, site and building, made when the model has none yet; with <paramref name="seed"/> (a project made from
+    /// an IFC file) under the file's GlobalIds and names, their aggregations remembering the file's GlobalIds too.
+    /// </summary>
+    public static Entity EnsureBuilding(IEdit edit, SpatialSeed? seed)
+    {
+        if (Building(edit.Model) is { } b) return b;
+        var project = Project(edit.Model);
+        if (project == null)
+        {
+            project = new Entity(IdOf(edit, seed?.Project.Id), IfcClass.Project, seed?.Project.Name ?? "Project", new JsonObject { ["lengthUnit"] = "METRE", [ViewDetail.RevKey] = 1, [MaterialHatchUpgrade.RevKey] = MaterialHatchUpgrade.Rev, [ViewFilterUpgrade.RevKey] = ViewFilterUpgrade.Rev, [ViewStyles.StructureRevKey] = ViewStyles.StructureRev, [MaterialStandards.LookRevKey] = MaterialStandards.LookRev });
+            edit.Add(project);
+        }
+        var site = edit.Model.OfClass(IfcClass.Site).FirstOrDefault();
+        if (site == null)
+        {
+            site = new Entity(IdOf(edit, seed?.Site.Id), IfcClass.Site, seed?.Site.Name ?? "Site", []);
+            edit.Add(site);
+            Aggregate(edit, project.Id, site.Id, seed?.Site.Aggregation);
+        }
+        var building = new Entity(IdOf(edit, seed?.Building.Id), IfcClass.Building, seed?.Building.Name ?? "Building", []);
+        edit.Add(building);
+        Aggregate(edit, site.Id, building.Id, seed?.Building.Aggregation);
+        return building;
+    }
+
+    /// <summary>
+    /// The key of a relationship's attributes holding the GlobalId the IFC file gave it, which the export writes again
+    /// (a spatial aggregation or containment Lapin otherwise names after its owner).
+    /// </summary>
+    public const string FileGlobalId = "globalId";
+
+    /// <summary>The GlobalId a relationship came with from an IFC file (<see cref="FileGlobalId"/>), or null.</summary>
+    public static string? FileGlobalIdOf(Relation? r) =>
+        r?.Attrs?[FileGlobalId] is JsonValue v && v.TryGetValue<string>(out var g) && GlobalId.IsValid(g) ? g : null;
+
+    /// <summary>The file's id when it is a GlobalId the model does not hold yet, else a new one.</summary>
+    static string IdOf(IEdit edit, string? id) =>
+        id != null && GlobalId.IsValid(id) && edit.Model.Get(id) == null && edit.Model.GetRelation(id) == null ? id : edit.NewId();
+
+    /// <summary><paramref name="part"/> aggregated into <paramref name="whole"/>; a new aggregation remembers the file's GlobalId.</summary>
+    static void Aggregate(IEdit edit, string whole, string part, string? globalId)
+    {
+        var r = edit.Relate(IfcClass.RelAggregates, whole, part);
+        if (globalId != null && GlobalId.IsValid(globalId) && FileGlobalIdOf(r) == null)
+        {
+            var attrs = r.Attrs?.DeepClone() as JsonObject ?? [];
+            attrs[FileGlobalId] = globalId;
+            edit.ReplaceRelation(r with { Attrs = attrs });
+        }
+    }
+
+    /// <summary>A storey made under the building as a seed gives it (its GlobalId, name, base level and height).</summary>
+    public static Entity AddStorey(IEdit edit, Entity building, string? id, string name, double elevation, double height, string? aggregation = null)
+    {
+        var storey = new Entity(IdOf(edit, id), IfcClass.BuildingStorey, name, new JsonObject { ["elevation"] = elevation, ["height"] = height });
+        edit.Add(storey);
+        Aggregate(edit, building.Id, storey.Id, aggregation);
+        return storey;
+    }
+
+    /// <summary>The storey a project with none starts with: the product's first, else a ground floor at ±0.00, 3 m high.</summary>
+    public static (string Name, double Elevation, double Height) DefaultStorey(ProductManifest? product) =>
+        product?.Storeys is { Length: > 0 } own ? (own[0].Name, own[0].Elevation, own[0].Height) : ("Ground floor", 0.0, 3.0);
+
+    /// <summary>
+    /// The lowest storey, made when the model has none (an import into an empty project): the product's first storey,
+    /// as the session starts one (Session.StartEmpty), else a ground floor.
+    /// </summary>
+    public static Entity EnsureStorey(IEdit edit, ProductManifest? product = null)
+    {
+        if (Storeys(edit.Model).FirstOrDefault() is { } s) return s;
+        var building = EnsureBuilding(edit);
+        var (name, elevation, height) = DefaultStorey(product);
+        var storey = new Entity(edit.NewId(), IfcClass.BuildingStorey, name, new JsonObject { ["elevation"] = elevation, ["height"] = height });
+        edit.Add(storey);
+        edit.Relate(IfcClass.RelAggregates, building.Id, storey.Id);
+        return storey;
+    }
+
+    /// <summary>Places <paramref name="elementId"/> on <paramref name="storeyId"/>.</summary>
+    public static void Contain(IEdit edit, string storeyId, string elementId)
+    {
+        Require(edit.Model, storeyId, IfcClass.BuildingStorey);
+        edit.Relate(IfcClass.RelContainedInSpatialStructure, storeyId, elementId);
+    }
+
+    /// <summary>The elevation of the storey <paramref name="e"/> stands on (<see cref="StoreyOf"/>); 0 when it stands on none.</summary>
+    public static double Elevation(IModelView m, Entity e) => StoreyOf(m, e.Id)?.Num("elevation") ?? 0;
+
+    /// <summary>Where an element's base is: its storey's <see cref="Elevation"/> plus its own <c>baseOffset</c> (walls, columns, rooms…).</summary>
+    public static double Base(IModelView m, Entity e) => Elevation(m, e) + e.Num("baseOffset");
+}
+
+/// <summary>
+/// A project's spatial structure as an IFC file gives it, for a new project made from the file (an IFC opened as a
+/// project): the project, site and building with their GlobalIds and names, and the storeys bottom up; each part's
+/// <c>Aggregation</c> is the GlobalId of the file's IfcRelAggregates that holds it (docs/spec-ifc.md, Structura spațială).
+/// </summary>
+public sealed record SpatialSeed(SpatialSeed.Part Project, SpatialSeed.Part Site, SpatialSeed.Part Building, IReadOnlyList<SpatialSeed.Level> Storeys)
+{
+    public sealed record Part(string? Id, string? Name, string? Aggregation = null);
+    public sealed record Level(string? Id, string Name, double Elevation, double Height, string? Aggregation = null);
+}
+
+/// <summary>The project's materials (IfcMaterial), found by name.</summary>
+public static class Materials
+{
+    public static Entity? Find(IModelView m, string name) =>
+        m.OfClass(IfcClass.Material).FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>The material named <paramref name="name"/>, made when the project has none.</summary>
+    public static Entity Ensure(IEdit edit, string name, string? color = null)
+    {
+        if (Find(edit.Model, name) is { } found) return found;
+        var m = new Entity(edit.NewId(), IfcClass.Material, name, new JsonObject { ["color"] = color ?? DefaultColor(name) });
+        edit.Add(m);
+        return m;
+    }
+
+    /// <summary>The material categories the interface offers (IfcMaterial.Category; any other text is kept as given).</summary>
+    public static readonly string[] Categories = ["Structure", "Finish", "Insulation", "Membrane", "Other"];
+
+    /// <summary>Whether a material is of a category (Finish, Insulation…): its own, else (for Finish) one by its name, as view styles tell finishes.</summary>
+    public static bool InCategory(IModelView m, string materialId, string category)
+    {
+        if (m.Get(materialId) is not { Class: IfcClass.Material } mat) return false;
+        if (mat.Str("category") is { Length: > 0 } c) return string.Equals(c.Trim(), category, StringComparison.OrdinalIgnoreCase);
+        return string.Equals(category, "Finish", StringComparison.OrdinalIgnoreCase) && IsFinish(mat);
+    }
+
+    /// <summary>
+    /// Whether a material is a finish, which a view style without finishes
+    /// leaves out: its category says so; a material without a category is
+    /// one when its name is a finish's (plaster, render, paint, tiles, boards,
+    /// floor coverings, in English or Romanian).
+    /// </summary>
+    public static bool IsFinish(Entity material)
+    {
+        if (material.Str("category") is { Length: > 0 } c) return string.Equals(c.Trim(), "Finish", StringComparison.OrdinalIgnoreCase);
+        var n = material.Name.ToLowerInvariant();
+        string[] finishes = ["plaster", "render", "paint", "tile", "gypsum", "plasterboard", "drywall", "parquet", "laminate", "carpet", "skim", "finish",
+            "tencu", "glet", "vopsea", "faian", "gresie", "parchet", "rigips", "gips-carton", "finisaj", "zugr"];
+        return finishes.Any(n.Contains);
+    }
+
+    /// <summary>
+    /// Whether an element joins others (forum topic 59): unless its main material (<see cref="CutOrder.MainMaterial"/>) is one
+    /// that stays out of joins (<c>joins: false</c>, a steel or timber member keeping its shape). Off, it is not joined
+    /// automatically, cuts nothing and is cut by nothing by the cut order, and a drawing keeps its own outline.
+    /// </summary>
+    public static bool Joins(IModelView m, Entity e) =>
+        CutOrder.MainMaterial(e, m) is not { } id || m.Get(id) is not { Class: IfcClass.Material } mat || Lapin.Drawing.MaterialGraphics.JoinsOf(mat);
+
+    public static string ColorOf(IModelView m, string? materialId) =>
+        materialId != null && m.Get(materialId) is { } mat ? mat.Str("color") ?? DefaultColor(mat.Name) : "#c9ced6";
+
+    /// <summary>A colour from the material's name, until the project gives it one.</summary>
+    public static string DefaultColor(string name)
+    {
+        var n = MaterialLook.Fold(name);
+        bool Has(params string[] w) => w.Any(x => n.Contains(x, StringComparison.Ordinal));
+        if (Has("insulation", "xps", "eps", "wool")) return "#f2c46d";
+        if (Has("glass", "glazing", "sticla", "geam")) return "#9cc8e8";
+        if (Has("brick", "caramid")) return "#b5654a";
+        if (Has("concrete", "beton")) return "#a8a8a8";
+        if (Has("plaster", "render", "tencu")) return "#e8e2d6";
+        // Parquet and laminate are wood floors (report #76: they came out grey).
+        if (Has("parquet", "parchet", "laminat")) return "#b98a5a";
+        if (Has("timber", "wood", "lemn", "oak", "stejar", "plank")) return "#c08a4f";
+        if (Has("aac", "bca")) return "#d9d6cf";
+        if (Has("steel", "otel", "inox", "alumin", "metal", "zinc")) return "#9a9fa6";
+        return "#c9ced6";
+    }
+}
+
+/// <summary>A value checked against the field that holds it.</summary>
+public static class Fields
+{
+    /// <param name="model">The project, for a material field (<c>materialRef</c>): its value a material's id, or its name, kept as the id.</param>
+    public static JsonNode Check(FieldDescriptor f, JsonNode value, IModelView? model = null)
+    {
+        switch (f.Kind)
+        {
+            case "materialRef":
+            {
+                var s = value is JsonValue sv && sv.TryGetValue<string>(out var text) && text.Length > 0 ? text : throw new CommandException($"{f.Label} is a material of the project.");
+                if (model == null || model.Get(s) is { Class: IfcClass.Material }) return s;
+                return Materials.Find(model, s)?.Id ?? throw new CommandException($"The project has no material „{s}”.");
+            }
+            case "number" or "length" or "angle":
+            {
+                var n = Json.Number(value) ?? throw new CommandException($"{f.Label} must be a number.");
+                if (!double.IsFinite(n)) throw new CommandException($"{f.Label} must be a number.");
+                if (f.Min is { } min && n < min) throw new CommandException($"{f.Label} must be at least {min}.");
+                if (f.Max is { } max && n > max) throw new CommandException($"{f.Label} must be at most {max}.");
+                return n;
+            }
+            case "bool":
+                return value is JsonValue v && v.TryGetValue<bool>(out var b) ? b : throw new CommandException($"{f.Label} is yes or no.");
+            case "choice":
+            {
+                var c = (string?)value;
+                return c != null && (f.Choices ?? []).Contains(c) ? c : throw new CommandException($"{f.Label} must be one of {string.Join(", ", f.Choices ?? [])}.");
+            }
+            case "color":
+            {
+                var c = (string?)value;
+                return HexColor.IsColour(c) ? c! : throw new CommandException($"{f.Label} is a colour like #a8a8a8.");
+            }
+            // A field only taken off here (a text's leader, drawn by its tool and moved by its grips): a value is refused, null removes it.
+            case "removeOnly":
+                throw new CommandException($"{f.Label} is drawn with its tool and moved by its grips; here it can only be taken off.");
+            default:
+                return (string?)value ?? throw new CommandException($"{f.Label} must be text.");
+        }
+    }
+
+}

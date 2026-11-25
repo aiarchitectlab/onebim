@@ -1,0 +1,324 @@
+using System.Globalization;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Drawing.Views;
+using Lapin.Model;
+using Lapin.Platform;
+using Lapin.Platform.Analysis;
+using Lapin.Structure;
+
+namespace Lapin.Rebar;
+
+/// <summary>
+/// The stirrups a beam's or a column's type is configured with (decision 215): their diameter, the concrete cover,
+/// and how they are laid along the element — one step throughout, or three zones each taking a share of the length
+/// (a third by default) at its own step. A column's may be one round the perimeter alone, with a diamond inscribed
+/// in it (its corners at the sides' middles), or with two inside, one each way (decision 218). Kept on the type as
+/// <c>stirrups</c>; the free edition draws them in 2D only.
+/// </summary>
+public sealed record StirrupSpec(bool Enabled, double Diameter, double Cover, string Mode, double Step, IReadOnlyList<(double Share, double Step)> Zones, int Mark,
+    string Pattern = "single", IReadOnlyList<int>? InnerMarks = null, JsonObject? Label = null)
+{
+    public const string Key = "stirrups";
+    /// <summary>The type's own label style, partial, over the project's (<see cref="LabelStyle"/>).</summary>
+    public JsonObject? Label { get; init; } = Label;
+    public static readonly string[] Modes = StirrupLayout.Modes;
+    public static readonly string[] Patterns = StirrupLayout.Patterns;
+
+    public static StirrupSpec Default() { var d = StirrupLayout.Default(); return new(d.Enabled, d.Diameter, d.Cover, d.Mode, d.Step, d.Zones, 0); }
+
+    public static StirrupSpec? Of(Entity type) => type.Attrs[Key] is JsonObject o ? From(o) : null;
+
+    /// <summary>The type's stirrups as the platform reads them (<see cref="StirrupLayout"/>, the design checks' too), with their marks and label.</summary>
+    public static StirrupSpec From(JsonObject o)
+    {
+        var l = StirrupLayout.From(o);
+        var inner = (o["innerMarks"] as JsonArray)?.Select(x => (int)(Json.Number(x) ?? 0)).ToList();
+        return new StirrupSpec(l.Enabled, l.Diameter, l.Cover, l.Mode, l.Step, l.Zones, (int)(Json.Number(o["mark"]) ?? 0), l.Pattern, inner, o[LabelStyle.Key] as JsonObject);
+    }
+
+    public JsonObject ToJson()
+    {
+        var o = new JsonObject
+        {
+            ["enabled"] = Enabled, ["diameter"] = Diameter, ["cover"] = Cover, ["mode"] = Mode, ["step"] = Step, ["mark"] = Mark, ["pattern"] = Pattern,
+            ["zones"] = new JsonArray(Zones.Select(z => (JsonNode)new JsonObject { ["share"] = Math.Round(z.Share, 6), ["step"] = z.Step }).ToArray()),
+            ["innerMarks"] = new JsonArray((InnerMarks ?? []).Select(x => (JsonNode)x).ToArray()),
+        };
+        if (Label != null) o[LabelStyle.Key] = Label.DeepClone();
+        return o;
+    }
+
+    /// <summary>The zones as a run has them along a length: each its share of it at its step; none for one step throughout.</summary>
+    public List<Runs.Zone>? RunZones(double length)
+    {
+        if (Mode != "zones") return null;
+        var total = Zones.Sum(z => Math.Max(0, z.Share));
+        if (total <= 1e-9) return null;
+        return Zones.Where(z => z.Share > 0).Select(z => new Runs.Zone(length * z.Share / total, z.Step)).ToList();
+    }
+
+    /// <summary>How many stirrups stand at each station: one, two with a diamond, three with the two inside.</summary>
+    public int LoopsPerStation => Pattern switch { "diamond" => 2, "cross" => 3, _ => 1 };
+}
+
+/// <summary>
+/// Where a type's stirrups stand on an element and how they draw: along a beam's axis, each a rectangle perpendicular to
+/// it inside the cover; up a column, each horizontal, with the inner ones its pattern asks. A view draws their projections
+/// as it lies to the axis: a cross-section shows each as it is bent, a longitudinal section the lines across, a plan the lines over the beam.
+/// </summary>
+public static class TypeStirrups
+{
+    /// <summary>One stirrup of a station: its four corners in space, its axis sizes, and which it is (0 the perimeter's, then the diamond or the inner ones each way), for the schedule.</summary>
+    public sealed record Loop(Vec3[] Corners, double A, double B, int Kind);
+
+    /// <summary>
+    /// An element's stirrups laid: the stations along its axis (from the axis's own start, so a beam's are its
+    /// <see cref="PathCurve"/>'s), the loops at each, the axis in space from <see cref="Start"/>, the station it is at
+    /// (<see cref="S0"/>: a beam's clear span starts at the column's face, decision 225) over <see cref="Length"/>, and
+    /// the length one run of the step is laid over (<see cref="Piece"/>: a beam's first clear piece between columns).
+    /// </summary>
+    public sealed record Laid(Entity Element, StirrupSpec Spec, List<double> Stations, Func<double, List<Loop>> LoopsAt, Vec3 Start, Vec3 Dir, double Length, double A, double B,
+        double S0 = 0, double? Piece = null)
+    {
+        /// <summary>The 135° hooks' tail (m): the project's rules' (Lapin's 10Ø, 50 mm at least, by default).</summary>
+        public double HookTail { get; init; } = RebarShapes.HookLength(Spec.Diameter, 135);
+        /// <summary>The bend's radius on the bar's axis (m): the project's rules' (Lapin's mandrel by default).</summary>
+        public double Radius { get; init; } = RebarShapes.BendRadius(Spec.Diameter);
+        /// <summary>The schedule's length of a loop: its sides on the bar's axis and its two 135° hooks.</summary>
+        public double BarLength(Loop l) => 2 * (l.A + l.B) + 2 * HookTail;
+        public string StepText => Runs.StepText(Piece ?? Length, Spec.Step, Spec.RunZones(Piece ?? Length));
+        /// <summary>How many stirrups the label counts: the stations, "2×" them when two loops stand at each.</summary>
+        public string CountText => Spec.LoopsPerStation > 1 ? $"{Spec.LoopsPerStation}×{Stations.Count}" : Stations.Count.ToString(CultureInfo.InvariantCulture);
+        public string Label => $"{CountText}{RebarShapes.Dia(Spec.Diameter)}/{StepText}";
+        /// <summary>The mark of a loop kind: the perimeter's the type's, the inner ones theirs.</summary>
+        public int MarkOf(int kind) => kind == 0 ? Spec.Mark : Spec.InnerMarks is { } im && kind - 1 < im.Count ? im[kind - 1] : 0;
+    }
+
+    public static StirrupSpec? SpecOf(IModelView m, Entity e) => m.RelatingOf(e.Id, IfcClass.RelDefinesByType) is { } type ? StirrupSpec.Of(type) : null;
+
+    /// <param name="services">With them, a column's stirrups run its height as built (its attached ends, docs/plan-attach-to.md A2).</param>
+    public static Laid? Of(IModelView m, Entity e, IServices? services = null)
+    {
+        if (SpecOf(m, e) is not { Enabled: true } spec) return null;
+        if (e.Class == IfcClass.Beam)
+        {
+            var (section, _) = Beams.Spec(m, e);
+            if (section.Kind != "rectangle") return null;
+            var c = PathCurve.Of(e);
+            if (c.Length < 1e-6) return null;
+            var (a, b) = Inside(section.Width, section.Depth, spec);
+            if (a <= 0 || b <= 0) return null;
+            var zc = Beams.Top(m, e) - section.Depth / 2;
+            // Laid per clear piece between the column faces (decision 225): each piece its own run, at stations along the whole axis.
+            var span = Beams.SpanOf(m, e);
+            if (span.Empty) return null;
+            var pieces = span.Pieces;
+            var stations = new List<double>();
+            foreach (var (p0, p1) in pieces)
+                stations.AddRange(Runs.Positions(p1 - p0, spec.Step, spec.RunZones(p1 - p0)).Select(s => p0 + s));
+            List<Loop> Loops(double s)
+            {
+                var p = c.PointAt(s);
+                var n = c.TangentAt(s).Perp * (a / 2);
+                return [new Loop([new Vec3(p.X - n.X, p.Y - n.Y, zc - b / 2), new Vec3(p.X + n.X, p.Y + n.Y, zc - b / 2), new Vec3(p.X + n.X, p.Y + n.Y, zc + b / 2), new Vec3(p.X - n.X, p.Y - n.Y, zc + b / 2)], a, b, 0)];
+            }
+            var (start, t0) = (span.Start, c.TangentAt(span.S0));
+            return new Laid(e, spec, stations, Loops, new Vec3(start.X, start.Y, zc), new Vec3(t0.X, t0.Y, 0), span.S1 - span.S0, a, b, span.S0, pieces.Count > 0 ? pieces[0].B - pieces[0].A : null) { HookTail = Tail(m, spec), Radius = RebarRuleSection.BendRadius(m, spec.Diameter) };
+        }
+        if (e.Class == IfcClass.Column)
+        {
+            var built = Columns.Built(m, e, services);
+            var (section, height) = (built.Section, built.Height);
+            if (section.Kind != "rectangle" || height <= 1e-6) return null;
+            var (a, b) = Inside(section.Width, section.Depth, spec);
+            if (a <= 0 || b <= 0) return null;
+            var at = Args.PointOf(e.Attrs["at"]);
+            var baseZ = built.Base;
+            var rot = e.Num("rotation") * Math.PI / 180;
+            var (ux, uy) = (new Vec2(Math.Cos(rot), Math.Sin(rot)), new Vec2(-Math.Sin(rot), Math.Cos(rot)));
+            var stations = Runs.Positions(height, spec.Step, spec.RunZones(height));
+            // The inner stirrups wrap the middle bars of two facing sides: as thick as a bar and two stirrups, and a little.
+            var bar = ColumnBars.SpecOf(m, e) is { Enabled: true } cb ? cb.Diameter : 0.016;
+            var inner = bar + 2 * spec.Diameter + 0.004;
+            Vec3[] Rect(double w, double h, double z) { var (u, v) = (ux * (w / 2), uy * (h / 2)); return [(at - u - v).At(z), (at + u - v).At(z), (at + u + v).At(z), (at - u + v).At(z)]; }
+            List<Loop> Loops(double s)
+            {
+                var z = baseZ + s;
+                var loops = new List<Loop> { new(Rect(a, b, z), a, b, 0) };
+                switch (spec.Pattern)
+                {
+                    case "diamond":
+                    {
+                        // Its corners at the perimeter stirrup's sides' middles: a rhombus whose side is the half-diagonal.
+                        var (u, v) = (ux * (a / 2), uy * (b / 2));
+                        var side = Math.Sqrt(a * a + b * b) / 2;
+                        loops.Add(new Loop([(at - u).At(z), (at - v).At(z), (at + u).At(z), (at + v).At(z)], side, side, 1));
+                        break;
+                    }
+                    case "cross":
+                        loops.Add(new Loop(Rect(a, inner, z), a, inner, 1));
+                        loops.Add(new Loop(Rect(inner, b, z), inner, b, 2));
+                        break;
+                }
+                return loops;
+            }
+            return new Laid(e, spec, stations, Loops, at.At(baseZ), Vec3.UnitZ, height, a, b) { HookTail = Tail(m, spec), Radius = RebarRuleSection.BendRadius(m, spec.Diameter) };
+        }
+        return null;
+    }
+
+    static double Tail(IModelView m, StirrupSpec s) => RebarRuleSection.HookLength(m, s.Diameter, 135);
+
+    /// <summary>The stirrup's axis rectangle inside the section: the cover and half the bar off each face.</summary>
+    static (double A, double B) Inside(double width, double depth, StirrupSpec s) => (width - 2 * s.Cover - s.Diameter, depth - 2 * s.Cover - s.Diameter);
+
+    /// <summary>
+    /// The stirrups of every beam and column a view shows, each loop projected on the view: seen across, as it is bent (its
+    /// corners rounded, its two hooks at a corner); seen along, its distinct edges; those in front of the eye and within the
+    /// view's depth; in plans the storey's own, and in plans and elevations only when the view is the structure's.
+    /// A longitudinal view gets the label ("41Ø8/150") with the mark's balloon, asked of the view's labels; the mark is the element's, keyed <c>stirrups</c>.
+    /// </summary>
+    public static IEnumerable<ViewMark> Marks(ViewContext c, RebarSettings st, List<LabelRequest> labels)
+    {
+        var m = c.Model;
+        if (!Rebar3D.Shows(c, out var limit, out var plan)) yield break;
+        var hidden = (c.View.Attrs["hiddenLayers"] as JsonArray)?.Select(x => (string?)x).OfType<string>().ToHashSet() ?? [];
+        if (hidden.Contains(RebarShapes.StirrupLayer)) yield break;
+        var storey = c.View.Str("storeyId");
+        foreach (var e in Members(m))
+        {
+            if (Of(m, e) is not { } laid) continue;
+            // A plan draws its own storey's, above or below its cut (a beam under the slab stands over it); a section what is in front of it, within its depth.
+            if (plan && Spatial.StoreyOf(m, e.Id)?.Id != storey) continue;
+            var d = laid.Spec.Diameter;
+            var color = st.ColorByDiameter ? RebarShapes.ColorOf(d) : "#000000";
+            var width = Math.Max(0.25, d * 1000 / c.Scale);
+            var mk = new ViewMark($"{e.Id}:stirrups");
+            var drawn = new HashSet<(long, long, long, long)>();
+            var any = false;
+            static long K(double x) => (long)Math.Round(x * 1e5);
+            foreach (var s in laid.Stations)
+                foreach (var loop in laid.LoopsAt(s))
+                {
+                    var depths = loop.Corners.Select(c.Frame.Depth).ToList();
+                    if (!plan && (depths.Max() < -1e-6 || depths.Min() > limit + 1e-6)) continue;
+                    var pts = loop.Corners.Select(c.Map).ToArray();
+                    // Seen across (the loop a parallelogram on the view): the stirrup as it is bent, from its lowest corner, its hooked corner up and to the left; once per place.
+                    if (Enumerable.Range(0, 4).All(i => (pts[(i + 1) % 4] - pts[i]).Length > 1e-6) && Math.Abs(Polygon2.SignedArea(pts)) > 1e-8)
+                    {
+                        var i0 = Enumerable.Range(0, 4).OrderBy(i => pts[i].Y).ThenBy(i => pts[i].X).First();
+                        var q0 = pts[i0];
+                        var (n1, n2) = (pts[(i0 + 1) % 4], pts[(i0 + 3) % 4]);
+                        var (along, up) = n1.X >= n2.X ? (n1, n2) : (n2, n1);
+                        var key = (K(q0.X), K(q0.Y), K(along.X), K(up.Y));
+                        if (drawn.Contains(key)) continue;
+                        drawn.Add(key);
+                        var (a, b) = ((along - q0).Length, (up - q0).Length);
+                        var (u, v) = ((along - q0) * (1 / a), (up - q0) * (1 / b));
+                        var spec = new RebarSpec("stirrup", new Dictionary<string, double> { ["a"] = a, ["b"] = b }, null, d, new Hook(135, laid.HookTail, true), new Hook(135, laid.HookTail, true), BendRadius: laid.Radius);
+                        var chain = RebarShapes.Chain(RebarShapes.Segments(spec)).Select(q => q0 + u * q.X + v * q.Y).ToList();
+                        mk.Polyline(chain, false, RebarShapes.StirrupLayer, width, color);
+                        mk.Snaps.AddRange([q0, along, up, along + (up - q0)]);
+                        any = true;
+                        continue;
+                    }
+                    for (var i = 0; i < 4; i++)
+                    {
+                        var (p, q) = (pts[i], pts[(i + 1) % 4]);
+                        if ((q - p).Length < 1e-6) continue;
+                        var key = (K(p.X), K(p.Y), K(q.X), K(q.Y));
+                        var back = (K(q.X), K(q.Y), K(p.X), K(p.Y));
+                        if (drawn.Contains(key) || drawn.Contains(back)) continue;
+                        drawn.Add(key);
+                        mk.Line(p, q, RebarShapes.StirrupLayer, width, color);
+                        any = true;
+                    }
+                }
+            if (!any) continue;
+            // Seen along its length: the label as a dimension string along the axis as seen (a tick at each station), or beside the stirrups, with the mark's balloon.
+            var p0 = c.Map(laid.Start);
+            var p1 = c.Map(laid.Start + laid.Dir * laid.Length);
+            if ((p1 - p0).Length > 4 * laid.Spec.Step && laid.Stations.Count > 0)
+            {
+                var style = LabelStyle.Resolve("stirrups", st, laid.Spec.Label);
+                var text = style.Text(new LabelFacts(laid.CountText, d, laid.StepText, laid.BarLength(laid.LoopsAt(laid.Stations[0])[0]), StirrupText(m, st, e, laid.Spec.Mark, d), st.Steel));
+                var segments = mk.Lines.Select(l => (l.A, l.B)).ToList();
+                var axis = new PathCurve(p0, p1, 0);
+                var seen = axis.Length / laid.Length;
+                var across = segments.SelectMany(s => new[] { s.A, s.B }).Select(p => Vec2.Dot(p - p0, axis.TangentAt(0).Perp)).ToList();
+                labels.Add(new LabelRequest(mk, e.Id, "stirrups", style, text, laid.Spec.Mark, color, segments, [], (p1 - p0).Normalized(), RebarLabels.PlacedOn(c.View, e.Id, "stirrups"))
+                { MarkText = StirrupText(m, st, e, laid.Spec.Mark, d), String = new LabelString(axis, laid.Stations.Select(s => (s - laid.S0) * seen).ToList(), across.Min(), across.Max()) });
+            }
+            yield return mk;
+        }
+    }
+
+    /// <summary>The schedule's entries for every element's configured stirrups: one per element and loop kind, under its mark.</summary>
+    public static IEnumerable<RebarSchedule.Entry> Entries(IModelView m) => Owned(m).Select(x => x.Entry);
+
+    /// <summary>The stirrups' entries, each with the beam or column it is laid in.</summary>
+    public static IEnumerable<(Entity Owner, RebarSchedule.Entry Entry)> Owned(IModelView m)
+    {
+        foreach (var e in Members(m))
+            if (Of(m, e) is { } laid && laid.Stations.Count > 0)
+                foreach (var loop in laid.LoopsAt(laid.Stations[0]))
+                    yield return (e, new RebarSchedule.Entry(laid.MarkOf(loop.Kind), laid.Spec.Diameter, loop.Kind == 1 && laid.Spec.Pattern == "diamond" ? "Diamond stirrup" : "Stirrup", laid.Stations.Count, laid.BarLength(loop), Derived: true,
+                        Partition: m.RelatingOf(e.Id, IfcClass.RelDefinesByType)?.Str(Rebars.StirrupsPartitionKey)?.Trim() ?? "") { MarkText = StirrupText(m, RebarSettings.Of(m), e, laid.MarkOf(loop.Kind), laid.Spec.Diameter) });
+    }
+
+    /// <summary>A beam's or a column's stirrups' mark as written (decision 729): the stirrups' prefix, in its type's partition.</summary>
+    static string StirrupText(IModelView m, RebarSettings st, Entity member, int mark, double d) =>
+        RebarMarks.StirrupText(st, mark, m.RelatingOf(member.Id, IfcClass.RelDefinesByType)?.Str(Rebars.StirrupsPartitionKey)?.Trim() ?? "", d);
+
+    /// <summary>The elements a type's stirrups go in: the beams and the columns (read by class, not every entity).</summary>
+    public static IEnumerable<Entity> Members(IModelView m) => m.OfClass(IfcClass.Beam).Concat(m.OfClass(IfcClass.Column));
+
+    /// <summary>The highest mark a type's stirrups hold, inner ones included.</summary>
+    public static int HighestMark(IModelView m, string partition = "") => m.OfClass(IfcClass.BeamType).Concat(m.OfClass(IfcClass.ColumnType))
+        .Where(t => (t.Str(Rebars.StirrupsPartitionKey)?.Trim() ?? "") == partition).Select(t => StirrupSpec.Of(t))
+        .OfType<StirrupSpec>().SelectMany(s => (s.InnerMarks ?? []).Prepend(s.Mark)).DefaultIfEmpty(0).Max();
+
+    /// <summary>A type's stirrups set from a command: {id, enabled?, diameter?, cover?, mode?, step?, zones?: [{share, step}] × 3, mark?, pattern? (a column: single, diamond, cross), label?: a style patch | null}.</summary>
+    public static void Set(ICommandContext ctx, JsonObject a)
+    {
+        var type = ctx.Model.Get((string?)a["id"] ?? "") is { Class: IfcClass.BeamType or IfcClass.ColumnType } t ? t : throw new CommandException("Stirrups are set on a beam or a column type.");
+        var now = StirrupSpec.Of(type) ?? StirrupSpec.Default();
+        // The partition its stirrups go in; a new one numbers them again, in it.
+        var partition = a.ContainsKey("partition") ? ((string?)a["partition"])?.Trim() ?? "" : type.Str(Rebars.StirrupsPartitionKey)?.Trim() ?? "";
+        var moved = partition != (type.Str(Rebars.StirrupsPartitionKey)?.Trim() ?? "");
+        var enabled = a["enabled"] is JsonValue ev && ev.TryGetValue<bool>(out var en) ? en : now.Enabled;
+        var d = Json.Number(a["diameter"]) ?? now.Diameter;
+        if (!(d >= 0.004 && d <= 0.02)) throw new CommandException("A stirrup is between 4 and 20 mm thick.");
+        var cover = Json.Number(a["cover"]) ?? now.Cover;
+        if (!(cover >= 0 && cover <= 0.2)) throw new CommandException("The cover is between 0 and 200 mm.");
+        var mode = (string?)a["mode"] ?? now.Mode;
+        if (!StirrupSpec.Modes.Contains(mode)) throw new CommandException("Stirrups are laid at one step (uniform) or in zones.");
+        var step = Json.Number(a["step"]) ?? now.Step;
+        if (step < 0.01) throw new CommandException("The step is 10 mm at least.");
+        var zones = now.Zones;
+        if (a["zones"] is JsonArray za)
+        {
+            zones = za.OfType<JsonObject>().Select(z => (Math.Max(0, Json.Number(z["share"]) ?? 0), Json.Number(z["step"]) ?? step)).ToList();
+            if (zones.Count == 0 || zones.Any(z => z.Item2 < 0.01)) throw new CommandException("Each zone takes a share of the length and a step of 10 mm at least.");
+            if (zones.Sum(z => z.Item1) <= 1e-9) throw new CommandException("The zones' shares are all zero: give one of them a share of the length.");
+        }
+        var pattern = (string?)a["pattern"] ?? now.Pattern;
+        if (!StirrupSpec.Patterns.Contains(pattern)) throw new CommandException("A column's stirrups are the perimeter's alone (single), with a diamond, or with two inside (cross).");
+        if (type.Class == IfcClass.BeamType) pattern = "single";
+        var mark = (int)(Json.Number(a["mark"]) ?? (moved ? 0 : now.Mark));
+        var inner = new List<int>(moved && a["mark"] == null ? [] : now.InnerMarks ?? []);
+        if (enabled)
+        {
+            var next = Rebars.NextMark(ctx.Model, partition, RebarMarks.PrefixOf(RebarSettings.Of(ctx.Model), "stirrup"));
+            if (mark <= 0) mark = next++;
+            var need = pattern switch { "diamond" => 1, "cross" => 2, _ => 0 };
+            while (inner.Count < need) inner.Add(next++);
+        }
+        var label = a.ContainsKey(LabelStyle.Key) ? LabelStyle.Patch(now.Label, a[LabelStyle.Key]) : now.Label;
+        var attrs = type.CloneAttrs();
+        if (partition.Length > 0) attrs[Rebars.StirrupsPartitionKey] = partition; else attrs.Remove(Rebars.StirrupsPartitionKey);
+        attrs[StirrupSpec.Key] = new StirrupSpec(enabled, d, cover, mode, step, zones, mark, pattern, inner, label).ToJson();
+        ctx.Replace(type.With(attrs: attrs));
+    }
+}

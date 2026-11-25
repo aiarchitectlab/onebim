@@ -1,0 +1,256 @@
+/**
+ * Manage → Links: the files linked into the project (IFC, DXF), read-only.
+ * Each is shown or hidden, drawn halftone, read again from its file, unlinked
+ * (what it brought goes), converted to native (what it brought stays, as the
+ * project's own) or opened on its own in another instance of the app (the
+ * desktop), to edit there. The 3D follows: a hidden link's elements are not
+ * drawn, a halftone link's are faded.
+ */
+
+import { confirmAction } from '../../shell/prompts';
+import { backdropClose } from '../../shell/Dialog';
+import { useEffect, useState } from 'react';
+import { Crop, ExternalLink, Feather, FolderOpen, MapPin, Move, RefreshCw, Ruler, Trash2, Unlink, Wand2, X } from 'lucide-react';
+import { fileName, openOptimize } from '../../engine/ifcOptimize';
+import { notify, useUi } from '../../app/store';
+import { engine, execute, useSession } from '../../engine/session';
+import { isDesktop, pickFile, toBase64 } from '../../engine/files';
+import { setLooks } from '../../platform/looks';
+import type { NodeDto } from '../../engine/protocol';
+import { Cell, LabeledLength, LabeledNumber, NumberField } from '../../shell/cells';
+import { fitCrop, startCalibrate, useCloudTools } from './cloudCalibrate';
+import { CLOUD_MODES, CLOUD_UNITS, CLOUD_UPS } from '../../engine/files';
+import { query } from '../../engine/session';
+import { cloudFormat, isCloudLink, isSplatLink, setCloudStatus, statusText, usePointClouds } from '../../viewport/pointClouds';
+
+const COLOR_MODES = [
+  { value: 'rgb', label: 'RGB' }, { value: 'intensity', label: 'Intensity' }, { value: 'elevation', label: 'Elevation' }, { value: 'classification', label: 'Classification' },
+];
+
+/** Where a cloud stands: by the map, origin to origin or centred, its unit, moved (x, y, z) and turned (°), asked then sent as one step. */
+export async function placeCloud(l: NodeDto): Promise<void> {
+  const p = (l.props.placement ?? {}) as { mode?: string; units?: string; offset?: number[]; rotation?: number; up?: string; scale?: number };
+  const { ask, choiceField, lengthField, numberField } = await import('../../shell/AskBox');
+  const off = Array.isArray(p.offset) ? p.offset : [0, 0, 0];
+  const r = await ask(`Place the point cloud ${l.name}`, [
+    choiceField('mode', 'Placed', p.mode ?? 'origin', CLOUD_MODES.filter((m) => m.value !== 'auto')),
+    choiceField('units', 'Its unit', p.units ?? 'm', CLOUD_UNITS.filter((u) => u.value !== 'auto')),
+    lengthField('x', 'Moved x', off[0] ?? 0), lengthField('y', 'Moved y', off[1] ?? 0), lengthField('z', 'Moved z', off[2] ?? 0),
+    numberField('rotation', 'Turned (°)', p.rotation ?? 0),
+    choiceField('up', 'Up axis', p.up ?? 'z', CLOUD_UPS),
+    numberField('scale', 'Scale factor', p.scale ?? 1),
+  ]);
+  if (!r) return;
+  await execute('pointcloud.place', { id: l.id, mode: r.mode, units: r.units, offset: [Number(r.x), Number(r.y), Number(r.z)], rotation: Number(r.rotation), up: r.up, scale: Number(r.scale) > 0 ? Number(r.scale) : 1 });
+  const check = await query<{ warning?: string | null }>('pointcloud.check', { id: l.id });
+  if (check?.warning) notify(check.warning);
+}
+
+interface CropSpec { center: number[]; size: number[]; rotation?: number }
+
+/**
+ * A cloud's crop (G2 of docs/plan-gaussian-splats.md): the box kept, its middle, its sizes and its turn, each edit one undo step;
+ * Fit to cloud makes the box round the whole cloud (along the link's own turn), Reset takes it off.
+ */
+function CropPanel({ link }: { link: NodeDto }) {
+  const crop = (link.props.crop ?? null) as CropSpec | null;
+  const put = (patch: Partial<{ center: number[]; size: number[]; rotation: number }>) => {
+    if (!crop) return;
+    void execute('pointcloud.crop', { id: link.id, crop: { center: patch.center ?? crop.center, size: patch.size ?? crop.size, rotation: patch.rotation ?? crop.rotation ?? 0 } });
+  };
+  const at = (a: number[], i: number, v: number) => a.map((x, k) => (k === i ? v : x));
+  return (
+    <div className="cloud-crop" data-testid="cloud-crop">
+      <div className="row-tools">
+        <button type="button" className="btn small" data-crop="fit" title="A box round where the cloud is dense: the floaters round a capture left out" onClick={() => void fitCrop(link.id).catch((e) => notify(e instanceof Error ? e.message : String(e)))}>Fit to cloud</button>
+        <button type="button" className="btn small" data-crop="whole" title="A box round all of the cloud, its outliers too" onClick={() => void fitCrop(link.id, true).catch((e) => notify(e instanceof Error ? e.message : String(e)))}>Whole cloud</button>
+        <button type="button" className="btn small" data-crop="reset" disabled={!crop} onClick={() => void execute('pointcloud.crop', { id: link.id, crop: null })}>Reset</button>
+      </div>
+      {!crop && <p className="muted small">Not cropped: Fit to cloud makes a box round where it is dense, Whole cloud round all of it; then its numbers shrink it.</p>}
+      {crop && (
+        <div className="cloud-crop-fields">
+          {(['x', 'y', 'z'] as const).map((k, i) => <LabeledLength key={`c${k}`} label={`Middle ${k}`} metres={crop.center[i]} onCommit={(v) => put({ center: at(crop.center, i, v) })} />)}
+          {(['x', 'y', 'z'] as const).map((k, i) => <LabeledLength key={`s${k}`} label={`Size ${k}`} min={0.001} metres={crop.size[i]} onCommit={(v) => { if (v > 0) put({ size: at(crop.size, i, v) }); }} />)}
+          <LabeledNumber label="Turned (°)" value={crop.rotation ?? 0} onCommit={(v) => put({ rotation: v })} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** A linked project placed elsewhere (docs/links.md, Hotlinks); in a browser its file is asked for, the page having kept no path. */
+async function placeProject(l: NodeDto): Promise<void> {
+  const o = (l.props.options ?? {}) as { x?: number; y?: number; rotation?: number; mirror?: boolean };
+  const { ask, choiceField, lengthField, numberField } = await import('../../shell/AskBox');
+  const r = await ask('Place the linked project', [lengthField('x', 'Placed at x', o.x ?? 0), lengthField('y', 'Placed at y', o.y ?? 0), numberField('rotation', 'Turned (°)', o.rotation ?? 0), choiceField('mirror', 'Mirrored', o.mirror ? 'yes' : 'no', [{ value: 'no', label: 'No' }, { value: 'yes', label: 'Yes' }])]);
+  if (!r) return;
+  const data = typeof l.props.path === 'string' ? null : await pickFile('Lapin project', 'lapin');
+  if (typeof l.props.path !== 'string' && !data) return;
+  await engine.call('project.reloadLink', { id: l.id, x: Number(r.x), y: Number(r.y), rotation: Number(r.rotation), mirror: r.mirror === 'yes', ...(data ? { data: toBase64(data.bytes) } : {}) }, { timeoutMs: 600_000 });
+}
+
+/** A project linked in a browser read again, from its file chosen again. */
+async function readPicked(l: NodeDto): Promise<void> {
+  const f = await pickFile('Lapin project', 'lapin');
+  if (!f) return;
+  await engine.call('project.reloadLink', { id: l.id, data: toBase64(f.bytes) }, { timeoutMs: 600_000 });
+  notify('Linked project read again.');
+}
+
+const isLink = (n: NodeDto) => n.type === 'LapinLink';
+
+/** Coming back to Lapin (from the window a linked project is edited in): says once which linked projects changed. Mounted with the core module. */
+export function LinkedProjectsWatch() {
+  useEffect(() => {
+    const told = new Set<string>();
+    const look = () => {
+      const links = [...useSession.getState().nodes.values()].filter((n) => isLink(n) && n.props.kind === 'lapin' && typeof n.props.path === 'string');
+      if (!links.length) return;
+      void engine.call<string[]>('project.linksChanged', {}).then((ids) => {
+        const fresh = links.filter((l) => ids.includes(l.id) && !told.has(`${l.id}:${String((l.props.options as { modified?: string } | undefined)?.modified)}`));
+        for (const l of fresh) told.add(`${l.id}:${String((l.props.options as { modified?: string } | undefined)?.modified)}`);
+        if (fresh.length) notify('A linked project changed: Manage → Links reads it again.');
+      }).catch(() => undefined);
+    };
+    window.addEventListener('focus', look);
+    return () => window.removeEventListener('focus', look);
+  }, []);
+  return null;
+}
+
+export function LinksDialog() {
+  const nodes = useSession((s) => s.nodes);
+  const error = useSession((s) => s.error);
+  const [busy, setBusy] = useState<string | null>(null);
+  const close = () => useUi.setState({ dialog: null });
+  const links = [...nodes.values()].filter(isLink).sort((a, b) => a.name.localeCompare(b.name));
+  const status = usePointClouds((st) => st.status);
+  const cropOpen = useCloudTools((st) => st.cropOpen);
+  const cloudIds = links.filter(isCloudLink).map((l) => l.id).join(',');
+  // The clouds' indexes, asked again while any is being made (the 3D view reports them too when it is open).
+  useEffect(() => {
+    if (!cloudIds) return;
+    let stop = false;
+    const tick = async () => {
+      let busy = false;
+      for (const id of cloudIds.split(',')) {
+        const st = await query<{ state: string; stage?: string; done?: number; error?: string }>('pointcloud.status', { id });
+        if (stop) return;
+        if (st) setCloudStatus(id, st);
+        if (st?.state === 'indexing') busy = true;
+      }
+      if (busy && !stop) setTimeout(() => void tick(), 700);
+    };
+    void tick();
+    return () => { stop = true; };
+  }, [cloudIds]);
+  // Linked projects whose files changed since they were read (docs/links.md, Hotlinks).
+  const [changed, setChanged] = useState<string[]>([]);
+  useEffect(() => {
+    if (!links.some((l) => l.props.kind === 'lapin')) return;
+    let live = true;
+    void engine.call<string[]>('project.linksChanged', {}).then((c) => { if (live) setChanged(c); }).catch(() => { if (live) setChanged([]); });
+    return () => { live = false; };
+  }, [nodes]); // eslint-disable-line react-hooks/exhaustive-deps
+  const counts = new Map<string, number>();
+  for (const n of nodes.values()) if (typeof n.props.linkId === 'string' && n.storeyId) counts.set(n.props.linkId, (counts.get(n.props.linkId) ?? 0) + 1);
+  const run = async (id: string, what: () => Promise<unknown>) => {
+    setBusy(id);
+    try { await what(); } catch (e) { notify(e instanceof Error ? e.message : String(e)); } finally { setBusy(null); }
+  };
+  const openSeparately = async (path: string) => {
+    const { invoke } = await import('@tauri-apps/api/core');
+    await invoke('open_separately', { path });
+    notify('Opening the file in another Lapin window, on its own, to edit there.');
+  };
+  return (
+    <div className="dialog-backdrop" onMouseDown={backdropClose(close)}>
+      <div className="dialog wide" role="dialog" aria-label="Links" onClick={(e) => e.stopPropagation()}>
+        <header className="dialog-head"><span className="panel-title">Links</span><button type="button" className="icon" onClick={close} title="Close"><X size={15} /></button></header>
+        <div className="dialog-body">
+          {links.length === 0 && <p className="muted">Nothing is linked. File → Link IFC…, or Import DXF… with „As a link”, brings a file in read-only; it is listed here.</p>}
+          {links.length > 0 && (
+            <table className="layer-table">
+              <thead><tr><th>Name</th><th>Kind</th><th>File</th><th>Elements</th><th title="Drawn in every view">Shown</th><th title="Drawn grey, faded in 3D">Halftone</th><th title="A linked DXF's drawing on its view's plane in the 3D view">3D</th><th /></tr></thead>
+              <tbody>
+                {links.map((l) => {
+                  const path = typeof l.props.path === 'string' ? l.props.path : null;
+                  const file = typeof l.props.file === 'string' ? l.props.file : '';
+                  const cloud = isCloudLink(l);
+                  const info = (l.props.cloud ?? {}) as { points?: number; format?: string };
+                  return (
+                    <tr key={l.id} className={busy === l.id ? 'muted' : undefined}>
+                      <td><Cell value={l.name} onCommit={(t) => { const v = t.trim(); if (!v) return false; if (v !== l.name) void execute('link.update', { id: l.id, name: v }); }} /></td>
+                      <td>{cloud ? <span title={info.format}>{isSplatLink(l) ? 'Gaussian splats' : 'Point cloud'}</span> : String(l.props.kind ?? '').toUpperCase()}
+                        {cloud && info.format && <div className="muted small" data-link="format">{cloudFormat(info.format)}</div>}</td>
+                      <td title={path ?? 'linked from the browser: its bytes were read once'}>{file}{!path && <span className="muted small"> (no path)</span>}
+                        {cloud && <div className="muted small" data-cloud-status={status[l.id]?.state ?? 'waiting'}>{statusText(status[l.id])}</div>}
+                        {cloud && cropOpen === l.id && <CropPanel link={l} />}
+                        {cloud && (
+                          <div className="row-tools">
+                            <select aria-label="Colours" title="What colours its points" value={String(l.props.colorMode ?? 'rgb')} onChange={(e) => void execute('pointcloud.update', { id: l.id, colorMode: e.target.value })}>
+                              {COLOR_MODES.map((m) => <option key={m.value} value={m.value}>{m.label}</option>)}
+                            </select>
+                            <label className="small" title="Point size (px)" style={{ marginLeft: 8 }}>Size <NumberField min={1} max={12} integer style={{ width: 44 }} value={Number(l.props.pointSize ?? 2)} onCommit={(v) => { if (v != null) void execute('pointcloud.update', { id: l.id, pointSize: v }); }} /></label>
+                            {isSplatLink(l) && (
+                              <select aria-label="Display" data-link="display" style={{ marginLeft: 8 }} title="How it is drawn in 3D: its Gaussians, or their centres as points" value={l.props.display === 'points' ? 'points' : 'splats'} onChange={(e) => void execute('pointcloud.update', { id: l.id, display: e.target.value })}>
+                                <option value="splats">Splats</option><option value="points">Points</option>
+                              </select>
+                            )}
+                            {isSplatLink(l) && (
+                              <select aria-label="Splat colour" data-link="splat-color" style={{ marginLeft: 8 }} title="Its colour in 3D: full, changing with the side it is seen from (its spherical harmonics), or its base colour alone" value={l.props.splatColor === 'base' ? 'base' : 'full'} onChange={(e) => void execute('pointcloud.update', { id: l.id, splatColor: e.target.value })}>
+                                <option value="full">Full colour</option><option value="base">Base colour</option>
+                              </select>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="num" title={cloud ? 'points' : undefined}>{cloud ? (info.points ?? 0).toLocaleString() : counts.get(l.id) ?? 0}</td>
+                      <td><input type="checkbox" checked={l.props.visible !== false} onChange={(e) => void execute('link.update', { id: l.id, visible: e.target.checked })} /></td>
+                      <td><input type="checkbox" checked={l.props.halftone === true} onChange={(e) => void execute('link.update', { id: l.id, halftone: e.target.checked })} /></td>
+                      <td>{(l.props.kind === 'dxf' || cloud) && <input type="checkbox" data-link="in3d" title="Its drawing on its view's plane in the 3D view" checked={l.props.in3d !== false} onChange={(e) => void execute('link.update', { id: l.id, in3d: e.target.checked })} />}</td>
+                      <td className="row-tools">
+                        {changed.includes(l.id) && <button type="button" className="btn small" data-link="changed" disabled={busy != null} onClick={() => void run(l.id, () => engine.call('project.reloadLink', { id: l.id }, { timeoutMs: 600_000 }))}>The source changed: read it again</button>}
+                        {l.props.kind === 'lapin' && <button type="button" className="icon mini" data-link="place-project" title="Place it elsewhere: its own ids stay" disabled={busy != null} onClick={() => void run(l.id, () => placeProject(l))}><Move size={13} /></button>}
+                        {l.props.kind === 'lapin' && !path && <button type="button" className="icon mini" data-link="read-picked" title="Choose its file again and read it" disabled={busy != null} onClick={() => void run(l.id, () => readPicked(l))}><FolderOpen size={13} /></button>}
+                        {cloud && <button type="button" className="icon mini" data-link="place" title="Where it stands: by the map, origin to origin or centred, its unit, moved and turned" disabled={busy != null} onClick={() => void run(l.id, () => placeCloud(l))}><MapPin size={12} /></button>}
+                        {cloud && <button type="button" className="icon mini" data-link="calibrate" title="Calibrate scale: two points on the cloud and their true distance" disabled={busy != null} onClick={() => startCalibrate(l.id)}><Ruler size={12} /></button>}
+                        {cloud && <button type="button" className={`icon mini${l.props.crop ? ' on' : ''}`} data-link="crop" title="Crop: keep only what is inside a box" disabled={busy != null} onClick={() => useCloudTools.setState({ cropOpen: cropOpen === l.id ? null : l.id })}><Crop size={12} /></button>}
+                        {path && cloud && <button type="button" className="icon mini" title="Read the file again (indexed again if it changed)" disabled={busy != null} onClick={() => void run(l.id, () => execute('pointcloud.reload', { id: l.id }))}><RefreshCw size={12} /></button>}
+                        {path && !cloud && <button type="button" className="icon mini" title="Read the file again (what the link holds is replaced)" disabled={busy != null} onClick={() => void run(l.id, () => engine.call('project.reloadLink', { id: l.id }, { timeoutMs: 600_000 }).then(() => notify(`${l.name} read again.`)))}><RefreshCw size={12} /></button>}
+                        {!cloud && <button type="button" className="icon mini" title="Convert to native: what it brought stays, editable, as the project's own" disabled={busy != null} onClick={() => void run(l.id, () => execute('link.convert', { id: l.id }))}><Wand2 size={12} /></button>}
+                        {path && isDesktop() && l.props.kind === 'ifc' && <button type="button" className="icon mini" data-link="optimize" title="Optimize the source file…" disabled={busy != null} onClick={() => openOptimize([{ name: fileName(path), path }])}><Feather size={12} /></button>}
+                        {path && isDesktop() && !cloud && <button type="button" className="icon mini" title="Open on its own in another Lapin window, to edit there" disabled={busy != null} onClick={() => void run(l.id, () => openSeparately(path))}><ExternalLink size={12} /></button>}
+                        <button type="button" className="icon mini" title="Unlink: the link and everything it brought go" disabled={busy != null}
+                          onClick={() => { if (confirmAction('Unlink {name}? Everything it brought in goes (undo brings it back).', { name: l.name })) void run(l.id, () => execute('link.unlink', { id: l.id })); }}><Unlink size={12} /></button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          )}
+          {error && <p className="error-text" role="alert">{error}</p>}
+          <p className="muted small"><Trash2 size={11} /> What a link brought cannot be edited or deleted on its own: unlink it, convert it, or open it on its own.</p>
+        </div>
+        <footer className="dialog-foot"><span className="grow" /><button type="button" className="btn primary" onClick={close}>Done</button></footer>
+      </div>
+    </div>
+  );
+}
+
+/** The 3D follows the links: a hidden link's elements are not drawn, a halftone link's are faded. */
+export function LinksLook() {
+  const nodes = useSession((s) => s.nodes);
+  useEffect(() => {
+    const looks: Record<string, { hidden?: boolean; opacity?: number }> = {};
+    for (const n of nodes.values()) {
+      if (typeof n.props.linkId !== 'string') continue;
+      const link = nodes.get(n.props.linkId);
+      if (!link || link.props.visible === false) looks[n.id] = { hidden: true };
+      else if (link.props.halftone === true) looks[n.id] = { opacity: 0.35 };
+    }
+    setLooks('links', looks);
+  }, [nodes]);
+  return null;
+}

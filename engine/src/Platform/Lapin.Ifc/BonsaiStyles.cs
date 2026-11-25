@@ -1,0 +1,275 @@
+using System.Globalization;
+using System.Text;
+using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
+using Lapin.Drawing;
+using Lapin.Drawing.Hatch;
+using Lapin.Drawing.Views;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Ifc;
+
+/// <summary>
+/// The project's drawing styles for Bonsai (BlenderBIM), written beside an IFC export (docs/spec-ifc.md, Stilurile de
+/// desen pentru Bonsai): a CSS stylesheet and an SVG file of hatch patterns, after the convention Bonsai's drawings
+/// follow (read from its public source for the naming only). Bonsai draws a drawing as SVG and puts classes on what it
+/// draws: the IFC class (<c>IfcWall</c>), <c>material-&lt;name&gt;</c> (the material's name, or a layer set's name, with
+/// every run of characters other than ASCII letters and digits removed), for a wall cut layer by layer
+/// <c>layer-material-&lt;name&gt;</c>, and what the line is (<c>cut</c>, <c>projection</c>, <c>surface</c> for a cut's
+/// fill). Its stylesheet is inlined into the drawing, and its patterns file's children copied into the drawing's
+/// definitions, so a rule fills with <c>url(#id)</c>. A project points new drawings at both through
+/// <c>BBIM_Documentation</c> on IfcProject (<c>StylesheetPath</c>, <c>PatternsPath</c>, relative to the IFC file).
+/// What Lapin gives: the cut, projection and hatch pens of its drawings (the project's object styles over Lapin's
+/// defaults, at 1:100), each IFC class's cut and projection lines, each material's cut hatch (its own, or what its name
+/// suggests) with its fill colour and scale, its elevation hatch on what is seen, the text heights of the drafting
+/// standards. Paper millimetres throughout, as Lapin's patterns are.
+/// </summary>
+public static class BonsaiStyles
+{
+    public const string SetName = "BBIM_Documentation";
+    public const string StylesheetKey = "StylesheetPath", PatternsKey = "PatternsPath";
+    const double Scale = 100;
+
+    /// <summary>The stylesheet and the patterns file, as text.</summary>
+    public sealed record Sheet(string Css, string Patterns);
+
+    /// <summary>A name as Bonsai makes a class of it: every run of characters other than ASCII letters and digits removed ("Concrete C25/30" → ConcreteC2530).</summary>
+    public static string ClassName(string name) => Regex.Replace(name, "[^0-9a-zA-Z]+", "");
+
+    /// <summary>The files' names beside an IFC file of this name: <c>house.css</c> and <c>house-patterns.svg</c>.</summary>
+    public static (string Css, string Patterns) FileNames(string ifcName)
+    {
+        var stem = Path.GetFileNameWithoutExtension(ifcName);
+        if (stem.Length == 0) stem = "project";
+        return ($"{stem}.css", $"{stem}-patterns.svg");
+    }
+
+    static string N(double v) => Math.Round(v, 4).ToString("0.####", CultureInfo.InvariantCulture);
+
+    /// <summary>The stylesheet and patterns of the model's materials, layer sets and classes.</summary>
+    public static Sheet Of(IModelView m)
+    {
+        var project = Spatial.Project(m);
+        var table = LineStyles.ReadTable(project?.Attrs["penTable"]);
+        var styles = LineStyles.For(project?.Attrs["objectStyles"] as JsonObject, null, null, table, Scale);
+        var extra = DraftingResources.Patterns(m);
+        var book = DraftingResources.Book(m);
+        var (cut, seen, hidden, hatchPen, _) = Pens.Default;
+        var patterns = new Patterns(extra, hatchPen);
+        var css = new StringBuilder();
+        css.Append("/* Drawing styles for Bonsai (BlenderBIM), written by Lapin with the IFC export: the project's materials, pens and text.\n")
+           .Append("   Paper millimetres. Bonsai puts on what it draws the IFC class, material-<name> (or layer-material-<name>, layer by layer)\n")
+           .Append("   and cut, projection or surface; the hatches are in the patterns file beside this one (url(#id)). */\n\n");
+
+        // What every drawing has: cut lines, what is seen, the fills of a cut, the edges Bonsai tells apart, annotation and text.
+        css.Append("* { stroke-linecap: round; stroke-linejoin: round; }\n");
+        css.Append($".cut {{ fill: white; stroke: black; stroke-width: {N(cut)}; fill-rule: evenodd; }}\n");
+        css.Append($".projection {{ fill: white; stroke: black; stroke-width: {N(seen)}; }}\n");
+        css.Append($".surface {{ fill: white; stroke: none; }}\n");
+        css.Append($"path.outline {{ stroke-width: {N(seen)}; }}\npath.boundary {{ stroke-width: {N(seen)}; }}\npath.crease {{ stroke-width: {N(hidden)}; }}\n");
+        css.Append($"path.sharp {{ stroke-width: {N(hidden)}; }}\npath.flush {{ stroke-width: {N(hatchPen)}; }}\n");
+        css.Append($".IfcAnnotation {{ fill: none; stroke: black; stroke-width: {N(seen)}; }}\n");
+        var regular = book.TextStyles.FirstOrDefault()?.Height ?? 2.5;
+        css.Append($"text {{ fill: black; stroke: none; font-family: sans-serif; font-size: {N(regular)}px; }}\n");
+        foreach (var (cls, k) in new[] { ("title", 2.0), ("header", 1.4), ("large", 1.4), ("regular", 1.0), ("small", 0.7) })
+            css.Append($"text.{cls} {{ font-size: {N(regular * k)}px; }}\n");
+        css.Append('\n');
+
+        // Each IFC class's cut and projection lines, as the project's object styles give them.
+        var classes = m.Entities.Select(e => (string?)e.Attrs["ifcClass"] ?? e.Class).Where(c => c.StartsWith("Ifc", StringComparison.Ordinal) && LineStyles.CategoryOf(c) != null)
+            .Distinct().Order(StringComparer.Ordinal).ToList();
+        if (styles != null)
+            foreach (var c in classes)
+                foreach (var (role, cssClass) in new[] { ("cut", "cut"), ("projection", "projection") })
+                    if (styles(role, c, null) is { } line && (line.WidthMm != null || line.Color != null || line.Dash is { Length: > 0 }))
+                    {
+                        var decl = new List<string>();
+                        if (line.WidthMm is { } w) decl.Add($"stroke-width: {N(w)}");
+                        if (line.Color is { Length: > 0 } col) decl.Add($"stroke: {col}");
+                        if (line.Dash is { Length: > 0 } d) decl.Add($"stroke-dasharray: {string.Join(" ", d.Select(N))}");
+                        css.Append($".{c}.{cssClass}, .{c} .{cssClass} {{ {string.Join("; ", decl)}; }}\n");
+                    }
+        css.Append('\n');
+
+        // Each material: its cut hatch (and fill) where it is cut, its elevation hatch where it is seen.
+        var paperSurfaces = MaterialHatchUpgrade.PaperSurfaces(m);
+        // The project's material standard (decision 681) gives what a material does not set.
+        var standard = MaterialStandards.Of(m);
+        var taken = new Dictionary<string, string>(StringComparer.Ordinal);
+        void Material(string name, Entity? material, bool layerToo)
+        {
+            var key = ClassName(name);
+            if (key.Length == 0) return;
+            if (taken.TryGetValue(key, out var first))
+            {
+                if (first != name) css.Append($"/* \"{name}\" makes the same class as \"{first}\": the first one's styles. */\n");
+                return;
+            }
+            taken[key] = name;
+            var section = MaterialGraphics.Resolve(material, "section", name, standard: standard);
+            var fill = section.Membrane ? null : patterns.Fill(section);
+            var selectors = new List<string> { $".cut.material-{key}", $".surface.material-{key}", $".material-{key} .cut", $".material-{key} .surface" };
+            if (layerToo) selectors.AddRange([$".cut.layer-material-{key}", $".surface.layer-material-{key}"]);
+            // Its cut outline as it sets it (decision 678): colour, weight, dashes.
+            var outline = new List<string>();
+            if (!section.Membrane && section.CutLine is { } cl)
+            {
+                if (cl.Color != null) outline.Add($"stroke: {cl.Color}");
+                if (cl.Weight is { } cw) outline.Add($"stroke-width: {N(cw)}");
+                if (cl.LineType != null && Standards.DashOf(book, cl.LineType) is { Length: > 0 } cd) outline.Add($"stroke-dasharray: {string.Join(" ", cd.Select(N))}");
+            }
+            css.Append($"{string.Join(", ", selectors)} {{ fill: {fill ?? "white"};{string.Concat(outline.Select(x => " " + x + ";"))} }}\n");
+            var elevation = MaterialGraphics.Resolve(material, "elevation", name, paperSurfaces, standard: standard);
+            if (patterns.Fill(elevation, background: "white", ownFill: false) is { } seenFill)
+                css.Append($".projection.material-{key}, .material-{key} .projection {{ fill: {seenFill}; }}\n");
+        }
+        foreach (var mat in m.OfClass(IfcClass.Material).OrderBy(x => x.Name, StringComparer.Ordinal)) Material(mat.Name, mat, true);
+        // A layered element's material class is its layer set's name: the core layer's material.
+        foreach (var set in m.OfClass(IfcClass.MaterialLayerSet).OrderBy(x => x.Name, StringComparer.Ordinal))
+        {
+            var layers = Layers.Read(set);
+            if (layers.Count == 0) continue;
+            var core = layers[Math.Clamp(Layers.CoreIndex(layers), 0, layers.Count - 1)];
+            var material = m.Get(core.Material);
+            if (taken.ContainsKey(ClassName(set.Name))) continue;
+            css.Append($"/* Layer set \"{set.Name}\": its core, {material?.Name ?? core.Material}. */\n");
+            Material(set.Name, material, false);
+        }
+        return new Sheet(css.ToString(), patterns.Svg());
+    }
+
+    /// <summary>
+    /// The SVG patterns the stylesheet fills with, one per hatch, scale and background, made from Lapin's patterns (the
+    /// public .pat line families): each family a pattern of its own (a line along the tile, as long as its dashes repeat,
+    /// the tile as tall as the spacing, sheared by the shift between lines and turned by the angle), and the hatch a tile
+    /// that lays its background and each family over it.
+    /// </summary>
+    sealed class Patterns(IReadOnlyList<HatchPattern> extra, double pen)
+    {
+        readonly Dictionary<string, string> made = new(StringComparer.Ordinal);
+        readonly StringBuilder svg = new();
+
+        /// <summary>The fill of a hatch (a url, a colour) or null when it has none.</summary>
+        public string? Fill(string? hatch, double scale, string? fill, string? background = null) =>
+            Fill(new ResolvedMaterial("", hatch, scale, fill, null, false, false, null, "own"), background);
+
+        /// <summary>
+        /// The fill of a material's graphics (a url, a colour) or null when it has none: its fill (at its opacity, unless
+        /// <paramref name="ownFill"/> is off), its background hatch and its hatch over it, each in its colour and weight (decision 678).
+        /// </summary>
+        public string? Fill(ResolvedMaterial g, string? background = null, bool ownFill = true)
+        {
+            var fill = ownFill ? MaterialGraphics.FillInk(g) : null;
+            var bg = fill ?? background;
+            var layers = new List<(HatchPattern P, double Scale, double Angle, string Color, double Width)>();
+            HatchPattern? Find(string? h) => string.IsNullOrEmpty(h) ? null : HatchLibrary.Find(h.Equals(BattHatch.Name, StringComparison.OrdinalIgnoreCase) ? "INSULATION" : h, extra);
+            static double Positive(double s) => s <= 0 || !double.IsFinite(s) ? 1 : s;
+            // A stylesheet has no scale: a real-size pattern (decision 679) is drawn as at 1:100.
+            static double Paper(HatchPattern p, HatchUnits? over, double s) => HatchScale.UnitsOf(p, over) == HatchUnits.Model ? s / 100 : s;
+            if (g.Background is { } b && Find(b.Hatch) is { } bp)
+            {
+                if (bp.Solid) return ResolvedMaterial.Ink(b.HatchColor ?? "#000000", g.Halftone, g.HatchOpacity);
+                layers.Add((bp, Paper(bp, null, Positive(b.HatchScale ?? g.HatchScale)), b.HatchAngle ?? 0, ResolvedMaterial.Ink(b.HatchColor ?? "#000000", g.Halftone, g.HatchOpacity), b.HatchWeight ?? pen));
+            }
+            if (Find(g.Hatch) is { } p)
+            {
+                if (p.Solid) return g.HatchColor != null ? g.HatchInk("#000000") : "black";
+                layers.Add((p, Paper(p, g.HatchUnits, Positive(g.HatchScale)), g.HatchAngle, g.HatchInk("#000000"), g.HatchWeight ?? pen));
+            }
+            if (layers.Count == 0) return fill;
+            var id = "lapin-" + string.Join("-", layers.Select(l => ClassName(l.P.Name).ToLowerInvariant() + (Math.Abs(l.Scale - 1) > 1e-9 ? $"-x{N(l.Scale).Replace('.', '_')}" : "")
+                + (Math.Abs(l.Angle) > 1e-9 ? $"-a{N(l.Angle).Replace('.', '_').Replace('-', 'm')}" : "") + (l.Color != "#000000" ? $"-{ClassName(l.Color).ToLowerInvariant()}" : "")
+                + (Math.Abs(l.Width - pen) > 1e-9 ? $"-w{N(l.Width).Replace('.', '_')}" : "")))
+                + (bg is { Length: > 0 } ? $"-{ClassName(bg).ToLowerInvariant()}" : "");
+            if (!made.ContainsKey(id)) made[id] = Make(id, layers, bg);
+            return $"url(#{id})";
+        }
+
+        string Make(string id, List<(HatchPattern P, double Scale, double Angle, string Color, double Width)> layers, string? bg)
+        {
+            var families = new List<string>();
+            var i = 0;
+            foreach (var (p, scale, angle, color, width) in layers)
+            {
+                if (p.Tile is { } tile)
+                {
+                    // A tile pattern (stage 7): its cell an SVG pattern of its own, as SVG repeats tiles natively.
+                    var fid = $"{id}-{i++}";
+                    var stroke = HexColor.Opaque(color);
+                    var opacity = HexColor.Alpha(color) is var a && a < 0.999 ? $" stroke-opacity=\"{N(a)}\"" : "";
+                    var t = (Math.Abs(angle) > 1e-9 ? $"rotate({N(-angle)}) " : "") + $"scale({N(scale)} {N(-scale)})";
+                    var d = new System.Text.StringBuilder();
+                    foreach (var l in tile.Lines)
+                        d.Append(l.Dot ? $"M{N(l.A.X)} {N(l.A.Y)}h0.01 " : $"M{N(l.A.X)} {N(l.A.Y)}L{N(l.B.X)} {N(l.B.Y)} ");
+                    var circles = new System.Text.StringBuilder();
+                    foreach (var arc in tile.Arcs)
+                    {
+                        if (arc.Whole) { circles.Append($"<circle cx=\"{N(arc.C.X)}\" cy=\"{N(arc.C.Y)}\" r=\"{N(arc.R)}\"/>"); continue; }
+                        var a0 = arc.Start * Math.PI / 180;
+                        var a1 = (arc.Start + arc.Sweep) * Math.PI / 180;
+                        var (x0, y0) = (arc.C.X + arc.R * Math.Cos(a0), arc.C.Y + arc.R * Math.Sin(a0));
+                        var (x1, y1) = (arc.C.X + arc.R * Math.Cos(a1), arc.C.Y + arc.R * Math.Sin(a1));
+                        d.Append($"M{N(x0)} {N(y0)}A{N(arc.R)} {N(arc.R)} 0 {(Math.Abs(arc.Sweep) > 180 ? 1 : 0)} {(arc.Sweep > 0 ? 1 : 0)} {N(x1)} {N(y1)} ");
+                    }
+                    svg.Append($"  <pattern id=\"{fid}\" patternUnits=\"userSpaceOnUse\" width=\"{N(tile.Width)}\" height=\"{N(tile.Height)}\" patternTransform=\"{t}\">")
+                       .Append($"<g fill=\"none\" stroke=\"{(stroke == "#000000" ? "black" : stroke)}\"{opacity} stroke-width=\"{N(width / scale)}\" stroke-linecap=\"round\">")
+                       .Append(d.Length > 0 ? $"<path d=\"{d.ToString().TrimEnd()}\"/>" : "").Append(circles).Append("</g></pattern>\n");
+                    families.Add(fid);
+                    continue;
+                }
+                foreach (var f in p.Families)
+                {
+                    if (Math.Abs(f.DeltaY) < 1e-9) continue;
+                    var fid = $"{id}-{i++}";
+                    var h = Math.Abs(f.DeltaY);
+                    var (dash, period) = Dashes(f.Dashes);
+                    var w = period > 0 ? period : 10;
+                    var skew = Math.Atan(f.DeltaX / f.DeltaY) * 180 / Math.PI;
+                    // y runs down in SVG: the pattern mirrored first, so 45° lines rise to the right as Lapin draws them.
+                    var t = (Math.Abs(angle) > 1e-9 ? $"rotate({N(-angle)}) " : "") + $"scale({N(scale)} {N(-scale)}) translate({N(f.Origin.X)} {N(f.Origin.Y)}) rotate({N(f.AngleDeg)}) skewX({N(skew)}) translate(0 {N(-h / 2)})";
+                    var stroke = HexColor.Opaque(color);
+                    var opacity = HexColor.Alpha(color) is var a && a < 0.999 ? $" stroke-opacity=\"{N(a)}\"" : "";
+                    svg.Append($"  <pattern id=\"{fid}\" patternUnits=\"userSpaceOnUse\" width=\"{N(w)}\" height=\"{N(h)}\" patternTransform=\"{t}\">")
+                       .Append($"<line x1=\"0\" y1=\"{N(h / 2)}\" x2=\"{N(w)}\" y2=\"{N(h / 2)}\" stroke=\"{(stroke == "#000000" ? "black" : stroke)}\"{opacity} stroke-width=\"{N(width / scale)}\"")
+                       .Append(dash != null ? $" stroke-dasharray=\"{dash}\"" : "").Append("/></pattern>\n");
+                    families.Add(fid);
+                }
+            }
+            // The hatch: a large tile (a metre of paper, past any sheet) of its background and its families laid over it.
+            const double Tile = 1000;
+            svg.Append($"  <pattern id=\"{id}\" patternUnits=\"userSpaceOnUse\" width=\"{N(Tile)}\" height=\"{N(Tile)}\">");
+            if (bg is { Length: > 0 })
+            {
+                var bgOpacity = HexColor.Alpha(bg) is var ba && ba < 0.999 ? $" fill-opacity=\"{N(ba)}\"" : "";
+                svg.Append($"<rect width=\"{N(Tile)}\" height=\"{N(Tile)}\" fill=\"{HexColor.Opaque(bg)}\"{bgOpacity}/>");
+            }
+            foreach (var fid in families) svg.Append($"<rect width=\"{N(Tile)}\" height=\"{N(Tile)}\" fill=\"url(#{fid})\"/>");
+            svg.Append("</pattern>\n");
+            return id;
+        }
+
+        /// <summary>A family's dashes (positive drawn, negative a gap, 0 a dot) as an SVG dash array, and their period; null: a continuous line.</summary>
+        static (string? Array, double Period) Dashes(IReadOnlyList<double> d)
+        {
+            if (d.Count == 0) return (null, 0);
+            // Runs alternating drawn, gap, drawn…: a list that starts with a gap starts with a drawn run of nothing.
+            var runs = new List<double>();
+            bool? last = null;
+            foreach (var x in d)
+            {
+                var drawn = x >= 0;
+                var length = x == 0 ? 0.01 : Math.Abs(x);
+                if (last == null && !drawn) { runs.Add(0); last = true; }
+                if (last == drawn) runs[^1] += length;
+                else { runs.Add(length); last = drawn; }
+            }
+            if (runs.Count % 2 == 1) runs.Add(0);
+            var period = runs.Sum();
+            return period <= 0 ? (null, 0) : (string.Join(" ", runs.Select(N)), period);
+        }
+
+        public string Svg() => "<svg xmlns=\"http://www.w3.org/2000/svg\">\n  <!-- Hatch patterns for Bonsai's drawings, written by Lapin with the IFC export (paper millimetres). -->\n" + svg + "</svg>\n";
+    }
+}

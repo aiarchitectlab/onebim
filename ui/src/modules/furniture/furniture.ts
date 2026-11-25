@@ -1,0 +1,161 @@
+/**
+ * Furniture (docs/plan-furniture.md): the kinds the engine builds (its catalog `furniture.kinds`), the types of a kind,
+ * what each tool puts down (its type per kind, its turn, whether it backs onto walls), and a piece's grips.
+ */
+
+import { create } from 'zustand';
+import type { NodeDto } from '../../engine/protocol';
+import type { Grip, Vec2 } from '../../platform/module';
+
+export interface KindParam { key: string; label: string; kind: 'length' | 'number' | 'choice' | 'bool'; min?: number | null; max?: number | null; choices?: string[] | null; layouts?: string[] | null }
+export interface FurnitureKind {
+  key: string; label: string; group: string; predefined: string; objectType?: string | null;
+  width: number; depth: number; height: number; params: KindParam[]; defaults: Record<string, unknown>; roles: string[];
+  /** The IFC class its pieces are written as: IfcFurniture, a sanitary fixture's IfcSanitaryTerminal (forum topic #245). */
+  ifcClass?: string;
+  /** The common sizes it offers (indicative): a word on what each is, and the values it gives the type. */
+  sizes?: KindSize[];
+  sizesIndicative?: boolean | null;
+}
+export interface KindSize { label: string; spec: Record<string, unknown> }
+
+/** A common size as the dialog lists it: its word, then its width × depth × height in mm. */
+export const sizeLabel = (z: KindSize, word: (s: string) => string = (s) => s): string => {
+  const mm = (v: unknown) => Math.round(Number(v ?? 0) * 1000);
+  const dims = [z.spec.width, z.spec.depth, z.spec.height].filter((v) => v != null).map(mm).join(' × ');
+  return z.label ? `${word(z.label)} ${dims}` : dims;
+};
+
+/** The common size a spec is, if it is one: the first whose values it has. */
+export const sizeIndex = (sizes: KindSize[] | undefined, spec: FurnitureSpec): number =>
+  (sizes ?? []).findIndex((z) => Object.entries(z.spec).every(([k, v]) => typeof v === 'number' ? Math.abs(Number(spec[k]) - v) < 1e-6 : spec[k] === v));
+export type FurnitureSpec = Record<string, unknown> & { kind?: string; width?: number; depth?: number; height?: number; materials?: Record<string, string> };
+
+export const TYPE_CLASS = 'IfcFurnitureType';
+export const CLASS = 'IfcFurniture';
+
+/** The material roles, as the dialog names them. */
+export const ROLE_LABELS: Record<string, string> = {
+  body: 'Body', upholstery: 'Upholstery', top: 'Top', fronts: 'Fronts', linen: 'Linen', metal: 'Metal', glass: 'Glass', plinth: 'Plinth', handles: 'Handles',
+  back: 'Back', legs: 'Legs',
+  // The models' slots (decision 477).
+  accent: 'Accent', shade: 'Shade', foliage: 'Foliage', pot: 'Pot',
+  // Sanitary fixtures (forum topic #245).
+  ceramic: 'Ceramic', seat: 'Seat', fittings: 'Taps and fittings', screen: 'Shower glass', steel: 'Steel', mirror: 'Mirror',
+};
+
+/** A role a type made before it had its own material takes another's (a kitchen's plinth its body's, its handles the metal's; decision 472). */
+export const ROLE_FALLBACK: Record<string, string> = { plinth: 'body', handles: 'metal' };
+
+export const specOf = (t: NodeDto | undefined): FurnitureSpec => (t?.props.spec as FurnitureSpec | undefined) ?? {};
+export const kindOf = (t: NodeDto | undefined) => String(specOf(t).kind ?? '');
+
+/** The project's types of a kind, by name. */
+export function typesOfKind(nodes: Map<string, NodeDto>, kind: string): NodeDto[] {
+  return [...nodes.values()].filter((n) => n.type === TYPE_CLASS && kindOf(n) === kind).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** A type in a few words: its size in mm. */
+export function sizeOf(t: NodeDto | undefined, kinds: FurnitureKind[]): string {
+  const s = specOf(t);
+  const k = kinds.find((x) => x.key === s.kind);
+  const mm = (v: unknown, d?: number) => Math.round(Number(v ?? d ?? 0) * 1000);
+  if (!k) return '';
+  return s.kind === 'kitchen' ? `depth ${mm(s.depth, k.depth)} · worktop ${mm(s.height, k.height)}` : `${mm(s.width, k.width)} × ${mm(s.depth, k.depth)} × ${mm(s.height, k.height)}`;
+}
+
+/** What the tools put down: a type per kind (none: the project's first of the kind), the turn, backed onto walls or not. */
+interface Prefs { types: Record<string, string>; rotation: number; against: boolean }
+export const useFurniturePrefs = create<Prefs>(() => ({ types: {}, rotation: 0, against: true }));
+export const chosenType = (kind: string) => useFurniturePrefs.getState().types[kind];
+export const chooseType = (kind: string, id: string) => useFurniturePrefs.setState((s) => ({ types: { ...s.types, [kind]: id } }));
+
+/** The types dialog's selection, set from outside (a piece's Edit type…). */
+export const useTypesDialog = create<{ typeId: string | null }>(() => ({ typeId: null }));
+
+/** A piece's grips: its middle to move it, a handle in front of it to turn it (its front looks along its local −y). */
+export function furnitureGrips(node: NodeDto, depth = 0.8): Grip[] {
+  const p = node.props.at;
+  if (!Array.isArray(p) || p.length < 2) return [];
+  const at: Vec2 = { x: Number(p[0]), y: Number(p[1]) };
+  const rotation = Number(node.props.rotation ?? 0);
+  const rad = (rotation * Math.PI) / 180;
+  const reach = depth / 2 + 0.35;
+  const handle = { x: at.x + Math.sin(rad) * reach, y: at.y - Math.cos(rad) * reach };
+  return [
+    { key: 'at', kind: 'move', at, title: 'Move', step: (to) => ({ command: 'element.transform', args: { ids: [node.id], op: 'move', by: [to.x - at.x, to.y - at.y] } }) },
+    {
+      key: 'rotate', kind: 'rotate', at: handle, title: 'Turn',
+      step: (to) => {
+        // The front towards the cursor: its local −y along (to − at).
+        const facing = (Math.atan2(to.x - at.x, -(to.y - at.y)) * 180) / Math.PI;
+        const angle = Math.round((((facing - rotation) % 360) + 540) % 360 - 180);
+        return angle ? { command: 'element.transform', args: { ids: [node.id], op: 'rotate', center: [at.x, at.y], angle } } : null;
+      },
+    },
+  ];
+}
+
+/** The preview's plan items and front pieces as SVG: the plan seen from above (y up), the front with z up. */
+export interface PreviewDto {
+  plan: { kind: string; closed: boolean; points: number[] }[];
+  front: { role: string; color: string; x0: number; x1: number; z0: number; z1: number }[];
+  width: number; depth: number; height: number;
+  units?: { line: 'Base' | 'Wall'; index: number; type: string; width: number; height: number; detail: string; at: number }[];
+  unitsLength?: number | null; warnings?: string[];
+  /** A casework type's boards and its carcasses as laid (decision 475). */
+  boards?: { part: string; carcass: number; role: string; length: number; width: number; thickness: number; grain: string; front: boolean }[];
+  carcasses?: { index: number; x0: number; x1: number }[];
+  /** A model's body from the front (decision 477): its triangles far to near (x, z of each corner), each in its role's colour shaded. */
+  elevation?: { color: string; points: number[] }[];
+  /** The roles the type's materials are asked for. */
+  roles?: string[];
+}
+
+export function planPaths(p: PreviewDto): { d: string; kind: string }[] {
+  return p.plan.map((i) => {
+    const pts: string[] = [];
+    for (let k = 0; k + 1 < i.points.length; k += 2) pts.push(`${k ? 'L' : 'M'}${i.points[k].toFixed(4)} ${(-i.points[k + 1]).toFixed(4)}`);
+    return { d: pts.join(' ') + (i.closed ? ' Z' : ''), kind: i.kind };
+  });
+}
+
+/** The plan's box (x0, y0, w, h in SVG terms, y down) with a margin. */
+export function planBox(p: PreviewDto, margin = 0.08): [number, number, number, number] {
+  let [x0, y0, x1, y1] = [Infinity, Infinity, -Infinity, -Infinity];
+  for (const i of p.plan) for (let k = 0; k + 1 < i.points.length; k += 2) {
+    x0 = Math.min(x0, i.points[k]); x1 = Math.max(x1, i.points[k]);
+    y0 = Math.min(y0, -i.points[k + 1]); y1 = Math.max(y1, -i.points[k + 1]);
+  }
+  if (!Number.isFinite(x0)) return [-1, -1, 2, 2];
+  return [x0 - margin, y0 - margin, x1 - x0 + 2 * margin, y1 - y0 + 2 * margin];
+}
+
+/** A kitchen's layouts (the engine's catalog `furniture.kitchenLayouts`): the key, its label and the parameters it starts from. */
+export interface KitchenLayout { key: string; label: string; preset: Record<string, unknown> }
+
+/** The choices of a kitchen's layout and its sink and hob, as the dialog names them; the others show as they are. */
+export const CHOICE_LABELS: Record<string, string> = {
+  'one-wall': 'One wall', galley: 'Galley', 'l-shaped': 'L-shaped', 'u-shaped': 'U-shaped', island: 'Island', peninsula: 'Peninsula',
+  run: 'The main run', other: 'The other part',
+  // A kitchen's units (decision 472).
+  drawerDoor: 'Drawer over a door', doors: 'Doors', drawers: 'Drawers', pan: 'Pan drawers', open: 'Open shelves', glass: 'Glazed doors',
+  single: 'Single', 'one-half': '1½ bowl', double: 'Double', corner: 'Corner', standard: 'Standard', 'pull-out': 'Pull-out', none: 'None',
+  induction: 'Induction', gas: 'Gas', 'under-counter': 'Under-counter', tall: 'Tall integrated', freestanding: 'Freestanding',
+  chimney: 'Chimney', integrated: 'Integrated', left: 'Left', right: 'Right',
+  // Casework (decision 475).
+  cabinet: 'Cabinet', bed: 'Bed', between: 'Between the sides', over: 'Over the sides', inset: 'Set in', overlay: 'Laid on the back',
+  plinth: 'Plinth', legs: 'Legs', floating: 'Hung on the wall', metal: 'Slim metal', tapered: 'Tapered wood', sled: 'Sled',
+  overhang: 'Overhanging', worktop: 'Worktop', jprofile: 'J-profile grip', bar: 'Bar', knob: 'Knob', edge: 'Edge pull',
+  slab: 'Slab', framed: 'Framed', fluted: 'Fluted', flap: 'Flap', up: 'Lifts up', down: 'Drops down', box: 'Carcass', gap: 'Knee space', both: 'Both sides',
+  sideboard: 'Sideboard', wardrobe: 'Wardrobe', wardrobeSliding: 'Wardrobe, sliding doors', bookcase: 'Bookcase', tvUnit: 'TV unit', chest: 'Chest of drawers',
+  vanity: 'Bathroom vanity', desk: 'Desk', hallUnit: 'Hall unit', nightstand: 'Nightstand',
+  // Sanitary fixtures (forum topic #245).
+  wallHung: 'Wall-hung', floor: 'On the floor', concealed: 'Concealed', closeCoupled: 'Close-coupled', wall: 'On the wall', pedestal: 'Pedestal',
+  semiPedestal: 'Half pedestal', deck: 'On the deck', quadrant: 'Quadrant', door: 'Hinged door', walkIn: 'Walk-in screen',
+  towelRail: 'Towel rail', grabBar: 'Grab bar', mirror: 'Mirror', paperHolder: 'Toilet roll holder',
+};
+
+/** Whether a parameter applies to the type's layout (a parameter without layouts applies to all). */
+export const appliesTo = (p: KindParam, spec: FurnitureSpec, defaults: Record<string, unknown>): boolean =>
+  !p.layouts || p.layouts.includes(String(spec.layout ?? defaults.layout ?? ''));

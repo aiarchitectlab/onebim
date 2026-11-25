@@ -1,0 +1,262 @@
+#!/usr/bin/env node
+// Build one product as a desktop app, with only its modules, engine and UI
+// alike: a module the product does not have is not in the package at all.
+//   pnpm build:product <product>      (lapin | lapin-architecture | lapin-architecture-structure | …)
+//   pnpm build:product <product> --target windows    (on a Mac: the Windows x64 build, cross-compiled)
+// Output: build/<product>/bundle. Each product is its own app (name and identifier).
+//
+// Windows from a Mac (docs/release-windows.md): the engine is published for
+// win-x64 (with engine/native/win-x64/manifoldc.dll), the shell compiled with
+// cargo-xwin (the MSVC SDK it downloads, under Microsoft's licence) and packed
+// by NSIS (makensis); the installer and a portable zip, unsigned, as the
+// Windows machine makes them. Tauri calls this cross build experimental: test
+// it on Windows before publishing.
+//
+// On macOS the app is signed with the Developer ID Application certificate in
+// the keychain (or LAPIN_SIGNING_IDENTITY), put in a DMG, and the DMG notarized
+// and stapled with the notarytool keychain profile LAPIN_NOTARY_PROFILE
+// (default "lapin-notary"; docs/release-macos.md). Without a certificate the
+// app is built unsigned, as before; without the profile it is signed, not notarized.
+//
+// The version is 0.1.<the commit count of HEAD> (or LAPIN_VERSION), the same on
+// every machine for one commit, so the updater can tell a newer build. The app
+// looks for updates at lapinbim.com/updates/<product>/ (public editions; ciuntucbimstudio.ro/downloads/<product>-update/ second, and the only one for the others); on macOS
+// the signed, stapled app is also packed as <name>_<version>_<arch>.app.tar.gz,
+// what the updater installs. scripts/publish-update.mjs signs the packages and
+// puts them there.
+import { spawnSync } from 'node:child_process';
+import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { resolveProduct } from './product.mjs';
+import { checkDmg } from './check-dmg.mjs';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
+const productId = process.argv[2];
+if (!productId) { console.error('Usage: pnpm build:product <product>'); process.exit(1); }
+let product;
+try { product = resolveProduct(root, productId); } catch (e) { console.error(e.message); process.exit(1); }
+// The product's own id (a product given by its file's path names itself).
+const id = product.id;
+const out = join(root, 'build', id);
+// Where the built app looks for updates. The public editions: lapinbim.com first, the company site second (Tauri tries
+// them in order; apps installed before the move only know the second, which stays served). Others: the company site.
+const updaterEndpoints = (edition) => [
+  ...(['lapin', 'lapin-architecture', 'lapin-architecture-structure'].includes(edition) ? [`https://lapinbim.com/updates/${edition}/{{target}}-{{arch}}-{{bundle_type}}.json`] : []),
+  `https://ciuntucbimstudio.ro/downloads/${edition}-update/{{target}}-{{arch}}-{{bundle_type}}.json`,
+];
+const tauriDir = join(root, 'desktop/src-tauri');
+
+// pnpm is pnpm.cmd on Windows, which Node starts only through the shell; there
+// an argument with a space (a path) is quoted, the shell would split it otherwise.
+const win = process.platform === 'win32';
+const shellArgs = (cmd, args) => (win && cmd === 'pnpm' ? args.map((a) => (/\s/.test(a) ? `"${a}"` : a)) : args);
+// A cross build: --target windows (or a Rust target triple).
+const targetArg = (() => { const i = process.argv.indexOf('--target'); return i > 0 ? process.argv[i + 1] : undefined; })();
+const crossTriple = targetArg === 'windows' ? 'x86_64-pc-windows-msvc' : targetArg;
+const sh = (cmd, args, opts = {}) => {
+  console.log(`▸ ${cmd} ${args.join(' ')}`);
+  const r = spawnSync(cmd, shellArgs(cmd, args), { cwd: root, stdio: 'inherit', shell: win && cmd === 'pnpm', ...opts, env: { ...process.env, ...opts.env } });
+  if (r.error) { console.error(`Cannot run ${cmd}: ${r.error.message}`); process.exit(1); }
+  if (r.status !== 0) process.exit(r.status ?? 1);
+};
+
+// The target triple of this machine, from the Rust toolchain the desktop shell is built with.
+const rustc = spawnSync('rustc', ['-vV'], { encoding: 'utf8' });
+const hostTriple = rustc.stdout?.match(/^host: (.+)$/m)?.[1].trim();
+const triple = crossTriple ?? hostTriple;
+const cross = Boolean(crossTriple && crossTriple !== hostTriple);
+if (cross && crossTriple !== 'x86_64-pc-windows-msvc') { console.error(`A cross build is made for Windows only (--target windows), not ${crossTriple}.`); process.exit(1); }
+if (!hostTriple) {
+  console.error(`Cannot read the target from rustc${rustc.error ? ` (${rustc.error.message})` : ''}: install Rust (https://rustup.rs) and make sure rustc is on the PATH.`);
+  process.exit(1);
+}
+const rid = { 'aarch64-apple-darwin': 'osx-arm64', 'x86_64-apple-darwin': 'osx-x64', 'x86_64-pc-windows-msvc': 'win-x64', 'x86_64-unknown-linux-gnu': 'linux-x64' }[triple];
+if (!rid) { console.error(`No .NET runtime id for ${triple}`); process.exit(1); }
+const exe = triple.includes('windows') ? '.exe' : '';
+
+const commits = spawnSync('git', ['rev-list', '--count', 'HEAD'], { cwd: root, encoding: 'utf8' }).stdout?.trim();
+const version = process.env.LAPIN_VERSION ?? (commits ? `0.1.${commits}` : null);
+if (!version || !/^\d+\.\d+\.\d+$/.test(version)) { console.error(`No version: set LAPIN_VERSION (x.y.z), or build from a git checkout (${version ?? 'no commit count'}).`); process.exit(1); }
+console.log(`▸ ${product.name} ${version}`);
+
+rmSync(out, { recursive: true, force: true });
+mkdirSync(out, { recursive: true });
+
+// 1. Engine: the modules (Release), then the host as one self-contained file.
+sh('dotnet', ['build', 'engine/Lapin.slnx', '-c', 'Release', '-v', 'q', '-nologo']);
+// A private module from a sibling repository, built against this checkout (LapinProDir), not a lapin-pro beside it.
+for (const csproj of product.engineProjects ?? []) sh('dotnet', ['build', csproj, '-c', 'Release', '-v', 'q', '-nologo', `-p:LapinProDir=${root}/`]);
+// LapinNativeRid: the native libraries of the platform built for, in every project (the runtime id itself does not reach a referenced library).
+sh('dotnet', ['publish', 'engine/src/Host/Lapin.Host', '-c', 'Release', '-r', rid, '--self-contained', 'true', `-p:LapinNativeRid=${rid}`,
+  `-p:InformationalVersion=${version}`, '-p:PublishSingleFile=true', '-p:IncludeNativeLibrariesForSelfExtract=true', '-p:DebugType=none', '-o', join(out, 'host'), '-v', 'q', '-nologo']);
+mkdirSync(join(tauriDir, 'binaries'), { recursive: true });
+cpSync(join(out, 'host', `Lapin.Host${exe}`), join(tauriDir, 'binaries', `lapin-host-${triple}${exe}`));
+
+// 2. Resources: the manifest and ONLY this product's engine modules.
+const res = join(tauriDir, 'resources');
+rmSync(res, { recursive: true, force: true });
+mkdirSync(join(res, 'modules'), { recursive: true });
+const manifest = join(res, 'product.json');
+writeFileSync(manifest, JSON.stringify(product, null, 2));
+for (const m of product.engine.filter((id) => id !== 'core')) {
+  const src = join(root, 'engine/artifacts/modules', m);
+  if (!existsSync(src)) { console.error(`Module ${m} was not built (${src}).`); process.exit(1); }
+  mkdirSync(join(res, 'modules', m), { recursive: true });
+  for (const f of readdirSync(src).filter((f) => !f.endsWith('.pdb') && f !== 'runtimes')) cpSync(join(src, f), join(res, 'modules', m, f));
+  // A module's native libraries (the Speckle SDK's SQLite, runtimes/<rid>/native): only those of the platform built for.
+  const native = join(src, 'runtimes', rid, 'native');
+  if (existsSync(native)) cpSync(native, join(res, 'modules', m, 'runtimes', rid, 'native'), { recursive: true });
+}
+
+// The lapinbim package for the Script panel's Python (docs/plan-python-scripting.md, stage 2), where the product has the scripting
+// module: its .py files and py.typed beside the modules (resources/python/lapinbim), so the user's Python needs no pip install.
+if (product.modules.includes('scripting')) {
+  const pkg = join(root, 'python', 'lapinbim');
+  mkdirSync(join(res, 'python', 'lapinbim'), { recursive: true });
+  for (const f of readdirSync(pkg).filter((f) => f.endsWith('.py') || f.endsWith('.pyi') || f === 'py.typed' || f === 'catalogue.json')) cpSync(join(pkg, f), join(res, 'python', 'lapinbim', f));
+}
+
+// 3. UI: only this product's UI modules are bundled.
+sh('pnpm', ['--filter', 'ui', 'build'], { env: { LAPIN_PRODUCT_FILE: manifest, LAPIN_UI_OUT: join(out, 'ui') } });
+
+// 4. The desktop bundle, named and identified per product (for the platform built for).
+const targetWin = triple.includes('windows');
+const mac = !cross && process.platform === 'darwin';
+if (cross) {
+  // What a Windows build from a Mac needs: cargo-xwin, makensis, clang-cl and lld-link (LLVM), the Rust target.
+  const missing = [['cargo-xwin', ['--version']], ['makensis', ['-VERSION']], ['lld-link', ['--version']]].filter(([c, a]) => spawnSync(c, a).status !== 0).map(([c]) => c);
+  if (spawnSync('rustup', ['target', 'list', '--installed'], { encoding: 'utf8' }).stdout?.includes(triple) === false) missing.push(`rustup target add ${triple}`);
+  if (missing.length) { console.error(`For a Windows build on this Mac, install: ${missing.join(', ')} (docs/release-windows.md).`); process.exit(1); }
+}
+// The Developer ID Application identity: named, else the first one in the keychain.
+const identity = mac ? process.env.LAPIN_SIGNING_IDENTITY
+  ?? spawnSync('security', ['find-identity', '-v', '-p', 'codesigning'], { encoding: 'utf8' }).stdout?.match(/"(Developer ID Application: [^"]+)"/)?.[1] : undefined;
+if (mac) console.log(identity ? `▸ signing as ${identity}` : '▸ no Developer ID Application certificate in the keychain: the app is built unsigned');
+
+// Intel Open Image Denoise (docs/plan-render.md, S4): the path tracer's denoiser for still images, a program beside the
+// engine (Lapin.Host/Denoiser.cs finds it in resources/oidn). Fetched for the platform built for and checked against its
+// SHA-256 (scripts/fetch-oidn.mjs, engine/native/oidn.json); its links copied as files. On macOS each of its binaries is
+// signed with the app's identity and the hardened runtime, as notarization asks of every executable inside the app.
+sh('node', [join(root, 'scripts/fetch-oidn.mjs'), '--rid', rid]);
+cpSync(join(root, 'engine/native', rid, 'oidn'), join(res, 'oidn'), { recursive: true, dereference: true });
+if (mac && identity)
+  for (const dir of ['bin', 'lib'])
+    for (const f of readdirSync(join(res, 'oidn', dir)))
+      sh('codesign', ['--force', '--sign', identity, '--options', 'runtime', '--timestamp', join(res, 'oidn', dir, f)]);
+// The modules' native libraries (the Speckle SDK's libe_sqlite3.dylib) signed the same way, as notarization asks.
+if (mac && identity)
+  for (const m of product.engine.filter((id) => id !== 'core')) {
+    const native = join(res, 'modules', m, 'runtimes', rid, 'native');
+    if (existsSync(native)) for (const f of readdirSync(native)) sh('codesign', ['--force', '--sign', identity, '--options', 'runtime', '--timestamp', join(native, f)]);
+  }
+// Linux (issue #23): the .deb, the .rpm and the AppImage carry a desktop entry made from linux/app.desktop.hbs (name, comment,
+// Exec with the file opened, the icon by the binary's name, which icon themes look up, Categories=Graphics;Engineering;,
+// the .lapin MIME type, StartupWMClass), and the .lapin MIME type itself (linux/lapin-project.xml) for the MIME
+// database. The AppImage's entry comes from the same template (Tauri builds its AppDir from the .deb's data). The .rpm
+// (Fedora, RHEL, openSUSE) uses the system's WebKitGTK like the .deb, not the older one the AppImage carries.
+// Only here: on macOS and Windows a file association would register .lapin before the app handles a file opened so.
+const mimeXml = { [`/usr/share/mime/packages/${id}.xml`]: 'linux/lapin-project.xml' };
+// LAPIN_LINUX_BUNDLES=deb,rpm leaves a package out (23.11.2026: the AppImage tools' "continuous" plugin stopped running);
+// empty or unset, all three.
+const linuxTargets = (process.env.LAPIN_LINUX_BUNDLES ?? '').split(',').map((s) => s.trim()).filter((s) => ['deb', 'rpm', 'appimage'].includes(s));
+const linuxBundle = {
+  targets: linuxTargets.length ? linuxTargets : ['deb', 'rpm', 'appimage'],
+  shortDescription: product.description ?? 'BIM modeller on the IFC schema',
+  fileAssociations: [{ ext: ['lapin'], name: 'Lapin project', description: 'Lapin project', mimeType: 'application/x-lapin-project', role: 'Editor' }],
+  linux: { deb: { desktopTemplate: 'linux/app.desktop.hbs', files: mimeXml }, rpm: { desktopTemplate: 'linux/app.desktop.hbs', files: mimeXml }, appimage: { files: mimeXml } },
+};
+writeFileSync(join(tauriDir, 'tauri.product.json'), JSON.stringify({
+  productName: product.name,
+  version,
+  identifier: product.brand?.identifier ?? `ro.ciuntucbimstudio.${id}`,
+  plugins: { updater: { endpoints: updaterEndpoints(id) } },
+  // Relative to desktop/src-tauri, with forward slashes: Tauri reads an absolute Windows path ("D:\\a\\…") as a URL with the
+  // scheme "d:", embeds nothing and the installed app opens on "File not found".
+  build: { frontendDist: relative(tauriDir, join(out, 'ui')).split(sep).join('/') },
+  // tauri.conf.json's main window with the edition's title: Tauri replaces an array whole when it merges this file, so a
+  // window written out here lost dragDropEnabled: false and Windows' window swallowed a view dragged onto a sheet (forum 206).
+  app: { windows: [{ ...JSON.parse(readFileSync(join(tauriDir, 'tauri.conf.json'), 'utf8')).app.windows[0], label: 'main', title: product.name }] },
+  bundle: {
+    externalBin: ['binaries/lapin-host'], resources: ['resources/**/*'],
+    // An edition under its own brand carries its icons (brand.icons: a folder from the repository, with Tauri's five files), Lapin its own (tauri.conf.json's).
+    ...(product.brand?.icons ? { icon: ['32x32.png', '128x128.png', '128x128@2x.png', 'icon.icns', 'icon.ico'].map((f) => relative(join(root, 'desktop/src-tauri'), join(root, product.brand.icons, f))) } : {}),
+    ...(!cross && process.platform === 'linux' ? linuxBundle : {}),
+    // Windows: an NSIS installer for the current user (no admin rights), which fetches WebView2 when it is missing.
+    ...(targetWin ? { targets: ['nsis'], windows: { nsis: { installMode: 'currentUser' } } } : {}),
+    ...(mac ? { targets: ['app'], macOS: { minimumSystemVersion: '13.0', hardenedRuntime: true, entitlements: 'entitlements.plist', ...(identity ? { signingIdentity: identity } : {}) } } : {}),
+  },
+}, null, 2));
+const releaseDir = join(tauriDir, cross ? `target/${triple}/release` : 'target/release');
+const bundleDir = join(releaseDir, 'bundle');
+rmSync(bundleDir, { recursive: true, force: true }); // never ship another product's leftovers
+// Notarization is done below with the keychain profile, never by Tauri from passwords in the environment.
+if (mac) for (const k of ['APPLE_ID', 'APPLE_PASSWORD', 'APPLE_TEAM_ID', 'APPLE_API_KEY', 'APPLE_API_ISSUER', 'APPLE_API_KEY_PATH']) delete process.env[k];
+sh('pnpm', ['tauri', 'build', '--config', join(tauriDir, 'tauri.product.json'), ...(cross ? ['--runner', 'cargo-xwin', '--target', triple] : [])],
+  { cwd: join(root, 'desktop'), env: cross ? { XWIN_ACCEPT_LICENSE: '1' } : {} });
+
+// Windows: besides the installer, a portable zip (the app, its engine and resources in one folder), as testers unpack and run it.
+if (targetWin) {
+  const appExe = join(releaseDir, 'lapin-desktop.exe');
+  const portable = join(bundleDir, 'portable', product.name);
+  if (!existsSync(appExe)) { console.error(`No ${appExe}: the Windows app was not built.`); process.exit(1); }
+  rmSync(join(bundleDir, 'portable'), { recursive: true, force: true });
+  mkdirSync(portable, { recursive: true });
+  cpSync(appExe, join(portable, `${product.name}.exe`));
+  cpSync(join(tauriDir, 'binaries', `lapin-host-${triple}.exe`), join(portable, 'lapin-host.exe'));
+  cpSync(res, join(portable, 'resources'), { recursive: true });
+  const zip = join(bundleDir, 'nsis', `${product.name}_${version}_x64-portable.zip`);
+  mkdirSync(dirname(zip), { recursive: true });
+  if (win) sh('powershell', ['-NoProfile', '-Command', `Compress-Archive -Path '${portable}' -DestinationPath '${zip}' -Force`]);
+  else sh('zip', ['-qr', '-X', zip, product.name], { cwd: join(bundleDir, 'portable') });
+  rmSync(join(bundleDir, 'portable'), { recursive: true, force: true });
+}
+
+// 5. macOS: the DMG (the app and a link to Applications; made here with hdiutil,
+// not Tauri's Finder script, which fails when the image is busy), signed;
+// its engine started from it and stopped before it is detached; the signature
+// checked; the DMG notarized and stapled, and the app too.
+if (mac) {
+  const macos = join(bundleDir, 'macos');
+  const apps = existsSync(macos) ? readdirSync(macos).filter((f) => f.endsWith('.app')) : [];
+  const dmgDir = join(bundleDir, 'dmg');
+  mkdirSync(dmgDir, { recursive: true });
+  const dmgs = [];
+  for (const app of apps) {
+    const stage = join(bundleDir, 'dmg-stage');
+    rmSync(stage, { recursive: true, force: true });
+    mkdirSync(stage);
+    sh('ditto', [join(macos, app), join(stage, app)]);
+    symlinkSync('/Applications', join(stage, 'Applications'));
+    const dmg = join(dmgDir, `${app.replace(/\.app$/, '')}_${version}_${triple.split('-')[0]}.dmg`);
+    sh('hdiutil', ['create', '-volname', app.replace(/\.app$/, ''), '-srcfolder', stage, '-ov', '-format', 'UDZO', dmg]);
+    rmSync(stage, { recursive: true, force: true });
+    if (identity) sh('codesign', ['--sign', identity, '--timestamp', dmg]);
+    dmgs.push(dmg);
+  }
+  // Each DMG opened and its engine started from it, then stopped before the image is detached.
+  for (const dmg of dmgs) {
+    console.log(`▸ checking ${dmg}`);
+    try { await checkDmg(dmg); } catch (e) { console.error(`The DMG does not work: ${e.message}`); process.exit(1); }
+  }
+  if (identity) {
+    for (const app of apps) sh('codesign', ['--verify', '--deep', '--strict', '--verbose=2', join(macos, app)]);
+    const profile = process.env.LAPIN_NOTARY_PROFILE ?? 'lapin-notary';
+    const known = spawnSync('xcrun', ['notarytool', 'history', '--keychain-profile', profile], { encoding: 'utf8' }).status === 0;
+    if (!identity.startsWith('Developer ID Application')) console.log('▸ not a Developer ID certificate: signed for this Mac only, not notarized');
+    else if (!known) console.log(`▸ no notarytool profile "${profile}" in the keychain: signed, not notarized (docs/release-macos.md)`);
+    else {
+      for (const dmg of dmgs) {
+        sh('xcrun', ['notarytool', 'submit', dmg, '--keychain-profile', profile, '--wait']);
+        sh('xcrun', ['stapler', 'staple', dmg]);
+      }
+      for (const app of apps) sh('xcrun', ['stapler', 'staple', join(macos, app)]);
+      for (const app of apps) sh('spctl', ['--assess', '--type', 'execute', '--verbose=2', join(macos, app)]);
+    }
+  }
+  // What the updater installs: the app as it is now (signed, stapled), packed on its own.
+  for (const app of apps) sh('tar', ['-czf', join(macos, `${app.replace(/\.app$/, '')}_${version}_${triple.split('-')[0]}.app.tar.gz`), '-C', macos, app], { env: { COPYFILE_DISABLE: '1' } });
+}
+
+if (existsSync(bundleDir)) cpSync(bundleDir, join(out, 'bundle'), { recursive: true });
+console.log(`\n✓ ${product.name} (${product.modules.join(' + ')}): ${join(out, 'bundle')}`);

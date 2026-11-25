@@ -1,0 +1,995 @@
+using Lapin.Geometry;
+
+namespace Lapin.Ifc;
+
+/// <summary>A rigid placement (with scale, for mapped items): p ↦ O + X·p.x + Y·p.y + Z·p.z.</summary>
+public readonly record struct Xf(Vec3 X, Vec3 Y, Vec3 Z, Vec3 O)
+{
+    public static readonly Xf Identity = new(new(1, 0, 0), new(0, 1, 0), new(0, 0, 1), Vec3.Zero);
+    public Vec3 Apply(Vec3 p) => O + X * p.X + Y * p.Y + Z * p.Z;
+    public Vec3 Dir(Vec3 d) => X * d.X + Y * d.Y + Z * d.Z;
+    /// <summary>This after <paramref name="inner"/>: inner's result placed by this.</summary>
+    public Xf Then(Xf inner) => new(Dir(inner.X), Dir(inner.Y), Dir(inner.Z), Apply(inner.O));
+}
+
+/// <summary>A triangle mesh being built: vertices shared within one item, so it closes into a solid.</summary>
+public sealed class MeshBuilder
+{
+    public List<Vec3> V { get; } = [];
+    public List<(int A, int B, int C)> T { get; } = [];
+
+    public int Add(Vec3 p) { V.Add(p); return V.Count - 1; }
+
+    /// <summary>A planar polygon (with holes) by vertex indices, triangulated about its normal.</summary>
+    public void Polygon(int[] outer, int[][] holes)
+    {
+        if (outer.Length < 3) return;
+        // A triangle (a mesh exported face by face): as it is, unless it has no area.
+        if (outer.Length == 3 && holes.Length == 0)
+        {
+            var (a, b, c) = (V[outer[0]], V[outer[1]], V[outer[2]]);
+            if (Vec3.Cross(b - a, c - a).Length >= 1e-12) T.Add((outer[0], outer[1], outer[2]));
+            return;
+        }
+        var n = VecMath.NewellNormal([.. outer.Select(i => V[i])]);
+        if (n.Length < 1e-12) return;
+        foreach (var t in Triangulator.Face(V, outer, holes.Where(h => h.Length >= 3).ToArray(), n.Normalized())) T.Add(t);
+    }
+
+    public void Transform(Xf xf) { for (var i = 0; i < V.Count; i++) V[i] = xf.Apply(V[i]); }
+
+    /// <summary>
+    /// Vertices at the same place (within 0,01 mm) made one, and the triangles
+    /// left without area dropped: a shell written with a point per face (some
+    /// programs do) closes into a solid this way.
+    /// </summary>
+    public MeshBuilder Welded()
+    {
+        var o = new MeshBuilder();
+        var at = new Dictionary<(long, long, long), int>();
+        var map = V.Select(p =>
+        {
+            var k = ((long)Math.Round(p.X * 1e5), (long)Math.Round(p.Y * 1e5), (long)Math.Round(p.Z * 1e5));
+            return at.TryGetValue(k, out var i) ? i : at[k] = o.Add(p);
+        }).ToArray();
+        foreach (var (a, b, c) in T)
+            if (map[a] != map[b] && map[b] != map[c] && map[a] != map[c]) o.T.Add((map[a], map[b], map[c]));
+        return o;
+    }
+
+    /// <summary>Closed: every edge between exactly two triangles (a surface, open, is drawn but not a solid).</summary>
+    public bool Closed()
+    {
+        var count = new Dictionary<(int, int), int>();
+        foreach (var (a, b, c) in T)
+            foreach (var (p, q) in new[] { (a, b), (b, c), (c, a) })
+                count[p < q ? (p, q) : (q, p)] = count.GetValueOrDefault(p < q ? (p, q) : (q, p)) + 1;
+        return T.Count >= 4 && count.Values.All(n => n == 2);
+    }
+
+    /// <summary>A solid's faces as triangles (its vertices kept).</summary>
+    public static MeshBuilder FromSolid(Solid s)
+    {
+        var m = new MeshBuilder();
+        m.V.AddRange(s.Vertices);
+        foreach (var f in s.Faces) m.T.AddRange(Triangulator.Face(s.Vertices, f.Outer, f.Holes, f.Normal));
+        return m;
+    }
+
+    public void Append(MeshBuilder m)
+    {
+        var b = V.Count;
+        V.AddRange(m.V);
+        T.AddRange(m.T.Select(t => (t.A + b, t.B + b, t.C + b)));
+    }
+}
+
+/// <summary>
+/// A read IFC file (IFC2X3 or IFC4) understood: its units, the placements and
+/// shapes of its products as triangle meshes in metres, what contains them
+/// (their storey), their property sets and quantities, their colours and the
+/// openings that void them. Geometry is evaluated on demand and kept.
+/// </summary>
+public sealed partial class IfcModel
+{
+    public StepFile File { get; }
+    public string ProjectName { get; }
+    readonly double _len = 1;   // metres per length unit
+    readonly double _angle = 1; // radians per plane angle unit
+    readonly System.Collections.Concurrent.ConcurrentDictionary<int, Xf> _placements = [];
+    readonly Dictionary<int, (string? Name, double Elevation)> _container = []; // product → its storey
+    readonly Dictionary<int, List<int>> _openings = [];                          // element → its openings
+    readonly Dictionary<int, List<int>> _definitions = [];                       // product → its property sets / quantities
+    readonly Dictionary<int, string> _colours = [];                              // representation item → #rrggbb
+
+    public sealed record Product(int Id, string Class, string GlobalId, string? Name, string? ObjectType, string? Tag, string? Storey, double Elevation, Vec3 At);
+
+    public List<Product> Products { get; } = [];
+
+    /// <summary>Metres per length unit of the file.</summary>
+    public double Scale => _len;
+
+    /// <summary>The file's storeys, from the lowest: name and elevation (m).</summary>
+    public List<(string Name, double Elevation)> Storeys { get; } = [];
+
+    static readonly HashSet<string> NotElements = ["IFCOPENINGELEMENT", "IFCSITE", "IFCBUILDING", "IFCBUILDINGSTOREY", "IFCANNOTATION", "IFCGRID", "IFCVIRTUALELEMENT", "IFCPROJECT"];
+
+    public IfcModel(StepFile file)
+    {
+        File = file;
+        var project = file.OfType("IFCPROJECT").FirstOrDefault();
+        ProjectName = Str(project?[2]) ?? Str(project?[5]) ?? "";
+        (_len, _angle) = ProjectUnits(file);
+
+        foreach (var r in file.OfType("IFCRELCONTAINEDINSPATIALSTRUCTURE"))
+        {
+            var s = file.Get(r[5]);
+            var storey = s == null ? (null, 0.0) : (Str(s[2]), s.Type == "IFCBUILDINGSTOREY" ? Num(s[9]) * _len : 0);
+            foreach (var e in Refs(r[4])) _container[e] = storey;
+        }
+        // Spaces are aggregated into their storey; parts aggregated into an element (a stair's flights, a curtain wall's panels) are where it is.
+        foreach (var r in file.OfType("IFCRELAGGREGATES"))
+        {
+            var whole = file.Get(r[4]);
+            var at = whole?.Type == "IFCBUILDINGSTOREY" ? (Str(whole[2]), Num(whole[9]) * _len) : _container.TryGetValue(Ref(r[4]), out var w) ? w : ((string?, double)?)null;
+            if (at is { } a) foreach (var part in Refs(r[5])) _container.TryAdd(part, a);
+        }
+        foreach (var r in file.OfType("IFCRELVOIDSELEMENT"))
+            (_openings.TryGetValue(Ref(r[4]), out var l) ? l : _openings[Ref(r[4])] = []).Add(Ref(r[5]));
+        foreach (var r in file.OfType("IFCRELDEFINESBYPROPERTIES"))
+            foreach (var o in Refs(r[4])) (_definitions.TryGetValue(o, out var l) ? l : _definitions[o] = []).Add(Ref(r[5]));
+        foreach (var s in file.OfType("IFCSTYLEDITEM"))
+            if (s[0] is StepRef item && Colour(s[1]) is { } c) _colours[item.Id] = c;
+
+        Storeys.AddRange(file.OfType("IFCBUILDINGSTOREY").Select(s => (Str(s[2]) ?? Str(s[7]) ?? "Level", Num(s[9]) * _len)).OrderBy(s => s.Item2));
+        foreach (var e in file.Rooted)
+        {
+            if (NotElements.Contains(e.Type) || e.Args.Count < 7 || e[0] is not string gid || gid.Length != 22 || file.Get(e[6]) is not { Type: "IFCPRODUCTDEFINITIONSHAPE" } shape) continue;
+            // Only an axis or a footprint (a layered wall whose body is in its parts): nothing to show.
+            if (!Items(shape[2]).Any(r => r[1] is not string id || !NotBody.Contains(id.ToUpperInvariant()))) continue;
+            var (storey, elevation) = _container.GetValueOrDefault(e.Id);
+            Products.Add(new Product(e.Id, ClassName(e.Type), gid, Str(e[2]), Str(e[4]), e.Args.Count > 7 ? Str(e[7]) : null, storey, elevation, Placement(e[5]).O));
+        }
+    }
+
+    /// <summary>IFCWALLSTANDARDCASE → IfcWallStandardCase, as IFC writes its names.</summary>
+    public static string ClassName(string upper)
+    {
+        if (KnownByUpper.TryGetValue(upper, out var known)) return known;
+        // A type of a known class: the class's name and Type (IFCPIPEFITTINGTYPE, IfcPipeFittingType).
+        if (upper.EndsWith("TYPE", StringComparison.Ordinal) && KnownByUpper.TryGetValue(upper[..^4], out var of)) return of + "Type";
+        return "Ifc" + upper[3..4] + upper[4..].ToLowerInvariant();
+    }
+
+    // Made when first asked for: the lists below are not yet there while the class's statics are made in order.
+    static Dictionary<string, string>? knownByUpper;
+    static Dictionary<string, string> KnownByUpper => knownByUpper ??= Known.Concat(Distribution).Distinct().ToDictionary(n => n.ToUpperInvariant(), n => n);
+
+    /// <summary>IFC4's distribution elements (and IFC2X3's that a file may still have), named as the schema names them.</summary>
+    static readonly string[] Distribution =
+    [
+        "IfcDistributionFlowElement", "IfcDistributionControlElement", "IfcDistributionChamberElement", "IfcDistributionPort", "IfcDistributionSystem", "IfcDistributionCircuit",
+        "IfcFlowStorageDevice", "IfcFlowTreatmentDevice", "IfcFlowMovingDevice", "IfcFlowInstrument", "IfcFlowMeter", "IfcEnergyConversionDevice",
+        "IfcPipeSegment", "IfcPipeFitting", "IfcDuctSegment", "IfcDuctFitting", "IfcCableSegment", "IfcCableFitting", "IfcCableCarrierSegment", "IfcCableCarrierFitting",
+        "IfcAirTerminal", "IfcAirTerminalBox", "IfcAirToAirHeatRecovery", "IfcActuator", "IfcAlarm", "IfcAudioVisualAppliance", "IfcBoiler", "IfcBurner",
+        "IfcChiller", "IfcCoil", "IfcCommunicationsAppliance", "IfcCompressor", "IfcCondenser", "IfcController", "IfcCooledBeam", "IfcCoolingTower",
+        "IfcDamper", "IfcDuctSilencer", "IfcElectricAppliance", "IfcElectricDistributionBoard", "IfcElectricFlowStorageDevice", "IfcElectricGenerator",
+        "IfcElectricMotor", "IfcElectricTimeControl", "IfcEngine", "IfcEvaporativeCooler", "IfcEvaporator", "IfcFan", "IfcFilter", "IfcFireSuppressionTerminal",
+        "IfcHeatExchanger", "IfcHumidifier", "IfcInterceptor", "IfcJunctionBox", "IfcLamp", "IfcLightFixture", "IfcMedicalDevice", "IfcMotorConnection",
+        "IfcOutlet", "IfcProtectiveDevice", "IfcProtectiveDeviceTrippingUnit", "IfcPump", "IfcSanitaryTerminal", "IfcSensor", "IfcSolarDevice", "IfcSpaceHeater",
+        "IfcStackTerminal", "IfcSwitchingDevice", "IfcTank", "IfcTransformer", "IfcTubeBundle", "IfcUnitaryControlElement", "IfcUnitaryEquipment", "IfcValve",
+        "IfcWasteTerminal", "IfcElectricalElement", "IfcEquipmentElement", "IfcSystemFurnitureElement", "IfcVirtualElement", "IfcReinforcingMesh", "IfcTendon",
+    ];
+
+    static readonly string[] Known =
+    [
+        "IfcWall", "IfcWallStandardCase", "IfcSlab", "IfcRoof", "IfcBeam", "IfcColumn", "IfcDoor", "IfcWindow", "IfcStair", "IfcStairFlight",
+        "IfcRamp", "IfcRampFlight", "IfcRailing", "IfcCovering", "IfcCurtainWall", "IfcPlate", "IfcMember", "IfcFooting", "IfcPile",
+        "IfcBuildingElementProxy", "IfcFurnishingElement", "IfcFurniture", "IfcFlowSegment", "IfcFlowTerminal", "IfcFlowFitting",
+        "IfcDistributionElement", "IfcGeographicElement", "IfcReinforcingBar", "IfcChimney", "IfcShadingDevice", "IfcTransportElement",
+        "IfcBuildingElementPart", "IfcElementAssembly", "IfcDiscreteAccessory", "IfcMechanicalFastener", "IfcFastener", "IfcFlowController",
+    ];
+
+    // ─── Values ──────────────────────────────────────────────────────────────
+
+    public static string? Str(object? v) => v switch { string s => s, StepTyped t => Str(t.Value), _ => null };
+    public static double Num(object? v) => v switch { double d => d, long l => l, StepTyped t => Num(t.Value), _ => 0 };
+    internal static int Ref(object? v) => v is StepRef r ? r.Id : -1;
+    internal static IEnumerable<int> Refs(object? v) => v is List<object?> l ? l.OfType<StepRef>().Select(r => r.Id) : [];
+    internal List<StepEntity> Items(object? v) => v is List<object?> l ? [.. l.Select(File.Get).OfType<StepEntity>()] : [];
+
+    /// <summary>Metres per length unit of a file (its project's units), for a look at the file before it is read as a model.</summary>
+    public static double LengthUnit(StepFile f) => ProjectUnits(f).Length;
+
+    /// <summary>
+    /// The project's units (its IfcUnitAssignment, not every unit the file holds: a property may be in millimetres in a
+    /// project in metres): metres per length unit and radians per plane angle unit. An SI unit by its prefix; a
+    /// conversion-based one (a foot, a degree) by its factor in the unit it names, else by its name.
+    /// </summary>
+    public static (double Length, double Angle) ProjectUnits(StepFile f)
+    {
+        double len = 1, angle = 1;
+        var project = f.OfType("IFCPROJECT").FirstOrDefault() ?? f.OfType("IFCPROJECTLIBRARY").FirstOrDefault();
+        // A file with no project's units (a fragment): the units it holds, a conversion-based one over the SI unit it is based on.
+        var units = f.Get(project?[8])?[0] is List<object?> assigned ? assigned.Select(f.Get).OfType<StepEntity>()
+            : f.OfType("IFCSIUNIT").Concat(f.OfType("IFCCONVERSIONBASEDUNIT"));
+        foreach (var u in units)
+            switch ((u[1] as StepEnum)?.Value)
+            {
+                case "LENGTHUNIT": len = UnitFactor(f, u, 0); break;
+                case "PLANEANGLEUNIT": angle = UnitFactor(f, u, 0); break;
+            }
+        return (len, angle);
+    }
+
+    /// <summary>An IfcSIUnit's or IfcConversionBasedUnit's size in its SI unit (metres, radians).</summary>
+    internal static double UnitFactor(StepFile f, StepEntity u, int depth)
+    {
+        if (u.Type == "IFCSIUNIT")
+            return (u[2] as StepEnum)?.Value switch
+            {
+                "EXA" => 1e18, "PETA" => 1e15, "TERA" => 1e12, "GIGA" => 1e9, "MEGA" => 1e6, "KILO" => 1e3, "HECTO" => 1e2, "DECA" => 10,
+                "DECI" => 0.1, "CENTI" => 1e-2, "MILLI" => 1e-3, "MICRO" => 1e-6, "NANO" => 1e-9, "PICO" => 1e-12, "FEMTO" => 1e-15, "ATTO" => 1e-18, _ => 1,
+            };
+        if (!u.Type.StartsWith("IFCCONVERSIONBASEDUNIT", StringComparison.Ordinal)) return 1;
+        if (depth < 4 && f.Get(u[3]) is { } measure && Num(measure[0]) is var v && v > 0)
+            return v * (f.Get(measure[1]) is { } of ? UnitFactor(f, of, depth + 1) : 1);
+        return (Str(u[2]) ?? "").ToUpperInvariant() switch { "DEGREE" => Math.PI / 180, "FOOT" => 0.3048, "INCH" => 0.0254, "YARD" => 0.9144, "MILE" => 1609.344, _ => 1 };
+    }
+
+    /// <summary>
+    /// A surface style's colour, through IFC2X3's presentation style assignments: <c>#rrggbb</c>, or <c>#rrggbbaa</c> (its
+    /// opacity as the last byte) when its shading or rendering is see-through (IfcSurfaceStyleShading.Transparency in IFC4,
+    /// IfcSurfaceStyleRendering's in both schemas), the style's name kept in <see cref="StyleNames"/>. The import takes the
+    /// opacity off before it keeps a colour (<see cref="Opacity"/>) and gives such a part a material of that look.
+    /// </summary>
+    string? Colour(object? styles, int depth = 0)
+    {
+        foreach (var s in Items(styles))
+        {
+            if (s.Type == "IFCPRESENTATIONSTYLEASSIGNMENT") { Deeper(depth, s); if (Colour(s[0], depth + 1) is { } c) return c; continue; }
+            if (s.Type != "IFCSURFACESTYLE") continue;
+            foreach (var r in Items(s[2]))
+                if (File.Get(r[0]) is { Type: "IFCCOLOURRGB" } rgb)
+                {
+                    var hex = HexColor.Of(Num(rgb[1]), Num(rgb[2]), Num(rgb[3]));
+                    var transparency = r.Type is "IFCSURFACESTYLESHADING" or "IFCSURFACESTYLERENDERING" && r.Args.Count > 1 ? Math.Clamp(Num(r[1]), 0, 1) : 0;
+                    var alpha = (int)Math.Round((1 - transparency) * 255);
+                    if (alpha >= 255) return hex;
+                    var key = $"{hex}{alpha:x2}";
+                    if (Str(s[0]) is { Length: > 0 } name) StyleNames.TryAdd(key, name);
+                    return key;
+                }
+        }
+        return null;
+    }
+
+    /// <summary>The names of the see-through styles, by the colour and opacity <see cref="Colour"/> gives them (#rrggbbaa).</summary>
+    public Dictionary<string, string> StyleNames { get; } = [];
+
+    /// <summary>A colour as the model reads it split into <c>#rrggbb</c> and its opacity (1 for a colour without one).</summary>
+    public static (string Colour, double Opacity) Opacity(string colour) => HexColor.SplitAlpha(colour);
+
+    // ─── Properties ──────────────────────────────────────────────────────────
+
+    /// <summary>A product's property sets and quantity sets: set name → property → value as text.</summary>
+    public Dictionary<string, Dictionary<string, string>> Properties(int product) => Properties(product, null, false);
+
+    /// <summary>
+    /// The product's property and quantity sets as text, by set: those <paramref name="keep"/> keeps (all without it),
+    /// a number written as text shown as the number it is when <paramref name="numbers"/> (<see cref="IfcValueText"/>).
+    /// </summary>
+    public Dictionary<string, Dictionary<string, string>> Properties(int product, Func<string, bool>? keep, bool numbers)
+    {
+        var o = new Dictionary<string, Dictionary<string, string>>();
+        foreach (var d in _definitions.GetValueOrDefault(product) ?? [])
+        {
+            if (File.Entities.GetValueOrDefault(d) is not { } set) continue;
+            if (keep != null && !keep(Str(set[2]) ?? set.Type)) continue;
+            var props = new Dictionary<string, string>();
+            if (set.Type == "IFCPROPERTYSET")
+                foreach (var p in Items(set[4]))
+                    props[Str(p[0]) ?? "?"] = p.Type switch
+                    {
+                        "IFCPROPERTYSINGLEVALUE" when numbers && p[2] is StepTyped { Value: string txt } && IfcValueText.Parse(txt) is { } parsed => parsed.Display,
+                        "IFCPROPERTYSINGLEVALUE" => Text(p[2]),
+                        "IFCPROPERTYENUMERATEDVALUE" or "IFCPROPERTYLISTVALUE" => p[2] is List<object?> l ? string.Join(", ", l.Select(Text)) : "",
+                        "IFCPROPERTYBOUNDEDVALUE" => $"{Text(p[3])} – {Text(p[2])}",
+                        _ => p.Type.Replace("IFCPROPERTY", "").ToLowerInvariant(),
+                    };
+            else if (set.Type == "IFCELEMENTQUANTITY")
+                foreach (var q in Items(set[5]))
+                    props[Str(q[0]) ?? "?"] = Text(q[3]);
+            else continue;
+            o[Str(set[2]) ?? set.Type] = props;
+        }
+        return o;
+    }
+
+    /// <summary>
+    /// A product's quantity sets (its IfcElementQuantity) with each value in SI units: by the quantity's own unit when it
+    /// names one, else by the project's unit of its kind (a length in millimetres, an area in square metres, as the project
+    /// assigns them; SI when it assigns none). Each (set, name, kind, value): LENGTH, AREA, VOLUME, WEIGHT, COUNT, TIME.
+    /// </summary>
+    public List<(string Set, string Name, string Kind, double Value)> QuantitiesSi(int product, Func<string, bool>? keep = null)
+    {
+        var o = new List<(string, string, string, double)>();
+        foreach (var d in _definitions.GetValueOrDefault(product) ?? [])
+        {
+            if (File.Entities.GetValueOrDefault(d) is not { Type: "IFCELEMENTQUANTITY" } set) continue;
+            var setName = Str(set[2]) ?? set.Type;
+            if (keep != null && !keep(setName)) continue;
+            foreach (var q in Items(set[5]))
+            {
+                var (kind, unitType) = q.Type switch
+                {
+                    "IFCQUANTITYLENGTH" => ("LENGTH", "LENGTHUNIT"), "IFCQUANTITYAREA" => ("AREA", "AREAUNIT"), "IFCQUANTITYVOLUME" => ("VOLUME", "VOLUMEUNIT"),
+                    "IFCQUANTITYWEIGHT" => ("WEIGHT", "MASSUNIT"), "IFCQUANTITYCOUNT" => ("COUNT", null), "IFCQUANTITYTIME" => ("TIME", "TIMEUNIT"),
+                    _ => ((string?)null, (string?)null),
+                };
+                if (kind == null || Str(q[0]) is not { Length: > 0 } name || q.Args.Count < 4 || q[3] is not (double or long or StepTyped)) continue;
+                var factor = unitType == null ? 1 : File.Get(q[2]) is { } own ? UnitSize(own, 0) : ProjectUnit(unitType);
+                o.Add((setName, name, kind, Num(q[3]) * factor));
+            }
+        }
+        return o;
+    }
+
+    readonly Dictionary<string, double> _projectUnits = [];
+
+    /// <summary>
+    /// The size in SI of a value's unit: its own (a property's Unit) when it names one, else the project's of
+    /// <paramref name="unitType"/> (an area in square metres or millimetres, as the project assigns it; SI when it assigns none).
+    /// </summary>
+    internal double UnitOf(object? own, string unitType) => File.Get(own) is { } unit ? UnitSize(unit, 0) : ProjectUnit(unitType);
+
+    /// <summary>The size in SI of the project's unit of a type (LENGTHUNIT, AREAUNIT…): 1 when it assigns none.</summary>
+    internal double ProjectUnit(string unitType)
+    {
+        lock (_projectUnits)
+        {
+            if (_projectUnits.TryGetValue(unitType, out var known)) return known;
+            var project = File.OfType("IFCPROJECT").FirstOrDefault() ?? File.OfType("IFCPROJECTLIBRARY").FirstOrDefault();
+            var size = 1.0;
+            foreach (var u in Items(File.Get(project?[8])?[0]))
+                if ((u[1] as StepEnum)?.Value == unitType) { size = UnitSize(u, 0); break; }
+            return _projectUnits[unitType] = size;
+        }
+    }
+
+    static string Text(object? v) => v switch
+    {
+        StepTyped { Value: StepEnum e } => e.Value switch { "T" => "yes", "F" => "no", _ => e.Value.ToLowerInvariant() },
+        StepTyped t => Text(t.Value),
+        StepEnum e => e.Value,
+        // Four decimals, as a value is read; one smaller than that by its first significant digits, not as 0.
+        double d => (d != 0 && Math.Abs(d) < 1e-3 ? d.ToString("G4", System.Globalization.CultureInfo.InvariantCulture) : Math.Round(d, 4).ToString(System.Globalization.CultureInfo.InvariantCulture)),
+        long l => l.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        string s => s,
+        null => "",
+        _ => v.ToString() ?? "",
+    };
+
+    // ─── Placements ──────────────────────────────────────────────────────────
+
+    Vec3 Point(object? r)
+    {
+        var p = File.Get(r);
+        if (p?[0] is not List<object?> c) return Vec3.Zero;
+        return new Vec3(Num(c.ElementAtOrDefault(0)) * _len, Num(c.ElementAtOrDefault(1)) * _len, c.Count > 2 ? Num(c[2]) * _len : 0);
+    }
+
+    Vec3? Direction(object? r)
+    {
+        if (File.Get(r)?[0] is not List<object?> c) return null;
+        var d = new Vec3(Num(c.ElementAtOrDefault(0)), Num(c.ElementAtOrDefault(1)), c.Count > 2 ? Num(c[2]) : 0);
+        return d.Length < 1e-12 ? null : d.Normalized();
+    }
+
+    /// <summary>An IfcAxis2Placement (2D or 3D) as a transform.</summary>
+    Xf Axis2(object? r)
+    {
+        var a = File.Get(r);
+        if (a == null) return Xf.Identity;
+        var o = Point(a[0]);
+        if (a.Type == "IFCAXIS2PLACEMENT2D")
+        {
+            var x2 = Direction(a[1]) ?? new Vec3(1, 0, 0);
+            return new Xf(x2, new Vec3(-x2.Y, x2.X, 0), new Vec3(0, 0, 1), o);
+        }
+        var z = Direction(a[1]) ?? new Vec3(0, 0, 1);
+        var x = Direction(a[2]) ?? (Math.Abs(z.X) < 0.9 ? new Vec3(1, 0, 0) : new Vec3(0, 1, 0));
+        x = (x - z * Vec3.Dot(x, z)).Normalized();
+        return new Xf(x, Vec3.Cross(z, x), z, o);
+    }
+
+    /// <summary>An object placement, relative to what it is placed in, as world coordinates.</summary>
+    public Xf Placement(object? r)
+    {
+        if (r is not StepRef id) return Xf.Identity;
+        if (_placements.TryGetValue(id.Id, out var known)) return known;
+        _placements[id.Id] = Xf.Identity; // a cycle stops here
+        var p = File.Get(r);
+        // A linear placement (IFC 4.3) by its CartesianPosition, the absolute frame it carries; without one, where it is placed in.
+        var xf = p?.Type switch
+        {
+            "IFCLOCALPLACEMENT" => Placement(p[0]).Then(Axis2(p[1])),
+            "IFCLINEARPLACEMENT" => p.Args.Count > 2 && p[2] is StepRef ? Placement(p[0]).Then(Axis2(p[2])) : Placement(p[0]),
+            _ => Xf.Identity,
+        };
+        return _placements[id.Id] = xf;
+    }
+
+    Xf Operator(StepEntity? t)
+    {
+        if (t == null) return Xf.Identity;
+        var x = Direction(t[0]) ?? new Vec3(1, 0, 0);
+        var is3 = t.Type.Contains("3D");
+        var z = is3 ? Direction(t[4]) ?? new Vec3(0, 0, 1) : new Vec3(0, 0, 1);
+        var y = Direction(t[1]) ?? Vec3.Cross(z, x);
+        var s = t[3] is null ? 1 : Num(t[3]);
+        // Scale2 is attribute 4 of a 2D non-uniform operator, 5 of a 3D one (whose attribute 4 is Axis3); Scale3, 6.
+        var nonUniform = t.Type.Contains("NONUNIFORM");
+        var scale2 = is3 ? 5 : 4;
+        double sy = nonUniform && t[scale2] != null ? Num(t[scale2]) : s, sz = nonUniform && is3 && t[6] != null ? Num(t[6]) : s;
+        return new Xf(x * s, y * sy, z * sz, Point(t[2]));
+    }
+
+    // ─── Shapes ──────────────────────────────────────────────────────────────
+
+    static readonly HashSet<string> NotBody = ["AXIS", "FOOTPRINT", "BOX", "ANNOTATION", "PROFILE", "SURFACE", "REFERENCE", "LIGHTSOURCE"];
+
+    readonly System.Collections.Concurrent.ConcurrentDictionary<(int, bool), Lazy<(List<(MeshBuilder Mesh, string? Colour)> Body, List<MeshBuilder> Openings)>> _shapes = [];
+
+    /// <summary>
+    /// A product's body as meshes in world coordinates, each with its colour;
+    /// the openings that void it, as meshes too. With booleans, a clipped or
+    /// subtracted body is cut; without, it is its first operand. Evaluated once
+    /// per product (with booleans or without, only where it has any): its bounds,
+    /// extents, footprint and body asked it up to four times, and a machine's
+    /// mesh of millions of faces took tens of seconds each. The meshes are
+    /// shared: callers read them, or weld copies.
+    /// </summary>
+    public (List<(MeshBuilder Mesh, string? Colour)> Body, List<MeshBuilder> Openings) Shape(int product, ISolidBooleans? booleans = null)
+    {
+        var cut = booleans != null && HasBooleans(product);
+        return _shapes.GetOrAdd((product, cut), _ => new(() => Evaluate(product, cut ? booleans : null))).Value;
+    }
+
+    /// <summary>Whether a product's body (or an opening's) has a boolean anywhere in it: only then do booleans change its shape.</summary>
+    bool HasBooleans(int product)
+    {
+        bool In(StepEntity? item, int depth) => item != null && depth < 32 && (item.Type is "IFCBOOLEANRESULT" or "IFCBOOLEANCLIPPINGRESULT"
+            || item.Type == "IFCMAPPEDITEM" && Items(File.Get(File.Get(item[0])?[1])?[3]).Any(x => In(x, depth + 1)));
+        bool Of(StepEntity? e) => e != null && Items(File.Get(e[6])?[2]).Any(rep => Items(rep[3]).Any(x => In(x, 0)));
+        return Of(File.Entities.GetValueOrDefault(product)) || (_openings.GetValueOrDefault(product) ?? []).Any(o => Of(File.Entities.GetValueOrDefault(o)));
+    }
+
+    (List<(MeshBuilder Mesh, string? Colour)> Body, List<MeshBuilder> Openings) Evaluate(int product, ISolidBooleans? booleans)
+    {
+        var e = File.Entities[product];
+        var body = Body(e, booleans);
+        var openings = (_openings.GetValueOrDefault(product) ?? []).Select(o => File.Entities.GetValueOrDefault(o)).OfType<StepEntity>()
+            .SelectMany(o => Body(o, booleans).Select(b => b.Mesh)).ToList();
+        return (body, openings);
+    }
+
+    /// <summary>
+    /// An opening's own body (an IfcOpeningElement voiding a product), as meshes in world coordinates: what
+    /// <see cref="Shape"/> cuts the product by, read alone so a reference can keep its openings (docs/spec-ifc.md,
+    /// Golurile referințelor).
+    /// </summary>
+    public List<MeshBuilder> OpeningBody(int opening, ISolidBooleans? booleans = null) =>
+        File.Entities.GetValueOrDefault(opening) is { } o ? [.. Body(o, booleans != null && HasBooleans(opening) ? booleans : null).Select(b => b.Mesh)] : [];
+
+    List<(MeshBuilder Mesh, string? Colour)> Body(StepEntity e, ISolidBooleans? booleans)
+    {
+        var o = new List<(MeshBuilder Mesh, string? Colour)>();
+        var place = Placement(e[5]);
+        foreach (var rep in Items(File.Get(e[6])?[2]))
+        {
+            if (rep[1] is string id && NotBody.Contains(id.ToUpperInvariant())) continue;
+            foreach (var item in Items(rep[3])) Item(item, place, o, null, booleans);
+        }
+        return o;
+    }
+
+    /// <summary>
+    /// A file whose references loop (a mapped item whose map holds it, a boolean that is its own operand) or nest past
+    /// <see cref="StepFile.MaxDepth"/>: malformed, read no further (a stack overflow would end the engine).
+    /// </summary>
+    static void Deeper(int depth, StepEntity at)
+    {
+        if (depth > StepFile.MaxDepth) throw new FormatException($"IFC #{at.Id}: references nested deeper than {StepFile.MaxDepth} (they loop).");
+    }
+
+    void Item(StepEntity item, Xf at, List<(MeshBuilder Mesh, string? Colour)> o, string? inherited, ISolidBooleans? booleans, int depth = 0)
+    {
+        Deeper(depth, item);
+        var colour = _colours.GetValueOrDefault(item.Id) ?? inherited;
+        if (item.Type == "IFCMAPPEDITEM")
+        {
+            var map = File.Get(item[0]);
+            var xf = at.Then(Operator(File.Get(item[1]))).Then(Axis2(map?[0]));
+            foreach (var sub in Items(File.Get(map?[1])?[3])) Item(sub, xf, o, colour, booleans, depth + 1);
+            return;
+        }
+        if (item.Type is "IFCBOOLEANRESULT" or "IFCBOOLEANCLIPPINGRESULT")
+        {
+            var op = (item[0] as StepEnum)?.Value;
+            var first = new List<(MeshBuilder Mesh, string? Colour)>();
+            if (File.Get(item[1]) is { } a) Item(a, at, first, colour, booleans, depth + 1);
+            if (op == "UNION") { o.AddRange(first); if (File.Get(item[2]) is { } b) Item(b, at, o, colour, booleans, depth + 1); return; }
+            // Cut by the second operand where the booleans are; else (or where they fail: a body that is not closed) the first operand as it is.
+            var cutter = booleans == null || first.Count == 0 ? null : Cutter(File.Get(item[2]), at, first.SelectMany(f => f.Mesh.V).ToList(), booleans, depth + 1);
+            foreach (var (mesh, c) in first)
+            {
+                Solid? solid = null;
+                if (cutter != null) { var w = mesh.Welded(); solid = SolidFromMesh.Build(w.V, w.T); }
+                if (solid == null) { o.Add((mesh, c)); continue; }
+                Solid? cut;
+                try { cut = op == "INTERSECTION" ? booleans!.Intersection(solid, cutter!) : booleans!.Difference(solid, [cutter!]); }
+                catch (InvalidOperationException) { o.Add((mesh, c)); continue; }
+                if (cut != null) o.Add((MeshBuilder.FromSolid(cut), c));
+            }
+            return;
+        }
+        var m = Solid(item);
+        if (m == null || m.T.Count == 0) return;
+        m.Transform(at);
+        o.Add((m, colour));
+    }
+
+    /// <summary>
+    /// The second operand of a boolean as a solid, in world coordinates: a
+    /// half-space as a block far larger than the body it cuts (on the side of
+    /// its material: against its plane's normal when it agrees), bounded by its
+    /// polygon when it has one; any other solid as it is.
+    /// </summary>
+    Solid? Cutter(StepEntity? s, Xf at, List<Vec3> body, ISolidBooleans booleans, int depth)
+    {
+        if (s == null) return null;
+        Deeper(depth, s);
+        if (s.Type is "IFCHALFSPACESOLID" or "IFCBOXEDHALFSPACE" or "IFCPOLYGONALBOUNDEDHALFSPACE")
+        {
+            var size = 0.0;
+            foreach (var p in body) size = Math.Max(size, (p - body[0]).Length);
+            var big = 2 * size + 10;
+            var plane = at.Then(Axis2(File.Get(s[0])?[0]));
+            var agrees = (s[1] as StepEnum)?.Value != "F";
+            List<Vec3> square = [new(-big, -big, 0), new(big, -big, 0), new(big, big, 0), new(-big, big, 0)];
+            var block = Prism(square, [], new Vec3(0, 0, big));
+            if (agrees) block.Transform(new Xf(new(1, 0, 0), new(0, 1, 0), new(0, 0, 1), new(0, 0, -big)));
+            block.Transform(plane);
+            var half = SolidFromMesh.Build(block.V, block.T);
+            if (s.Type != "IFCPOLYGONALBOUNDEDHALFSPACE" || half == null) return half;
+            var outline = Curve(File.Get(s[3]));
+            if (outline.Count < 3) return half;
+            var prism = Prism(outline, [], new Vec3(0, 0, 2 * big));
+            prism.Transform(at.Then(Axis2(s[2])).Then(new Xf(new(1, 0, 0), new(0, 1, 0), new(0, 0, 1), new(0, 0, -big))));
+            if (SolidFromMesh.Build(prism.V, prism.T) is not { } bound) return half;
+            try { return booleans.Intersection(half, bound); }
+            catch (InvalidOperationException) { return half; } // unbounded, rather than not cut
+        }
+        var m = Solid(s);
+        if (m == null) return null;
+        m.Transform(at);
+        var w = m.Welded();
+        return SolidFromMesh.Build(w.V, w.T);
+    }
+
+    MeshBuilder? Solid(StepEntity s) => s.Type switch
+    {
+        "IFCEXTRUDEDAREASOLID" or "IFCEXTRUDEDAREASOLIDTAPERED" => Extrusion(s),
+        "IFCFACETEDBREP" or "IFCFACETEDBREPWITHVOIDS" => Faces(Items(File.Get(s[0])?[0])),
+        "IFCSHELLBASEDSURFACEMODEL" => Surfaces(Items(s[0]).SelectMany(sh => Items(sh[0]))),
+        "IFCFACEBASEDSURFACEMODEL" => Surfaces(Items(s[0]).SelectMany(sh => Items(sh[0]))),
+        "IFCTRIANGULATEDFACESET" => TriangulatedSet(s),
+        "IFCPOLYGONALFACESET" => PolygonalSet(s),
+        "IFCREVOLVEDAREASOLID" => Revolution(s),
+        "IFCSWEPTDISKSOLID" => Tube(s),
+        "IFCADVANCEDBREP" or "IFCADVANCEDBREPWITHVOIDS" => AdvancedFaces(Items(File.Get(s[0])?[0])),
+        _ => null,
+    };
+
+    /// <summary>A surface model's faces: plain ones as polygons, advanced ones on their surfaces.</summary>
+    MeshBuilder Surfaces(IEnumerable<StepEntity> faces)
+    {
+        var all = faces.ToList();
+        var m = Faces(all.Where(f => f.Type != "IFCADVANCEDFACE"));
+        m.Append(AdvancedFaces(all.Where(f => f.Type == "IFCADVANCEDFACE")));
+        return m;
+    }
+
+    /// <summary>From this many faces, a shell is built in parts on every core.</summary>
+    const int FacesInParts = 20_000;
+
+    /// <summary>
+    /// A shell's faces as one mesh. A big one (a machine exported as millions of triangles) is
+    /// built in parts, one per core, each with its own vertex index, then appended: a point two
+    /// parts share comes twice, which <see cref="MeshBuilder.Welded"/> makes one again.
+    /// </summary>
+    MeshBuilder Faces(IEnumerable<StepEntity> faces)
+    {
+        var all = faces as IReadOnlyList<StepEntity> ?? faces.ToList();
+        if (all.Count < FacesInParts) return FacesOf(all);
+        var parts = Environment.ProcessorCount * 2;
+        var size = (all.Count + parts - 1) / parts;
+        var meshes = new MeshBuilder[(all.Count + size - 1) / size];
+        // What a part throws (a malformed face) is the element's, as it would be read in one: not an AggregateException.
+        try { Parallel.For(0, meshes.Length, k => meshes[k] = FacesOf(all.Skip(k * size).Take(size).ToList())); }
+        catch (AggregateException ae) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Throw(ae.InnerExceptions[0]); }
+        var m = meshes[0];
+        for (var k = 1; k < meshes.Length; k++) m.Append(meshes[k]);
+        return m;
+    }
+
+    MeshBuilder FacesOf(IReadOnlyList<StepEntity> faces)
+    {
+        var m = new MeshBuilder();
+        var index = new Dictionary<int, int>();
+        int[] Loop(StepEntity bound)
+        {
+            var loop = File.Get(bound[0]);
+            var ids = loop?.Type == "IFCPOLYLOOP" ? Refs(loop[0]).ToArray() : [];
+            var ring = ids.Select(p => index.TryGetValue(p, out var k) ? k : index[p] = m.Add(Point(new StepRef(p)))).ToArray();
+            return (bound[1] as StepEnum)?.Value == "F" ? [.. ring.Reverse()] : ring;
+        }
+        foreach (var f in faces)
+        {
+            var bounds = Items(f[0]);
+            var outer = bounds.FirstOrDefault(b => b.Type == "IFCFACEOUTERBOUND") ?? bounds.FirstOrDefault();
+            if (outer == null) continue;
+            m.Polygon(Loop(outer), [.. bounds.Where(b => b != outer).Select(Loop)]);
+        }
+        return m;
+    }
+
+    List<Vec3> PointList(object? r) =>
+        File.Get(r)?[0] is List<object?> rows
+            ? [.. rows.OfType<List<object?>>().Select(c => new Vec3(Num(c.ElementAtOrDefault(0)) * _len, Num(c.ElementAtOrDefault(1)) * _len, c.Count > 2 ? Num(c[2]) * _len : 0))]
+            : [];
+
+    static int[] Indices(object? v) => v is List<object?> l ? [.. l.Select(x => (int)Num(x))] : [];
+
+    /// <summary>
+    /// A face set's index (from 1, through its PnIndex when it has one) as a vertex from 0, or -1 when it falls outside
+    /// the lists: a bad index drops its triangle or vertex, not the element.
+    /// </summary>
+    static int Vertex(int i, int[] pn, int count)
+    {
+        if (pn.Length > 0) i = i >= 1 && i <= pn.Length ? pn[i - 1] : 0;
+        return i >= 1 && i <= count ? i - 1 : -1;
+    }
+
+    MeshBuilder TriangulatedSet(StepEntity s)
+    {
+        var m = new MeshBuilder();
+        foreach (var p in PointList(s[0])) m.Add(p);
+        var pn = Indices(s[4]);
+        if (s[3] is List<object?> tris)
+            foreach (var t in tris.OfType<List<object?>>().Select(Indices).Where(t => t.Length == 3))
+            {
+                int a = Vertex(t[0], pn, m.V.Count), b = Vertex(t[1], pn, m.V.Count), c = Vertex(t[2], pn, m.V.Count);
+                if (a >= 0 && b >= 0 && c >= 0) m.T.Add((a, b, c));
+            }
+        return m;
+    }
+
+    MeshBuilder PolygonalSet(StepEntity s)
+    {
+        var m = new MeshBuilder();
+        foreach (var p in PointList(s[0])) m.Add(p);
+        var pn = Indices(s[3]);
+        int[] At(int[] ix) => [.. ix.Select(i => Vertex(i, pn, m.V.Count)).Where(i => i >= 0)];
+        foreach (var f in Items(s[2]))
+            m.Polygon(At(Indices(f[0])), f.Type == "IFCINDEXEDPOLYGONALFACEWITHVOIDS" && f[1] is List<object?> inner ? [.. inner.Select(i => At(Indices(i)))] : []);
+        return m;
+    }
+
+    MeshBuilder? Extrusion(StepEntity s)
+    {
+        var areas = Profile(File.Get(s[0]));
+        if (areas.Count == 0) return null;
+        var dir = Direction(s[2]) ?? new Vec3(0, 0, 1);
+        var depth = Num(s[3]) * _len;
+        var m = new MeshBuilder();
+        foreach (var (outer, holes) in areas) m.Append(Prism(outer, holes, dir * depth));
+        m.Transform(Axis2(s[1]));
+        return m;
+    }
+
+    /// <summary>A profile swept along a vector: two caps and a quad on every edge, outward.</summary>
+    static MeshBuilder Prism(List<Vec3> outer, List<List<Vec3>> holes, Vec3 v)
+    {
+        var m = new MeshBuilder();
+        // Swept downwards: the same body, swept up from its other cap (the profile moved by the sweep), so the caps keep their faces outward.
+        if (v.Z < 0)
+        {
+            var d = v;
+            outer = [.. outer.Select(p => p + d)];
+            holes = [.. holes.Select(h => h.Select(p => p + d).ToList())];
+            v = -v;
+        }
+        static List<Vec3> Oriented(List<Vec3> loop, bool ccw) => Area(loop) > 0 == ccw ? loop : [.. Enumerable.Reverse(loop)];
+        var loops = new List<List<Vec3>> { Oriented(outer, true) };
+        loops.AddRange(holes.Select(h => Oriented(h, false)));
+        var bottom = loops.Select(l => l.Select(m.Add).ToArray()).ToList();
+        var top = loops.Select(l => l.Select(p => m.Add(p + v)).ToArray()).ToList();
+        m.Polygon([.. bottom[0].Reverse()], [.. bottom.Skip(1).Select(h => h.Reverse().ToArray())]);
+        m.Polygon(top[0], [.. top.Skip(1)]);
+        for (var k = 0; k < loops.Count; k++)
+            for (var i = 0; i < bottom[k].Length; i++)
+            {
+                int a0 = bottom[k][i], b0 = bottom[k][(i + 1) % bottom[k].Length], a1 = top[k][i], b1 = top[k][(i + 1) % top[k].Length];
+                m.T.Add((a0, b0, b1)); m.T.Add((a0, b1, a1));
+            }
+        return m;
+    }
+
+    /// <summary>A loop's signed area in plan (Newell's normal's z), positive counter-clockwise.</summary>
+    static double Area(List<Vec3> l) => VecMath.NewellNormal(l).Z;
+
+    MeshBuilder? Revolution(StepEntity s)
+    {
+        var areas = Profile(File.Get(s[0]));
+        if (areas.Count == 0) return null;
+        var axis = File.Get(s[2]);
+        var origin = Point(axis?[0]);
+        var dir = Direction(axis?[1]) ?? new Vec3(0, 1, 0);
+        var angle = Num(s[3]) * _angle;
+        var ring = areas[0].Outer;
+        // By the chord rule at the profile's point farthest from the axis.
+        var far = ring.Count == 0 ? 0 : ring.Max(p => { var v = p - origin; return (v - dir.Normalized() * Vec3.Dot(dir.Normalized(), v)).Length; });
+        var steps = Chords.Count(far, angle, 3);
+        var m = new MeshBuilder();
+        var rows = Enumerable.Range(0, steps + 1).Select(k => ring.Select(p => m.Add(Rotate(p, origin, dir, angle * k / steps))).ToArray()).ToList();
+        for (var k = 0; k < steps; k++)
+            for (var i = 0; i < ring.Count; i++)
+            {
+                int a0 = rows[k][i], b0 = rows[k][(i + 1) % ring.Count], a1 = rows[k + 1][i], b1 = rows[k + 1][(i + 1) % ring.Count];
+                m.T.Add((a0, b0, b1)); m.T.Add((a0, b1, a1));
+            }
+        if (Math.Abs(angle) < 2 * Math.PI - 1e-6) { m.Polygon(rows[0], []); m.Polygon([.. rows[^1].Reverse()], []); }
+        m.Transform(Axis2(s[1]));
+        return m;
+    }
+
+    static Vec3 Rotate(Vec3 p, Vec3 o, Vec3 axis, double a)
+    {
+        var v = p - o;
+        var c = Math.Cos(a); var sn = Math.Sin(a);
+        return o + v * c + Vec3.Cross(axis, v) * sn + axis * (Vec3.Dot(axis, v) * (1 - c));
+    }
+
+    MeshBuilder? Tube(StepEntity s)
+    {
+        var path = Curve(File.Get(s[0]), out var closed);
+        var r = Num(s[1]) * _len;
+        if (path.Count < 2 || r <= 0) return null;
+        // A hoop (a closed directrix: a circle, a closed stirrup) goes round to its start, without caps.
+        closed &= path.Count >= 3;
+        var n = path.Count;
+        // A bar or a pipe by the chord rule, but never under 8 sides nor finer than needed: a rebar cage is thousands of them.
+        var sides = Chords.Count(r, 2 * Math.PI, 8, Math.PI / 4);
+        var m = new MeshBuilder();
+        var rings = new List<int[]>();
+        for (var i = 0; i < n; i++)
+        {
+            var t = closed ? (path[(i + 1) % n] - path[(i + n - 1) % n]).Normalized() : (path[Math.Min(i + 1, n - 1)] - path[Math.Max(i - 1, 0)]).Normalized();
+            var u = Vec3.Cross(t, Math.Abs(t.Z) < 0.9 ? new Vec3(0, 0, 1) : new Vec3(1, 0, 0)).Normalized();
+            var w = Vec3.Cross(t, u);
+            rings.Add([.. Enumerable.Range(0, sides).Select(k => m.Add(path[i] + u * (r * Math.Cos(2 * Math.PI * k / sides)) + w * (r * Math.Sin(2 * Math.PI * k / sides))))]);
+        }
+        for (var i = 0; i < (closed ? n : n - 1); i++)
+            for (var k = 0; k < sides; k++)
+            {
+                var next = rings[(i + 1) % n];
+                int a0 = rings[i][k], b0 = rings[i][(k + 1) % sides], a1 = next[k], b1 = next[(k + 1) % sides];
+                m.T.Add((a0, b0, b1)); m.T.Add((a0, b1, a1));
+            }
+        if (closed) return m;
+        m.Polygon([.. rings[0].Reverse()], []);
+        m.Polygon(rings[^1], []);
+        return m;
+    }
+
+    // ─── Profiles and curves ─────────────────────────────────────────────────
+
+    /// <summary>A profile as areas (an outer loop and its holes) in its plane, z = 0.</summary>
+    List<(List<Vec3> Outer, List<List<Vec3>> Holes)> Profile(StepEntity? p, int depth = 0)
+    {
+        if (p == null) return [];
+        Deeper(depth, p);
+        List<(List<Vec3>, List<List<Vec3>>)> One(List<Vec3> outer, params List<Vec3>[] holes) => outer.Count >= 3 ? [(outer, [.. holes.Where(h => h.Count >= 3)])] : [];
+        List<Vec3> Placed(List<Vec3> pts) { var xf = Axis2(p[2]); return [.. pts.Select(xf.Apply)]; }
+        List<Vec3> Rect(double w, double h) => [new(-w / 2, -h / 2, 0), new(w / 2, -h / 2, 0), new(w / 2, h / 2, 0), new(-w / 2, h / 2, 0)];
+        List<Vec3> Circle(double r, double r2 = -1) { var n = Chords.Circle(Math.Max(r, r2)); return [.. Enumerable.Range(0, n).Select(k => new Vec3(r * Math.Cos(2 * Math.PI * k / n), (r2 < 0 ? r : r2) * Math.Sin(2 * Math.PI * k / n), 0))]; }
+        double L(int i) => Num(p[i]) * _len;
+        switch (p.Type)
+        {
+            case "IFCRECTANGLEPROFILEDEF": case "IFCROUNDEDRECTANGLEPROFILEDEF": return One(Placed(Rect(L(3), L(4))));
+            case "IFCRECTANGLEHOLLOWPROFILEDEF": return One(Placed(Rect(L(3), L(4))), Placed(Rect(L(3) - 2 * L(5), L(4) - 2 * L(5))));
+            case "IFCCIRCLEPROFILEDEF": return One(Placed(Circle(L(3))));
+            case "IFCCIRCLEHOLLOWPROFILEDEF": return One(Placed(Circle(L(3))), Placed(Circle(L(3) - L(4))));
+            case "IFCELLIPSEPROFILEDEF": return One(Placed(Circle(L(3), L(4))));
+            case "IFCISHAPEPROFILEDEF":
+            {
+                double w = L(3) / 2, d = L(4) / 2, t = L(5) / 2, f = L(6);
+                return One(Placed([new(-w, -d, 0), new(w, -d, 0), new(w, -d + f, 0), new(t, -d + f, 0), new(t, d - f, 0), new(w, d - f, 0), new(w, d, 0), new(-w, d, 0), new(-w, d - f, 0), new(-t, d - f, 0), new(-t, -d + f, 0), new(-w, -d + f, 0)]));
+            }
+            case "IFCTSHAPEPROFILEDEF":
+            {
+                double d = L(3), w = L(4) / 2, t = L(5) / 2, f = L(6);
+                return One(Placed([new(-t, -d / 2, 0), new(t, -d / 2, 0), new(t, d / 2 - f, 0), new(w, d / 2 - f, 0), new(w, d / 2, 0), new(-w, d / 2, 0), new(-w, d / 2 - f, 0), new(-t, d / 2 - f, 0)]));
+            }
+            case "IFCLSHAPEPROFILEDEF":
+            {
+                double d = L(3), w = p[4] is null ? d : L(4), t = L(5);
+                return One(Placed([new(-w / 2, -d / 2, 0), new(w / 2, -d / 2, 0), new(w / 2, -d / 2 + t, 0), new(-w / 2 + t, -d / 2 + t, 0), new(-w / 2 + t, d / 2, 0), new(-w / 2, d / 2, 0)]));
+            }
+            case "IFCUSHAPEPROFILEDEF":
+            {
+                double d = L(3) / 2, w = L(4) / 2, t = L(5), f = L(6);
+                return One(Placed([new(-w, -d, 0), new(w, -d, 0), new(w, -d + f, 0), new(-w + t, -d + f, 0), new(-w + t, d - f, 0), new(w, d - f, 0), new(w, d, 0), new(-w, d, 0)]));
+            }
+            case "IFCASYMMETRICISHAPEPROFILEDEF":
+            {
+                // The bottom flange at 3 and 6, the top at 8 and 9, in IFC4 and IFC2x3 alike.
+                double wb = L(3) / 2, d = L(4) / 2, t = L(5) / 2, fb = L(6), wt = p[8] is null ? wb : L(8) / 2, ft = p[9] is null ? fb : L(9);
+                // With a fillet, as a library's asymmetric I is drawn: it has no sharp body in Lapin to be the same as (it is kept as an outline).
+                if (p[7] is not null && L(7) > 0 && Lapin.Platform.Analysis.SectionProperties.RingsOf(new Lapin.Platform.Analysis.SectionShape("asymI", 2 * wt, 2 * d, 2 * t, ft) { Root = L(7), Width2 = 2 * wb, Flange2 = fb }) is [{ } rounded, ..])
+                    return One(Placed([.. rounded.Select(q => new Vec3(q.X, q.Y, 0))]));
+                return One(Placed([new(-wb, -d, 0), new(wb, -d, 0), new(wb, -d + fb, 0), new(t, -d + fb, 0), new(t, d - ft, 0), new(wt, d - ft, 0), new(wt, d, 0), new(-wt, d, 0), new(-wt, d - ft, 0), new(-t, d - ft, 0), new(-t, -d + fb, 0), new(-wb, -d + fb, 0)]));
+            }
+            case "IFCCSHAPEPROFILEDEF":
+            {
+                double d = L(3) / 2, w = L(4) / 2, t = L(5), g = L(6);
+                return One(Placed([new(-w, -d, 0), new(w, -d, 0), new(w, -d + g, 0), new(w - t, -d + g, 0), new(w - t, -d + t, 0), new(-w + t, -d + t, 0), new(-w + t, d - t, 0), new(w - t, d - t, 0), new(w - t, d - g, 0), new(w, d - g, 0), new(w, d, 0), new(-w, d, 0)]));
+            }
+            case "IFCZSHAPEPROFILEDEF":
+            {
+                // The web on the axis, the bottom flange to the left, the top to the right, each running from the web's far face.
+                double d = L(3) / 2, w = L(4), t = L(5) / 2, f = L(6);
+                return One(Placed([new(t - w, -d, 0), new(t, -d, 0), new(t, d - f, 0), new(w - t, d - f, 0), new(w - t, d, 0), new(-t, d, 0), new(-t, -d + f, 0), new(t - w, -d + f, 0)]));
+            }
+            case "IFCARBITRARYCLOSEDPROFILEDEF": return One(Curve(File.Get(p[2])));
+            case "IFCARBITRARYPROFILEDEFWITHVOIDS": return One(Curve(File.Get(p[2])), [.. Items(p[3]).Select(Curve)]);
+            case "IFCCOMPOSITEPROFILEDEF": return [.. Items(p[2]).SelectMany(x => Profile(x, depth + 1))];
+            case "IFCDERIVEDPROFILEDEF":
+            {
+                var t = Operator(File.Get(p[3]));
+                return [.. Profile(File.Get(p[2]), depth + 1).Select(a => (a.Outer.Select(t.Apply).ToList(), a.Holes.Select(h => h.Select(t.Apply).ToList()).ToList()))];
+            }
+            default: return [];
+        }
+    }
+
+    /// <summary>A curve as points (arcs by the chord rule), without its closing repeat.</summary>
+    List<Vec3> Curve(StepEntity? c) => Curve(c, out _);
+
+    /// <summary>The file's curve of an id as points, in metres (for the tests).</summary>
+    internal List<Vec3> CurvePoints(int id) => Curve(File.Get(new StepRef(id)));
+
+    /// <summary>A curve as points, without its closing repeat; <paramref name="closed"/>: it came back to its start (a circle, an ellipse, a loop).</summary>
+    List<Vec3> Curve(StepEntity? c, out bool closed, int depth = 0)
+    {
+        closed = false;
+        var o = new List<Vec3>();
+        if (c == null) return o;
+        Deeper(depth, c);
+        if (c.Type is "IFCCIRCLE" or "IFCELLIPSE") closed = true;
+        switch (c.Type)
+        {
+            case "IFCPOLYLINE": o.AddRange(Refs(c[0]).Select(r => Point(new StepRef(r)))); break;
+            case "IFCINDEXEDPOLYCURVE":
+            {
+                var pts = PointList(c[0]);
+                if (c[1] is not List<object?> segs) { o.AddRange(pts); break; }
+                foreach (var seg in segs.OfType<StepTyped>())
+                {
+                    var ix = Indices(seg.Value).Where(i => i >= 1 && i <= pts.Count).Select(i => pts[i - 1]).ToList();
+                    if (seg.Type == "IFCARCINDEX" && ix.Count == 3) o.AddRange(Arc3(ix[0], ix[1], ix[2]));
+                    else o.AddRange(ix);
+                }
+                break;
+            }
+            case "IFCCOMPOSITECURVE":
+                foreach (var seg in Items(c[0]))
+                {
+                    var part = Curve(File.Get(seg[2]), out _, depth + 1);
+                    if ((seg[1] as StepEnum)?.Value == "F") part.Reverse();
+                    o.AddRange(part);
+                }
+                break;
+            case "IFCTRIMMEDCURVE": o.AddRange(Trimmed(c)); break;
+            case "IFCBSPLINECURVEWITHKNOTS" or "IFCRATIONALBSPLINECURVEWITHKNOTS": o.AddRange(SplineCurve(c)); break;
+            case "IFCCIRCLE": { var xf = Axis2(c[0]); var r = Num(c[1]) * _len; var n = Chords.Circle(r); o.AddRange(Enumerable.Range(0, n).Select(k => xf.Apply(new Vec3(r * Math.Cos(2 * Math.PI * k / n), r * Math.Sin(2 * Math.PI * k / n), 0)))); break; }
+            case "IFCELLIPSE": { var xf = Axis2(c[0]); double a = Num(c[1]) * _len, b = Num(c[2]) * _len; var n = Chords.Circle(Math.Max(a, b)); o.AddRange(Enumerable.Range(0, n).Select(k => xf.Apply(new Vec3(a * Math.Cos(2 * Math.PI * k / n), b * Math.Sin(2 * Math.PI * k / n), 0)))); break; }
+        }
+        var clean = new List<Vec3>();
+        foreach (var p in o) if (clean.Count == 0 || (clean[^1] - p).Length > 1e-7) clean.Add(p);
+        if (clean.Count > 2 && (clean[0] - clean[^1]).Length < 1e-7) { clean.RemoveAt(clean.Count - 1); closed = true; }
+        return clean;
+    }
+
+    /// <summary>
+    /// An IfcTrimmedCurve as points: a circle's or an ellipse's arc by the chord rule, a line's piece between its trims.
+    /// Each trim by its parameter (an angle in the project's unit on a conic, a multiple of the direction's vector on a
+    /// line) or its point, the one its MasterRepresentation prefers when it gives both; a trim not finite reads nothing.
+    /// </summary>
+    IEnumerable<Vec3> Trimmed(StepEntity c)
+    {
+        var basis = File.Get(c[0]);
+        var sense = (c[3] as StepEnum)?.Value != "F";
+        var master = (c[4] as StepEnum)?.Value;
+        Vec3? Cart(object? trim) => trim is List<object?> l && l.OfType<StepRef>().FirstOrDefault() is { Id: > 0 } r ? Point(r) : null;
+        double? Param(object? trim) => trim is List<object?> l && l.OfType<StepTyped>().FirstOrDefault(t => t.Type == "IFCPARAMETERVALUE") is { } t ? Num(t) : null;
+        // Which of a trim's two forms is read: the master's when both are there, else the one there is.
+        bool ByParam(object? trim) => Param(trim) != null && (Cart(trim) == null || master != "CARTESIAN");
+        if (basis?.Type is "IFCCIRCLE" or "IFCELLIPSE")
+        {
+            var xf = Axis2(basis[0]);
+            double a = Num(basis[1]) * _len, b = basis.Type == "IFCELLIPSE" ? Num(basis[2]) * _len : a;
+            if (!(a > 0) || !(b > 0) || !double.IsFinite(a) || !double.IsFinite(b)) return [];
+            // A point's parameter on the conic: its angle on the circle the ellipse is squashed from.
+            double Angle(object? trim) => ByParam(trim) ? Param(trim)!.Value * _angle
+                : Cart(trim) is { } p ? Math.Atan2(Vec3.Dot(p - xf.O, xf.Y) / b, Vec3.Dot(p - xf.O, xf.X) / a) : 0;
+            double a1 = Angle(c[1]), a2 = Angle(c[2]);
+            if (!double.IsFinite(a1) || !double.IsFinite(a2)) return [];
+            var sweep = Sweep(a1, a2, sense);
+            if (sweep == 0) return [];
+            a1 = Math.IEEERemainder(a1, 2 * Math.PI);
+            var n = Chords.Count(Math.Max(a, b), sweep, 2);
+            return Enumerable.Range(0, n + 1).Select(k => { var t = a1 + sweep * k / n; return xf.Apply(new Vec3(a * Math.Cos(t), b * Math.Sin(t), 0)); });
+        }
+        if (basis?.Type is "IFCLINE")
+        {
+            var origin = Point(basis[0]);
+            var vector = File.Get(basis[1]);
+            var dir = (Direction(vector?[0]) ?? new Vec3(1, 0, 0)) * (Num(vector?[1]) * _len);
+            // From the first trim to the second, whichever way the line runs (its sense says only which that is).
+            Vec3? End(object? trim)
+            {
+                if (!ByParam(trim)) return Cart(trim);
+                var t = Param(trim)!.Value;
+                return double.IsFinite(t) ? origin + dir * t : null;
+            }
+            var line = new[] { End(c[1]), End(c[2]) }.OfType<Vec3>().Where(p => double.IsFinite(p.X) && double.IsFinite(p.Y) && double.IsFinite(p.Z)).ToList();
+            return line.Count == 2 ? line : [];
+        }
+        var ends = new[] { Cart(c[1]), Cart(c[2]) }.OfType<Vec3>().ToList();
+        return sense ? ends : Enumerable.Reverse(ends);
+    }
+
+    /// <summary>
+    /// The angle from <paramref name="a1"/> to <paramref name="a2"/> along the curve's sense (positive with it, negative
+    /// against it), within one turn; the same angle twice a whole turn. Taken modulo a turn, so a huge parameter ends.
+    /// </summary>
+    internal static double Sweep(double a1, double a2, bool sense)
+    {
+        const double turn = 2 * Math.PI;
+        var d = Math.IEEERemainder(a2 - a1, turn);
+        if (!double.IsFinite(d)) return 0;
+        if (sense) { if (d <= 1e-12) d += turn; }
+        else { if (d >= -1e-12) d -= turn; }
+        return d;
+    }
+
+    /// <summary>The arc through three points, by the chord rule.</summary>
+    static IEnumerable<Vec3> Arc3(Vec3 a, Vec3 b, Vec3 c)
+    {
+        double d = 2 * (a.X * (b.Y - c.Y) + b.X * (c.Y - a.Y) + c.X * (a.Y - b.Y));
+        if (Math.Abs(d) < 1e-12) return [a, b, c];
+        double ux = ((a.X * a.X + a.Y * a.Y) * (b.Y - c.Y) + (b.X * b.X + b.Y * b.Y) * (c.Y - a.Y) + (c.X * c.X + c.Y * c.Y) * (a.Y - b.Y)) / d;
+        double uy = ((a.X * a.X + a.Y * a.Y) * (c.X - b.X) + (b.X * b.X + b.Y * b.Y) * (a.X - c.X) + (c.X * c.X + c.Y * c.Y) * (b.X - a.X)) / d;
+        double r = Math.Sqrt((a.X - ux) * (a.X - ux) + (a.Y - uy) * (a.Y - uy));
+        double A(Vec3 p) => Math.Atan2(p.Y - uy, p.X - ux);
+        double t0 = A(a), t1 = A(b), t2 = A(c);
+        static double Ccw(double from, double to) { var x = to - from; while (x < 0) x += 2 * Math.PI; return x; }
+        var ccw = Ccw(t0, t1) < Ccw(t0, t2);
+        var sweep = ccw ? Ccw(t0, t2) : -Ccw(t2, t0);
+        var n = Chords.Count(r, sweep, 2);
+        return Enumerable.Range(0, n + 1).Select(k => new Vec3(ux + r * Math.Cos(t0 + sweep * k / n), uy + r * Math.Sin(t0 + sweep * k / n), a.Z));
+    }
+}

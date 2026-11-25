@@ -1,0 +1,128 @@
+/**
+ * A roof in the inspector: its style (one click puts every rule back), and
+ * its edges, each an eave or a gable with its own pitch and overhang (blank:
+ * as the roof). The roof's other fields are in the class's own list below.
+ */
+
+import { useEffect, useState } from 'react';
+import { projectOf } from '../../shell/nodeIndex';
+import { Blocks, Settings2 } from 'lucide-react';
+import { notify, useUi } from '../../app/store';
+import { execute, useSession } from '../../engine/session';
+import type { NodeDto } from '../../engine/protocol';
+import { t, useLang } from '../../i18n';
+import { LengthField, NumberField } from '../../shell/cells';
+import { mergeEdge, type Edge } from './roofEdges';
+import { lengthText } from '../../engine/unitsStore';
+import { lengthOf, MIN_SIZE, openingName, widthOf, type RoofOpeningProps } from './roofOpeningGrips';
+import {
+  applyRoofTemplateArgs, isUserRoofTemplateId, libraryRoofTemplates, subscribeRoofTemplates,
+  type UserRoofTemplate,
+} from './roofTemplateLibrary';
+
+type Style = { id: string; label: string; family: string; shape: string; pitch: number; covering: string };
+
+export function RoofSection({ node }: { node: NodeDto }) {
+  const info = useSession((s) => s.info);
+  useLang((s) => s.lang); // a style's option names its shape in the language chosen
+  const styles = (info?.catalogs['architecture.roofStyles'] as unknown as Style[] | undefined) ?? [];
+  // The project's own styles (decision 233) first.
+  const project = useSession((s) => projectOf(s.nodes));
+  const own = (project?.props.roofStyles as { id: string; label: string; shape: string; pitch: number }[] | undefined) ?? [];
+  const [userTemplates, setUserTemplates] = useState<UserRoofTemplate[]>(() => libraryRoofTemplates());
+  useEffect(() => subscribeRoofTemplates(() => setUserTemplates(libraryRoofTemplates())), []);
+  const contour = (node.props.contour as number[][] | undefined) ?? [];
+  const arcs = (node.props.arcs as number[] | undefined) ?? [];
+  const edges = (node.props.edges as Edge[] | undefined) ?? [];
+  const setEdge = (i: number, patch: Partial<NonNullable<Edge>> | null) => void execute('architecture.updateRoof', { id: node.id, edges: mergeEdge(edges, contour.length, i, patch) });
+  const pickStyleOrTemplate = (val: string) => {
+    if (isUserRoofTemplateId(val)) {
+      const tpl = userTemplates.find((u) => u.id === val);
+      if (tpl) void execute('architecture.updateRoof', applyRoofTemplateArgs(node.id, tpl, contour as [number, number][]));
+      return;
+    }
+    void execute('architecture.roofStyle', { id: node.id, style: val });
+  };
+  return (
+    <div className="layers">
+      <label className="type-pick">
+        <span className="eyebrow">Style</span>
+        <span className="row">
+        <select value={(node.props.style as string | undefined) ?? ''} disabled={!node.editable}
+          onChange={(e) => pickStyleOrTemplate(e.target.value)}>
+          {!node.props.style && <option value="">Shaped by hand</option>}
+          {own.length > 0 && <optgroup label={t('Project')}>{own.map((s) => <option key={s.id} value={s.id}>{`${s.label} · ${t(s.shape)}${s.shape === 'barrel' ? '' : ` ${s.pitch}°`}`}</option>)}</optgroup>}
+          {userTemplates.length > 0 && <optgroup label={t('User templates')}>{userTemplates.map((tpl) => <option key={tpl.id} value={tpl.id}>{`${tpl.label} · ${t(tpl.shape)}${tpl.shape === 'barrel' ? '' : ` ${tpl.pitch}°`}`}</option>)}</optgroup>}
+          {styles.map((s) => <option key={s.id} value={s.id}>{`${s.label} · ${t(s.shape)}${s.shape === 'barrel' ? '' : ` ${s.pitch}°`}`}</option>)}
+        </select>
+        <button type="button" className="icon" title="Roof configurator…" disabled={!node.editable} onClick={() => useUi.setState({ dialog: 'roof', roofId: node.id })}><Settings2 size={14} /></button>
+        </span>
+      </label>
+      <table className="roof-edges with-arcs">
+        <thead><tr><th title="Edge">Edge</th><th title="Kind">Kind</th><th>°</th><th title="Overhang">Overhang</th><th title="Arc">Arc</th></tr></thead>
+        <tbody>
+          {contour.map((p, i) => {
+            const q = contour[(i + 1) % contour.length];
+            const e = edges[i] ?? null;
+            const len = Math.hypot(q[0] - p[0], q[1] - p[1]);
+            return (
+              <tr key={i}>
+                <td className="num" title={lengthText(len)}>{i + 1}</td>
+                <td>
+                  <select value={e?.kind ?? ''} disabled={!node.editable} data-i18n-ctx="edge" onChange={(ev) => setEdge(i, { kind: (ev.target.value || undefined) as 'eave' | 'gable' | undefined })}>
+                    <option value="">auto</option><option value="eave">eave</option><option value="gable">gable</option>
+                  </select>
+                </td>
+                <td><NumberField value={e?.pitch} blank readOnly={!node.editable} placeholder={String(node.props.pitch ?? '')} onCommit={(v) => setEdge(i, { pitch: v ?? undefined })} /></td>
+                <td><LengthField metres={e?.overhang} blank noUnit readOnly={!node.editable} onCommit={(v) => setEdge(i, { overhang: v ?? undefined })} /></td>
+                <td><LengthField metres={arcs[i] || null} blank noUnit readOnly={!node.editable} title="Arc rise (m off the chord; empty or 0 straight)" onCommit={(v) => void execute('architecture.setEdgeArc', { id: node.id, index: i, rise: v ?? 0 })} /></td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+      {Array.isArray(node.props.layers) && node.props.layers.length > 0 && (
+        <p className="muted small">
+          Layers: {node.props.layers.length} · {lengthText((node.props.layers as { thickness?: number }[]).reduce((s, l) => s + (l.thickness ?? 0), 0))}
+          {' '}
+          <button type="button" className="link" disabled={!node.editable} onClick={() => useUi.setState({ dialog: 'roof', roofId: node.id })}>Edit…</button>
+        </p>
+      )}
+      {Array.isArray(node.props.openings) && node.props.openings.length > 0 && (
+        <table className="roof-openings">
+          <caption className="muted small">Roof windows and dormers: drag one's middle grip in plan to move it, its edges' grips to resize it; ×, Delete over its grip or a right-click on it removes it.</caption>
+          <tbody>
+            {(node.props.openings as unknown as RoofOpeningProps[]).map((o) => (
+              <tr key={o.id}>
+                <td>{openingName(o)}</td>
+                {/* Its size as the model keeps it (decision 280): the width along the eave, the length up the slope (a dormer's follows its heights). */}
+                <td><LengthField metres={widthOf(o)} min={MIN_SIZE} noUnit readOnly={!node.editable} title="Width" onCommit={(v) => { if (v != null) void execute('architecture.updateRoofOpening', { roofId: node.id, id: o.id, width: v }); }} /></td>
+                <td>{o.kind === 'dormer' ? <span className="muted small">dormer</span>
+                  : <LengthField metres={lengthOf(o)} min={MIN_SIZE} readOnly={!node.editable} title="Length up the slope" onCommit={(v) => { if (v != null) void execute('architecture.updateRoofOpening', { roofId: node.id, id: o.id, length: v }); }} />}</td>
+                <td><button type="button" className="icon mini" title="Remove" onClick={() => void execute('architecture.removeRoofOpening', { roofId: node.id, id: o.id })}>×</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      <button type="button" className="btn compact" data-testid="roof-unfolded-covering" title="Unfolded 2D covering plan at 1:50 with dimensions and areas"
+        onClick={() => void execute('architecture.unfoldRoofCovering', { id: node.id }).then((r) => { const id = (r as { id?: string } | null)?.id; if (id) useUi.setState({ view: 'drawing', drawingViewId: id }); })}>
+        Unfolded covering
+      </button>
+
+      {node.editable && (
+        <div className="row-wrap">
+          <button type="button" className="btn" data-action="roof-explode"
+            title="Convert the roof's parts into editable 3D solids"
+            onClick={() => void execute('architecture.explodeRoof', { id: node.id }).then((r) => {
+              const ids = (r as { ids?: string[] } | null)?.ids ?? [];
+              if (ids.length) {
+                useUi.setState({ selected: ids, selection: ids[0] ?? null });
+                notify('Roof exploded into editable 3D solids.');
+              }
+            })}><Blocks size={14} />Explode</button>
+        </div>
+      )}
+    </div>
+  );
+}

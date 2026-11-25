@@ -1,0 +1,186 @@
+---
+title: Tegning og kommandolinjen
+order: 80
+summary: Skriv kommandoer som i CAD, fang til punkter, flyt og kopiér, tegn linjer, og annotér med mål, tekst og mærker.
+---
+
+## Kommandolinjen
+
+Skriv et værktøjs bogstaver hvor som helst i vinduet, og tryk derefter på <kbd>Enter</kbd>. Skriv for eksempel <kbd>WA</kbd> for en væg, <kbd>CO</kbd> for at kopiere, <kbd>M</kbd> for at flytte eller <kbd>L</kbd> for en linje. Kommandolinjen nederst viser, hvad værktøjet har brug for som det næste. Du kan klikke på et punkt eller skrive en længde, en vinkel eller koordinater.
+
+Indtastede koordinater er i projektets enhed, som længderne ved markøren: i et projekt i millimeter gør `@4000,4000` efter et rektangels første hjørne det 4 m gange 4 m, og `4000<90` er 4 m lige op.
+
+![At kopiere en væg: efter basispunktet viser kommandolinjen og de direkte felter længden og vinklen hen til musen](shots/command-line.webp)
+
+Hvert værktøj viser sine bogstaver i sit værktøjstip; du kan ændre dem under **Vis → Tastaturgenveje…** (se [Brugerfladen og genveje](interface.md)). Disse er de mest brugte:
+
+| Model | | Tegn | |
+|---|---|---|---|
+| Væg | <kbd>WA</kbd> | Linje | <kbd>L</kbd> |
+| Dør, vindue | <kbd>DR</kbd>, <kbd>WN</kbd> | Polylinje | <kbd>PL</kbd> |
+| Dæk | <kbd>SB</kbd> | Rektangel, cirkel, bue | <kbd>REC</kbd>, <kbd>C</kbd>, <kbd>A</kbd> |
+| Tag | <kbd>RF</kbd> | Flyt, kopiér | <kbd>M</kbd>, <kbd>CO</kbd> |
+| Trappe, rum | <kbd>ST</kbd>, <kbd>RM</kbd> | Rotér, spejl, skalér | <kbd>RO</kbd>, <kbd>MI</kbd>, <kbd>SC</kbd> |
+| Søjle, bjælke | <kbd>CL</kbd>, <kbd>BM</kbd> | Forskyd, trim, forlæng | <kbd>O</kbd>, <kbd>TR</kbd>, <kbd>EX</kbd> |
+| Snit | <kbd>SE</kbd> | Afrunding, affasning | <kbd>F</kbd>, <kbd>CHA</kbd> |
+| Mål op | <kbd>ME</kbd> | Skravering, tekst | <kbd>H</kbd>, <kbd>T</kbd> |
+| Tilpas alt | <kbd>ZE</kbd> | Slet | <kbd>E</kbd> |
+
+## Fang og hjælpere
+
+Lapin fanger til enderne, midtpunkterne og skæringerne af det, der er tegnet, og til gitteret. <kbd>F3</kbd> slår fang til eller fra, <kbd>F8</kbd> ortho og <kbd>F10</kbd> polær sporing. Deres tilstand vises nederst til højre i visningen. Fang tager kun det, visningen viser: et element, som dens Synlighed / Grafik skjuler (dets kategori, et filter, et link, en fase), eller som ligger uden for visningens område, tegner intet og giver derfor intet punkt at fange, i planer, snit, facader og 3D. Med modellinjerne vist i stedet for tegningen (pen-knappen øverst i planen) fanger hver linje på skærmen.
+
+## At vælge
+
+Klik på et element for at vælge det; <kbd>Shift</kbd>-klik føjer til valget. For at vælge flere på én gang trækker du med venstre knap, hvor intet er valgt. Trukket mod højre er rammen blå og tager det, der ligger helt inden i den (vindue); trukket mod venstre er den grøn og stiplet og tager alt, hvad den rører (krydsning), som i AutoCAD. Tryk på <kbd>Mellemrum</kbd>, mens du trækker, og rammen bliver til en lasso, der følger musen og beholder rammens tilstand; <kbd>Mellemrum</kbd> igen går tilbage til rammen. På kommandolinjen, når en kommando beder dig vælge objekter, skriver du **WP** eller **CP** og klikker på hjørnerne af en polygon, derefter <kbd>Enter</kbd>: en vinduespolygon eller en krydsningspolygon.
+
+![En lasso i planen: rammen trukket mod højre, så Mellemrum, og løkken rundt om de to vægge, den tager](shots/select-lasso.webp)
+
+## At kopiere og flytte
+
+Vil du kopiere, så markér elementet og skriv <kbd>CO</kbd>. Klik på et basispunkt og derefter på et andet punkt. Lapin bliver ved med at kopiere, indtil du trykker på <kbd>Enter</kbd> eller <kbd>Esc</kbd>. **Flyt** (<kbd>M</kbd>) virker på samme måde.
+
+Mens du flytter eller kopierer, bliver en markør stående på basispunktet, og en stiplet linje løber fra den hen til musen, mens et falmet omrids af det, du flytter, bliver stående, hvor det var, indtil du klikker eller trykker på <kbd>Esc</kbd>. Linjen og markøren skifter farve med fanget: grøn på et fanget punkt, blå når ortho eller polær sporing holder retningen, accentfarven på en sporingslinje, grå når den er fri. Ved siden af musen viser Lapin, hvor langt du har flyttet: Δx, Δy, afstanden og vinklen, i projektets enheder. Du kan skrive afstanden og vinklen der, som når du tegner. I brugerfladen Kompakt står disse værdier i statuslinjen. At trække i et greb viser det samme, og det gør det også at trække i selve et markeret element, fra det punkt hvor du trykkede; tryk på <kbd>Esc</kbd>, før du slipper, så bliver elementet, hvor det var.
+
+![At flytte en væg: markøren på basispunktet, den stiplede linje hen til musen, væggens spøgelse hvor den var, og forskydningen ved musen](shots/move-trace.webp)
+
+Du kan også trække i stedet. Træk i krydset midt på et markeret element for at flytte det. Hold <kbd>Ctrl</kbd> (<kbd>⌘</kbd> på en Mac) nede, mens du trækker, for at efterlade en kopi.
+
+En dør, et vindue eller en vægåbning flyttes og kopieres langs sin væg: kun den del af flytningen, der ligger langs væggen, tæller, så `500` skrevet efter basispunktet skubber den 500 langs væggen; flyttet ind i en anden væg går den over i den væg. Er dens væg også markeret, følger den med væggen.
+
+En modullinje flyttes, kopieres, roteres og spejles for sig selv eller sammen med andre elementer. En kopi er en ny modullinje i samme net, opkaldt efter den sidste modullinje, der løber samme vej: med modullinjerne 1, 2 og 3 bliver en kopi af en hvilken som helst af dem til 4.
+
+### I snit og facader
+
+**Flyt** (<kbd>M</kbd>), **Kopiér** (<kbd>CO</kbd>) og træk af et markeret element virker også i et snit eller en facade, i visningens plan. Langs visningen flytter elementet sig i plan langs snitlinjen; op eller ned hæves eller sænkes det med sin forskydning fra niveauet (en vægs eller søjles basisforskydning, en bjælkes topforskydning, et dæks forskydning). Mens du trækker, følger dets **Forskydning fra niveau** med i egenskaberne. En dør eller et vindue glider stadig langs sin væg, og linjer tegnet på visningen flytter sig i visningen. **Spejl** tager dér en lodret linje og spejler elementerne om planet gennem den, vinkelret på visningen. Elementer **roteres** ikke i et snit eller en facade, da de ville vælte: drej dem i en plan eller i 3D. Tegnede linjer roterer og spejles, som du vil. Et fastgjort element bliver, hvor det er.
+
+![En bjælke trukket op i sydfacaden: dens skygge, hvor den var, forskydningen ved musen og dens forskydning fra niveauet, der følger med i egenskaberne](shots/section-drag.webp)
+
+### Fastgørelse
+
+Fastgør det, der ikke må flytte sig ved en fejl: en importeret model, nettet, en opmålingstegning. Vælg det og vælg **Redigér → Fastgør**, eller sæt hak i **Fastgjort** under **Placering** i dets egenskaber. Et fastgjort element flyttes, drejes, spejles, hæves, sendes til en anden etage eller slettes ikke, og det viser ingen greb. Dets andre felter kan stadig ændres: dets type, højde eller materiale. Det kan stadig kopieres, og kopien er ikke fastgjort. En væg, der er forbundet med det og flyttes, lader den fastgjorte væggs ender blive, hvor de er. Fastgørelse af en gruppe fastgør dens medlemmer; en gruppe med et fastgjort medlem flyttes ikke. **Redigér → Frigør** (<kbd>UP</kbd>) slipper det igen. Ethvert element kan fastgøres: en væg, en reference fra en importeret fil, en tegnet linje.
+
+**Elementer.** TRIM og EXTEND tager også en væg, der er klikket på i en plan: trimmet ved de vægge, der skærer den, eller ført hen til den første væg foran. OFFSET tager også elementer: en væg, en bjælke eller et stribefundament (en parallel kopi, fra aksen eller mellem fladerne). To kommandolinjeord virker på elementer: **TRIMEXTEND** (**TE**, Redigér → Trim/forlæng elementer), som trimmer eller forlænger vægge, bjælker, stribefundamenter, rækværk, MEP-strækninger, stier og veje, dæk, lofter, tage, tegnede rum, platforme og matriklen mod en grænse, du vælger først, og **SPLITELEMENT** (**SPLIT**, Redigér → Opdel element), som deler et af dem i to, hvor du klikker (matriklen undtaget). Se [Trim, forlængelse, opdeling og forskydning af vægge](walls.md).
+
+## Tegning
+
+Fanen **Tegn** tegner linjer, polylinjer, rektangler, cirkler og buer. Den redigerer dem med forskyd, trim, forlæng, afrunding, affasning og sammenføj, fylder områder med skraveringer og organiserer dem på **Lag**. **Importér DXF** henter en CAD-tegning ind som linjer, du kan fange til og redigere.
+
+![Fanen Tegn](shots/ribbon-draft.webp)
+
+**Ellipse** (<kbd>ELL</kbd>) tegner en ægte ellipse: centrum, enden af en halvakse og så den anden halvakse (et punkt eller den indtastede længde); den længste er storaksen. Tast <kbd>A</kbd> i sidste trin for en ellipsebue, og klik så på start og slut (mod uret). Den forbliver en ellipse, lagt inden for en millimeter som alle kurver, og fanges i centrum og aksernes fire ender; dens greb flytter den (centrum), drejer og strækker den (storaksens ender) eller ændrer den anden halvakse. **Trim** skærer den i ellipsebuer, og en linje møder den præcist (**Trim** med den, **Extend** til den). **Offset** giver en polylinje, ikke en ellipse (kurven i en afstand fra en ellipse er ingen ellipse), lagt inden for en millimeter af kurven; indad med mindst dens skarpeste krumning afvises den. **Extend** fører en ellipsebue videre rundt om sin ellipse, og **Fillet** forbinder en linje og en ellipse med en bue, der rører begge (en hel ellipse forbliver hel; **Chamfer** tager kun linjer). En DXF's ELLIPSE kommer ind som ellipse, og en DXF-eksport skriver den tilbage som ELLIPSE, ligesom cirkler og buer som CIRCLE og ARC. I **Edit sketch** kan ellipsebuer endnu ikke låses med betingelser. **Convert to…** gør en hel ellipse til et elliptisk dæk eller loft.
+
+**Forskyd** (<kbd>O</kbd>) kopierer en linje, en polylinje, et rektangel, en cirkel eller en bue i en afstand. Skriv afstanden i projektets enhed (i et projekt i millimeter er `500` en halv meter; `2m` eller `1'6"` siger deres egen enhed), klik på formen og så på den side, den skal til; den beder om den næste form, til du trykker <kbd>Enter</kbd> eller <kbd>Esc</kbd>. Skriv **T** (Through) i stedet, så går hver kopi gennem det punkt, du klikker. En polylinjes hjørner forbliver skarpe (i geringer), som i CAD. Forskyd virker i planer, snit, facader, på referenceplaner og i 3D-visningen.
+
+**Eksplodér** (<kbd>X</kbd>, eller **EXPLODE**) er vejen tilbage fra **Sammenføj**: markér polylinjer eller rektangler, og hver bliver til sine linjer, én for hver side, på samme lag med samme pen og farve og i samme gruppe, i ét fortrydelsestrin. Cirkler, buer, skraveringer og målkæder lades urørte, og en markering uden noget at dele siger det. Det virker i plantegninger, snit, facader, på referenceplaner og på arbejdsplanet i 3D-visningen.
+
+Hver længde, kommandolinjen beder om, er i projektets enhed, og prompten siger hvilken: `Depth (mm)`, `Height (ft-in)`. Vinkler, faktorer og antal er almindelige tal: `90` efter **Rotér** er 90°, uanset enheden.
+
+### Tegn efter en PDF eller et billede
+
+**Filer → Importér PDF eller billede…** eller **Tegn → PDF eller billede** henter en tegning ind at tegne efter: en scannet plan, et foto af en facade, en PDF fra en anden tegnestue. Den kommer ind i planen, snittet eller facaden forrest, under dens tegning.
+
+- **En PDF**: Vælg **Side** og målestokken, dens tegning blev lavet i (**Tegnet i 1:**). En papirmillimeter måler så lige så mange millimeter her, så en plan i 1:100 kommer ind i sin sande størrelse. Sidens linjer kommer ind som tegning, du kan fange til, redigere og tegne efter, og dens billeder (en scanning i PDF’en) som billeder under dem. Begge kan udelades. Siden kommer ind som én gruppe opkaldt efter filen, så **Flyt**, **Rotér** og **Skalér** tager den hel; dobbeltklik på den for at arbejde med dens dele.
+- **Et billede** (PNG eller JPEG): Angiv dets **Bredde**; højden følger pixlerne. **Tegn → Skalér billede** sætter den derefter præcist: Markér billedet, klik på to punkter på det med en kendt afstand og skriv afstanden.
+
+Et billede er gennemsigtigt (dets **Uigennemsigtighed**, 0,5 som standard, i dets egenskaber) og er aldrig en del af modellen: Det udskrives kun på tegningsark, hvis du lader det blive i visningen.
+
+![En plan udskrevet til PDF, hentet ind på en anden etage for at tegne efter](shots/trace-pdf.webp)
+
+### Tegning i 3D-visningen
+
+**Linje**, **Polylinje**, **Rektangel**, **Cirkel**, **Bue** og redigeringerne fra Tegning virker også i 3D-visningen, med kommandolinjen nederst. Mens en kommando kører, siger mærket øverst, hvor du tegner: i den aktive etages kote eller på det valgte referenceplan. **Vælg en flade** i mærket og så et klik på en flade i modellen laver et referenceplan på fladen og tegner på det. Punkter fanges som i en plan: til planens snitlinjer (væggenes hjørner og flader) og til det, der er tegnet på samme plan, med ortho og sporingslinjerne. Det, du tegner, er det samme tegneelement som et tegnet på planen og ses også der.
+
+![Tegning i 3D-visningen: mærket siger planet, linjen følger musen i etagens kote](shots/draft-3d.webp)
+
+### Tegninger i 3D-visningen
+
+Det, du tegner på en plan (linjer, polylinjer, rektangler, cirkler, buer), står også i 3D-visningen som linjer i etagens kote (selve koten, ikke planens snithøjde); det, du tegner på et referenceplan, et snit eller en facade, står på det plan. Klik på en i 3D for at vælge den, og flyt, kopiér, forskyd eller slet den. **Vis → Tegninger i 3D**, også i **Vis → Visningsindstillinger** for en 3D-visning, viser eller skjuler dem alle; den er slået til, til du slår den fra. Mål, tekster, mærker, skraveringer og hjælpelinjer (rollen draft) bliver på deres visninger. En DXF bragt ind på en visning ligger også i 3D, på visningens plan, med sin egen kontakt (se [Import og eksport](import-export.md)).
+
+### Tegnerækkefølge
+
+Hvor tegnede elementer overlapper, ligger det senest tegnede øverst. For at ændre det skal du markere dem (linjer, polylinjer, rektangler, cirkler, buer, skraveringer og udfyldninger, tekster, mål, mærker, en DXF's figurer), højreklikke og vælge **Placer forrest**, **Flyt frem**, **Flyt tilbage** eller **Placer bagerst**; **Tegn → Rækkefølge** og **Annotér → Rækkefølge** har det samme, med <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>]</kbd>, <kbd>Ctrl</kbd>+<kbd>]</kbd>, <kbd>Ctrl</kbd>+<kbd>[</kbd> og <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>[</kbd> (⌘ på Mac). Frem og tilbage går forbi det næste element, markeringen overlapper. Det tegnede ligger over modellens egen tegning; **Send bag om modellen** lægger det under væggenes snit og de sete linjer (en skravering under en væg), og et klik der tager så væggen; **Placer forrest** eller **Placer bagerst** henter det over modellen igen. På kommandolinjen beder **DRAWORDER** (**DRO**) om objekterne og derefter **Above objects** eller **Under objects** (klik på de elementer, de skal over eller under, og så <kbd>Enter</kbd>), **Front**, **Back** eller bag om modellen, **Model**. Rækkefølgen hører til visningen, fortrydes i ét trin, og planer, PDF og DXF udskriver den, som du ser den; det, du tegner bagefter, kommer øverst.
+
+![Højreklik på en markeret udfyldning: tegnerækkefølgen](shots/draw-order-menu.webp)
+
+![Placeret forrest dækker den grå udfyldning teksten](shots/draw-order-front.webp)
+
+## Annotering
+
+Fanen **Annotér** har målene, tekst, modullinjer, niveauer og mærker. Et mål læser modellen, så det opdateres, når en væg flyttes. Hvordan tekst, mål, modullinjer og mærker ser ud, indstilles under **Administrer → Tegningsstandarder**.
+
+**Annotér → Mål** (<kbd>DI</kbd>, eller skriv **DIM**) er ét værktøj til alle slags mål. Det starter *smart* og tager slagsen fra det, du klikker: to punkter giver et justeret mål (eller et lineært, når bjælkens anden liste siger **Lineær**); en tegnet linje klikket væk fra dens ender og midte måles fra ende til ende, og en anden linje klikket i stedet for målelinjens sted giver vinklen mellem dem; en cirkel eller en bue får sin radius (eller diameter eller buelængde, som **Buer** i bjælken siger); **Enter** efter første punkt skriver punktets kote. En niveaus linje klikket i et snit eller en facade skriver dens kote der, uden Enter. Bjælkens første liste vælger en slags direkte (justeret, lineær, vinkel, radius, diameter, buelængde, ordinat, hældning, kote, punktkoordinat), og **Én ad gangen / Kæde / Basislinje (fra det første)** siger, hvordan målet fortsætter: ét ad gangen, som kæde på én linje (det gamle **Kontinuerlig**, **C**) eller som basislinje, hvor hvert næste punkt måles fra det første på sin egen linje længere ude (**B**). **Rum**, **Udvendig**, **Tilføj punkter**, **Fjern punkter** og **Regler…** står også der. De gamle knapper er væk fra båndet, men deres genveje, hurtigpladser og Mine værktøjer starter Mål-værktøjet ved deres slags.
+
+Et justeret eller lineært mål sættes som en målekæde: efter de første to punkter og dets linje tilføjer hvert klik det næste punkt på samme linje, og **Enter** (eller **Esc**) gør hele kæden til ét mål (**U** tager det sidste punkt tilbage; skriv først **S** for et enkelt mål). En kæde opfører sig som en polylinje: ét klik markerer det hele, og den flyttes, kopieres og slettes som én. En kæde, der måler vægge, kanter eller modullinjer, bliver på dem: trukket eller flyttet for sig selv glider kun dens mållinje, vinkelret på kæden, så en glidning med musen aldrig efterlader den målende tom luft; flyttet sammen med det, den måler, følger den med. Dens greb sidder på hvert målt punkt (træk for at flytte det, Ctrl/⌘-klik for at fjerne det), midt på hvert segment (træk for at tilføje et punkt, Ctrl/⌘-klik for at tilføje et midtvejs) og ved mållinjens ender (træk for at flytte linjen). Vil du sætte flere punkter ind i en kæde, som i ArchiCAD, så markér den og klik på **Annotér → Tilføj punkter** (eller skriv **DIMADD**, eller **Tilføj punkter** i dens egenskaber): hvert punkt, du klikker, går ind i kæden der, hvor det falder langs dens linje, mellem punkterne omkring det eller ud over en ende som den nye ende, og holder fast i den væg, kant eller modullinje, det lander på; **Enter** eller **Esc** afslutter. Vil du tage punkter ud, så Ctrl/⌘-klik på deres greb, eller klik på **Annotér → Fjern punkter** (**DIMDEL**, eller **Fjern punkter** i dens egenskaber) og klik nær hvert punkt; segmenterne på hver side bliver til ét. Hvert segments værdi har også et greb: træk i det for at flytte værdien væk fra sin plads, hvor segmenterne er korte og værdierne ville overlappe; når den står væk fra sit segment, binder en tynd hjælpelinje den tilbage. Ctrl/⌘-klik på grebet, eller **Tekster tilbage på linjen** i egenskaberne, sætter den tilbage. En flyttet værdi bliver ved sit segment, når punkter flyttes, og drejer med kæden. Dobbeltklik på et segment for at skrive dets værdi: det element, det måler, flyttes, og det samme gør alt efter det i kæden. Egenskaberne viser hvert segments værdi og tekst, deler en kæde op i enkelte mål og samler enkelte mål, der fortsætter hinanden på én linje.
+
+Annoteringer på en plan (mål, tekster, tegnede linjer, mærker) kan flyttes til en anden plan på samme sted, da planer deler koordinater: vælg dem og vælg planen i deres egenskaber, under **View** for at flytte dem eller **Copy to** for at kopiere dem. Sådan kommer mål lavet på en situationsplan også til etagens plan. Et måls punkter holder sig så til det, den nye plan skærer dér: vægge, kanter, akser.
+
+**Åbningshøjder.** Et segment af en målkæde, der går fra den ene lysning af en dør, et vindue eller en åbning til den anden, skriver bredden over linjen og åbningens højde under den, som rumænske og europæiske tegninger gør. Den læses fra modellen hver gang og følger derfor åbningen, når den ændrer størrelse, flyttes eller får en anden type; et segment, du har skrevet en tekst over, skriver ingen. **Administrer → Tegningsstandarder → Mål → Åbningens højde** vælger den for hver målstil: fra, `150`, `h=150`, `h=150` med brystningen `p=90` under, eller `150/90`, i stilens enhed. Det virker i planer, snit og facader, og planer, PDF og DXF udskriver den. Nye projekter har den slået til (kun højden); et projekt lavet før beholder sine mål, som de var, indtil du slår den til der.
+
+![Dørens og vinduets højder under deres segmenter](shots/dimension-opening-height.webp)
+
+![Åbningens højde i målstilene](shots/dimension-opening-height-style.webp)
+
+**Mål på en linje.** Et målpunkt, der klikkes på en rasterakse eller på midtlinjen af en væg, holder sig til linjen, ikke til et punkt på den. Træk aksens ende langs med sig selv, så dens hoved kan være i visningen, eller gør væggen længere eller kortere: målet bliver ved med at måle, hvor du satte det, og dets linje drejer ikke. Flyttes aksen eller væggen på tværs, følger punktet med, samme sted langs. Et mål på en vægs flade bliver også, hvor det målte, når væggen strækkes i sin længde. Mål lavet før holder sig til en rasterakse på samme måde; et på en vægs midtlinje fæstnes igen ved at klikke på dets punkt igen.
+
+### Mærker
+
+**Annotér → Mærke** (<kbd>TG</kbd>) sætter en boks på en visning med det, et element siger om sig selv, og en henvisningslinje til det. Mens værktøjet er aktivt, vælger bjælken under visningen, hvad mærket viser: mærket, navnet, klassen eller typen, **Brandklasse**, **Lydisolering**, **Varmetransmission** eller **En anden parameter…** efter dens navn; eller en mærketype fra tegningsstandarderne; og **HENVISNING** slår henvisningslinjen til eller fra. Klik på elementet og derefter, hvor mærket skal stå (tast først **E** for at knække linjen). **Annotér → Mærk en parameter** spørger efter parameterens navn og starter værktøjet med den.
+
+Mærke er ét værktøj til alle slags mærkater: bjælkens første liste siger, hvad det mærker. **Element** (et felt, en parameter, en mærkattype; **ALLE DØRE & VINDUER** mærker hele planen), **Rum** (klik inde i et rum: navn, nummer, areal…; **RUMSTEMPLER…**), **Parameter** (skriv dens navn i bjælken; **Mærk en parameter** starter værktøjet her), **Materiale / lag** (en opbygningsmærkattype) og **Nøglenote** (elementets klassifikationskode eller titel).
+
+![Mærke-værktøjets bjælke under visningen](shots/tag-options.webp)
+
+Et mærke læser enhver parameter: elementets egen, dets types (så viser alle typens elementer den), en standardegenskab som `Pset_WallCommon.FireRating` eller en, som et importeret element kom med. Et navn findes også uden mellemrum, så **Fire rating** og `FireRating` er det samme. Udfyld den under **Parametre** i elementets eller typens egenskaber: skriv et navn (Fire rating, Sound rating, Moisture resistance og Thermal resistance foreslås), eller vælg **Tilføj en standardegenskab…** for klassens IFC-egenskaber. Mærket følger med, så snart der er en værdi, og længder skrives i projektets enheder.
+
+Et valgt mærke har greb. Træk i boksen for at flytte mærket: henvisningslinjen peger fortsat samme sted hen. Et mærke følger sit element: når elementet flyttes, drejes, spejles eller omformes med sine greb, følger mærket med og beholder sin plads ved siden af det, og henvisningslinjen bliver på det; et mærke, du har flyttet, beholder den afstand, du gav det. Træk i linjens midte for at knække den (Ctrl/⌘-klik på knækket retter den ud igen) og i dens ende for at lade den pege på et andet punkt (Ctrl/⌘-klik: tilbage på elementets midte). I egenskaberne ændrer du, hvad mærket **Viser**, giver det sin egen **Tekst** (`{mark}|{FireRating}` skriver to linjer), en **Mærketype**, eller slår **Henvisningslinjen** fra. Motoren tegner mærkerne, så tegningsark og PDF'er udskriver dem, som du ser dem. Mærketyperne under **Administrer → Tegningsstandarder → Mærker** læser de samme felter i deres skabeloner; et nyt projekt har Brandklasse, Lydisolering og Varmetransmission blandt dem.
+
+**Henvisningslinjer som ArchiCADs etiketter.** Som standard er et mærkes henvisningslinje *knækket*: en skrå linje fra elementet til et knæk, derefter en skulder der løber under teksten og understreger dens første række, uden ramme om teksten. Når du har klikket på elementet, er det næste klik knækket, og teksten står ved siden af. Træk knækkets greb: den skrå linje holder 30°, 45°, 60° eller 90° fra sin ende (hold <kbd>Shift</kbd> for enhver vinkel), og trukket forbi enden skifter teksten til den side, justeret mod knækket. Træk teksten for at flytte den med sit knæk. I **Administrer → Tegningsstandarder → Mærker** sætter **Henvisningslinje…** på en mærketype (og opbygningseditoren) dens **Henvisningslinjens form** (knækket, eller lige fra en ramme), hvad skulderen understreger (**Understregning**: første række, hver række, sidste række eller intet, når den stopper ved tekstens side) og **Forlængelse mm**, hvor meget længere skulderen når fra teksten, ved siden af motorens forhåndsvisning. Med én henvisningslinje pr. lag ender hver under sin egen række, med knækkene i én kolonne; at trække knækket flytter kolonnen. **Henvisningslinjens form** i et mærkes egenskaber går forud for typens; et mærke hvis henvisningslinje blev knækket ved et frit knæk, beholder sin lige linje. Mærker i projekter lavet før beholder deres lige henvisningslinje i en ramme.
+
+![Et mærkes henvisningslinje knækket, med dens greb](shots/tag-leader.webp)
+
+![Et mærkes egenskaber](shots/tag-properties.webp)
+
+En dørs eller et vindues mærke redigeres del for del, hver tekst flyttet eller drejet og hver ende af linjen forlænget: se [Døre og vinduer](doors-windows.md).
+
+**Drej et mærke.** I et mærkes egenskaber drejer **Rotation** dets tekst og dets skulder eller boks en vinkel i grader fra vandret, og **Justér efter elementet** får det til at følge retningen på det mærkede element (aksen på en væg eller en bjælke, den længste kant på alt andet) og dreje med det; rotationen lægges så til den retning. Et mærke tegnes altid læsbart, aldrig på hovedet. Et valgt mærke har et drejegreb over sin tekst: træk det i trin på 15° (45° og 90° iblandt; hold <kbd>Shift</kbd> for vilkårlig vinkel), og Ctrl/⌘-klik stiller teksten vandret igen. Henvisningslinjen når stadig elementet. Enkle mærker og opbygningsmærker drejer ens, i planer, snit og opstalter, og ark, PDF og DXF udskriver dem, som du ser dem.
+
+**Hvad et mærke mærker.** Mens værktøjet **Mærke** venter på et element, fremhæves det under markøren i accentfarven; hold markøren på et placeret mærke, eller vælg det, og det element, det mærker, fremhæves.
+
+![Et mærke justeret efter sin væg med sit drejegreb, og den mærkede væg fremhævet](shots/tag-rotate.webp)
+
+#### Opbygningsmærke
+
+Et opbygningsmærke skriver et elements lag som en arkitektnote: en overskrift (*EXTERIOR*), en linje for hvert lag, en bundtekst (*INTERIOR*). Et nyt projekt har **Build-up (exterior → interior)**: hver linje er materialets beskrivelse (dets navn, hvis det ingen har), dets λ, hvis det har en, og lagets tykkelse i mm. Vælg det i værktøjet **Mærke**s bjælke og klik på en væg, et dæk, et tag eller et rums overflade; andre elementer får det valgte felt. Teksten læses fra modellen, hver gang den tegnes: ret et lag, et materiales beskrivelse eller dets λ, og mærket følger med.
+
+![To opbygningsmærker på en facadevæg: én henvisningslinje, og én pr. lag](shots/buildup-tag.webp)
+
+Dets form indstilles i **Administrer → Tegningsstandarder → Mærker**: sæt en mærketypes **Form** til *opbygning*, eller klik på **Opbygning…** ud for en, for at redigere den ved siden af en forhåndsvisning på en af projektets væg- eller dæktyper.
+
+- **Overskrift** og **Bundtekst**: skrives over og under lagene (tom: ingen; `|` starter en ny linje).
+- **Hvert lag**: linjen, der skrives én gang pr. lag. Den læser lagets felter, `{description}`, `{material}`, `{thickness}` (i den enhed, der er valgt under **Tykkelse i**), `{note}` (lagets note i dets type), `{function}` (kerne, overflade, isolering…) og `{index}`; enhver af materialets parametre efter navn eller symbol, `{λ}`, `{μ}`, `{ρ}`, `{Reaction to fire}` (se materialets [Data](materials.md#data-beskrivelse-parametre-hvordan-det-males)); og elementets, `{name}`, `{type}`, `{mark}`. **Indsæt et felt…** sætter et ind, hvor markøren er, og viser de parametre, projektets materialer har.
+- **Firkantede klammer** gør en del valgfri: `[, λ = {λ} W/mK]` skrives kun, hvor materialet har en λ; en del udgår helt, når et felt i den er tomt. **[ ]** gør markeringen til sådan en del. Skriv `\[` eller `\]` for at skrive selve klammen.
+- **Rækkefølge**: fra ydersiden mod indersiden af en væg (siden med dens første lag er dens yderside, så en spejlet væg starter stadig der), fra toppen mod bunden af et dæk eller et tag; eller omvendt. Vælg den rækkefølge, lagene ligger i ved siden af noten, så henvisningslinjer pr. lag aldrig krydser hinanden.
+- **Lag uden tykkelse** (membraner, folier, maling) skrives, medmindre du fjerner fluebenet ved **vist**. Et lag, der skifter materiale op ad højden, skriver en linje for hvert materiale.
+- **Henvisningslinjer**: én, til elementet, eller **én pr. lag**, hver fra sin linje til et punkt inde i sit eget lag, hvor visningen kan skelne lagene (en væg i planer og snit, et dæk i snit; ellers beholder mærket én). Træk henvisningslinjens ende langs elementet for at krydse det et andet sted.
+- **Linjer starter med** et punkt, en tankestreg, deres nummer eller ingenting; de ombrydes ved **Bredde mm** på papiret, hængende efter punkttegnet, og en værdi bliver ved sit symbol og sin enhed (`λ = 0.035 W/mK`).
+
+![Editoren for en opbygningsmærketype ved siden af dens forhåndsvisning](shots/buildup-tag-type.webp)
+
+Som ethvert mærke følger opbygningsmærket sit element, og tegningsark og PDF'er udskriver det, som du ser det, med λ, μ og ρ. En egen **Tekst** i dets egenskaber erstatter linjen pr. lag for netop det mærke.
+
+### Modullinjer
+
+**Annotér → Modullinje** (<kbd>GR</kbd>) tegner én akse ud fra dens to ender; den får den næste betegnelse i sin retning. **Annotér → Aksenet…** lægger et helt net på én gang: afstandene **På tværs** (de nummererede akser, fra venstre mod højre) og **På langs** (akserne med bogstaver, nedefra og op) i projektets enheder, fx `6000 6000 4500` eller `3*6000`; **Origo**, hvor de første akser krydser, en **Vinkel**, hvor langt akserne går **Ud over nettet**, de **Første betegnelser** og **Aksetypen**. Med **erstat nettets akser** markeret forsvinder de akser, der er tegnet indtil da.
+
+![Dialogen Aksenet](shots/grid-dialog.webp)
+
+Klik på en akse for at vælge den. Dens egenskaber viser **Start** og **Slut**, **Længde**, **Vinkel** og afstanden fra den parallelle akse før den (↔). Skriv en ny afstand, og aksen flytter sig; akserne bagved flytter sig også, medmindre du fjerner markeringen i **akserne bagved flytter sig også**. **Bobler** vælger, hvilke ender der har en boble. **Aksestile…** åbner **Tegningsstandarder → Modullinjer**, hvor boblen, dens størrelse, linjetypen og den første betegnelse indstilles. Vælg hele nettet for at se dets akser og deres afstande.
+
+![En akses egenskaber](shots/axis-properties.webp)
+
+Alle længder her følger projektets enheder. I fod og tommer læses ender og afstande som 19'-8 1/4", og niveauerne skrives også i fod og tommer.
+
+![Den samme akse i fod og tommer](shots/axis-properties-imperial.webp)
+
+![Fanen Annotér](shots/ribbon-annotate.webp)

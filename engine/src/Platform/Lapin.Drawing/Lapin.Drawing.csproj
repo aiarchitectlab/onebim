@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Drafting, independent of any module: hatch patterns (.pat) and their fill,
+    how materials draw, the drafting standards. The 2D generator, the sheets
+    and the DXF and PDF exports build on it.
+  -->
+  <ItemGroup>
+    <EmbeddedResource Include="Export/dxf-r2000-skeleton.dxf" LogicalName="Lapin.Drawing.Export.dxf-r2000-skeleton.dxf" />
+    <!-- The material standards Lapin ships (decision 681), as data. -->
+    <EmbeddedResource Include="MaterialStandards/*.json" LogicalName="Lapin.Drawing.MaterialStandards.%(Filename)%(Extension)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Model/Lapin.Model/Lapin.Model.csproj" />
+    <ProjectReference Include="$(LapinGeometryDir)Lapin.Geometry/Lapin.Geometry.csproj" />
+  </ItemGroup>
+</Project>

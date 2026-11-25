@@ -1,0 +1,1526 @@
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Lapin.Geometry;
+using Lapin.Model;
+using Lapin.Platform;
+
+namespace Lapin.Ifc;
+
+/// <summary>How a file is read: "auto", what carries Lapin's intent is rebuilt natively and the rest comes as reference; "reference", everything as reference.</summary>
+/// <summary>
+/// How a file is imported: <see cref="Mode"/> auto (Lapin's own natively, the rest recognised or referenced), reference
+/// (everything as it is) or link; and what of it, as the user chose in the survey (<see cref="IfcSurvey"/>): the
+/// <see cref="Kinds"/> (a class, or a class with its category) and the <see cref="Storeys"/> (their GlobalIds, "" for
+/// elements on no storey) to bring, null for all; and the 2D: <see cref="Plan2d"/>, the elements' own 2D for plans
+/// (their symbols, footprints, fills and texts; without it a plan shows their cut), and <see cref="Only2d"/>, the
+/// elements the file draws only in 2D (lines, texts, symbols with no body), both brought unless the user unticks them.
+/// <para>
+/// And the import's rules (docs/spec-ifc.md, Regulile importului), general, whatever program wrote the file:
+/// <see cref="Dedupe"/> keeps a body the file repeats (the same triangles, wherever it stands) once, its
+/// elements instances of it, nothing lost (on unless unticked); <see cref="Flat"/> leaves out the bodies that lie
+/// in one plane (texts, lines and hatches another program turned into triangles); <see cref="FarAway"/> the
+/// elements further than that many metres from the rest (a drawing's texts, a title block); <see cref="Duplicates"/>
+/// an element with the same body in the same place as one already brought; <see cref="Pseudo"/> the ports,
+/// openings and virtual elements another program wrote as objects; <see cref="Simplify"/> simplifies the meshes
+/// within that many metres (<see cref="Simplifier"/>); <see cref="Numbers"/> reads the numbers written as text
+/// (<see cref="IfcValueText"/>); <see cref="SkipSets"/> are the property and quantity sets left out by name.
+/// </para>
+/// </summary>
+/// <summary><paramref name="Group"/>: what the file places comes in as one group named after it (docs/groups.md); false for a link, and for an import the journal recorded before groups were.
+/// <paramref name="Fidelity"/>: the recognised elements measured against the file's bodies (docs/spec-ifc.md, Poarta de fidelitate); null, enforced.</summary>
+public sealed record IfcImportOptions(string Mode = "auto", IReadOnlySet<string>? Kinds = null, IReadOnlySet<string>? Storeys = null, bool Plan2d = true, bool Only2d = true,
+    bool Dedupe = true, bool Flat = false, double? FarAway = null, bool Duplicates = false, bool Pseudo = false, double Simplify = 0, bool Numbers = false, IReadOnlySet<string>? SkipSets = null, bool Group = false, bool Editable = false, string? Source = null,
+    FidelityOptions? Fidelity = null)
+{
+    /// <summary>How recognised elements are checked against the file's bodies (<see cref="FidelityOptions"/>): enforced by default.</summary>
+    public FidelityOptions Gate => Fidelity ?? FidelityOptions.Default;
+    public bool ReferenceOnly => string.Equals(Mode, "reference", StringComparison.OrdinalIgnoreCase);
+    public bool Filtered => Kinds != null || Storeys != null;
+    /// <summary>Whether a set of this name comes in.</summary>
+    public bool Keeps(string? set) => SkipSets == null || set == null || !SkipSets.Contains(set);
+}
+
+public sealed record IfcImportResult(int Elements, int Updated, int References, int Storeys, IReadOnlyList<string> Notes, int Recognized = 0, IReadOnlyDictionary<string, int>? RecognizedByClass = null, IReadOnlyDictionary<string, int>? ReferencesByClass = null, IReadOnlyDictionary<string, int>? Skipped = null, string? LinkId = null, EditableReport? Editable = null, FidelityReport? Fidelity = null, StoreyReplacement? Replaced = null)
+{
+    public JsonObject ToJson() => new()
+    {
+        ["elements"] = Elements, ["updated"] = Updated, ["references"] = References, ["storeys"] = Storeys, ["recognized"] = Recognized, ["linkId"] = LinkId,
+        ["recognizedByClass"] = Counts(RecognizedByClass), ["referencesByClass"] = Counts(ReferencesByClass), ["skipped"] = Counts(Skipped),
+        ["notes"] = new JsonArray(Notes.Select(n => (JsonNode)n).ToArray()),
+        ["editable"] = Editable?.ToJson(),
+        ["fidelity"] = Fidelity?.ToJson(),
+        ["replaced"] = Replaced?.ToJson(),
+    };
+
+    static JsonObject Counts(IReadOnlyDictionary<string, int>? d)
+    {
+        var o = new JsonObject();
+        if (d != null) foreach (var (k, v) in d.OrderByDescending(kv => kv.Value)) o[k] = v;
+        return o;
+    }
+}
+
+/// <summary>
+/// An IFC file read into the open project, as one undo step. What Lapin (or
+/// BubbleBIM) wrote with <c>Lapin_Intent</c> (<c>Pset_Lapin_Intent</c> in files written before 25.10.2026) is rebuilt natively: the
+/// storeys, materials, types with their layer sets, the elements with their
+/// attributes, their openings, doors and windows, usages, joins and phases;
+/// an element already in the project (the same GlobalId) is updated, what
+/// the project has and the file has not stays. Anything else with a body is
+/// kept as a reference: its class and its triangles, shown and measured,
+/// never edited (docs/spec-ifc.md, Importul).
+/// </summary>
+public static partial class IfcImport
+{
+    public static IfcImportResult Run(Session session, string path, IfcImportOptions? options, out Diff diff) =>
+        Run(session, File.ReadAllBytes(HostFiles.Check(path)), System.IO.Path.GetFileName(path), options, out diff);
+
+    /// <summary>An IFC file's bytes into the open project (<paramref name="name"/>: the file's name, for the undo label).</summary>
+    public static IfcImportResult Run(Session session, byte[] bytes, string name, IfcImportOptions? options, out Diff diff)
+    {
+        session.Progress?.Invoke("Indexing the file", 0, 0);
+        return Run(session, StepFile.Read(bytes), name, options, out diff);
+    }
+
+    /// <summary>A read IFC file into the open project (the survey read it already).</summary>
+    public static IfcImportResult Run(Session session, StepFile file, string name, IfcImportOptions? options, out Diff diff)
+    {
+        var o = options ?? new IfcImportOptions();
+        var reader = new Reader(session, file, o) { FileName = name, ReplaceStoreys = true };
+        // Everything editable (the import's third way): what stays a reference after recognition made a Studio solid where it can be.
+        EditableReport? editable = null;
+        // And what recognition could not read from the file's representations tried again from its triangles (a wall whose
+        // openings are cut into its body, a slab given as a B-rep): decision 214.
+        MeshRecognitionReport? fromTriangles = null;
+        var replaced = StoreyReplacement.None;
+        void Apply(IEdit edit)
+        {
+            var before = edit.Model.Entities.Select(e => e.Id).ToHashSet();
+            reader.Apply(edit);
+            var brought = edit.Model.Entities.Where(e => !before.Contains(e.Id)).Select(e => e.Id).ToList();
+            // Not what the gate has just made a reference again (enforce): its triangles would make the same element.
+            // A column or beam whose body has no profile (tessellated, a faceted B-rep) is made with its body's own outline as its section,
+            // as a Speckle receive's are (decision 826): its type's catalogue profile when that is the outline to 2 mm, a parametric
+            // shape when it is one, else the polygon it is; the gate judges each.
+            if (o.Mode == "auto") fromTriangles = MeshRecognition.Recognize(edit, session.Catalog, brought.Where(id => !reader.Reverted.Contains(id)), o.Gate, outlineSections: true);
+            if (o.Editable) editable = EditableReferences.Make(edit, session.Catalog, brought);
+            reader.KeepContainmentIds(edit);
+        }
+        diff = session.Edit($"Import {name}", edit =>
+        {
+            if (o.Group)
+            {
+                // The group keeps the file it came from (on this computer), for File → Optimize IFC… to find it again (docs/ifc-optimize.md).
+                var g = Groups.Around(edit, System.IO.Path.GetFileNameWithoutExtension(name), Apply);
+                if (g != null && o.Source != null) { var a = g.CloneAttrs(); a["source"] = o.Source; edit.Replace(g.With(attrs: a)); }
+            }
+            else Apply(edit);
+            // The file's storeys replace the project's (ImportStoreys), in the same undo step.
+            replaced = ImportStoreys.Replace(edit, session.Catalog, reader.FileStoreys);
+        });
+        // The gate's report, from the geometry the session has just built (docs/spec-ifc.md, Poarta de fidelitate).
+        reader.Measure(session);
+        var result = reader.Result() with { Editable = editable, Replaced = replaced };
+        result = result with { Notes = [.. result.Notes, .. replaced.Notes()] };
+        // The gate's one note: the file's elements and those recognised from their triangles together.
+        if (fromTriangles?.Fidelity is { Checks.Count: > 0 } more)
+        {
+            var gate = result.Fidelity;
+            var both = gate?.Then(more) ?? more;
+            result = result with { Fidelity = both, Notes = [.. result.Notes.Where(n => gate == null || n != gate.Note()), both.Note()] };
+        }
+        if (fromTriangles is { Recognized: > 0 } t)
+            result = result with
+            {
+                Recognized = result.Recognized + t.Recognized, References = Math.Max(0, result.References - t.Recognized),
+                Notes = [.. result.Notes, $"{t.Recognized} more recognised from their triangles ({string.Join(", ", t.ByClass.Select(kv => $"{kv.Value} {kv.Key}"))})."],
+            };
+        return result;
+    }
+
+    /// <summary>
+    /// An IFC file as a link (Manage → Links): imported like any other (its
+    /// elements recognised natively where they can be), then everything it
+    /// brought marked as the link's, read-only. With <paramref name="existing"/>
+    /// the link is reloaded: what it held goes first. One undo step.
+    /// </summary>
+    public static IfcImportResult Link(Session session, byte[] bytes, string name, string? path, IfcImportOptions? options, out Diff diff, string? existing = null)
+    {
+        session.Progress?.Invoke("Indexing the file", 0, 0);
+        return Link(session, StepFile.Read(bytes), name, path, options, out diff, existing);
+    }
+
+    /// <summary>A read IFC file as a link (the survey read it already).</summary>
+    public static IfcImportResult Link(Session session, StepFile file, string name, string? path, IfcImportOptions? options, out Diff diff, string? existing = null, string kind = "ifc", JsonObject? linkOptions = null)
+    {
+        var reader = new Reader(session, file, options ?? new IfcImportOptions()) { ReadProcesses = false };
+        string? linkId = null;
+        diff = session.Edit(existing != null ? $"Reload {name}" : $"Link {name}", edit =>
+        {
+            Entity link;
+            if (existing != null)
+            {
+                link = Links.Require(edit.Model, existing);
+                Links.RemoveElements(edit, link.Id);
+                if (linkOptions != null) { var a = link.CloneAttrs(); a["options"] = linkOptions.DeepClone(); edit.Replace(link.With(attrs: a)); }
+            }
+            else link = Links.Create(edit, kind, name, path, linkOptions);
+            var before = edit.Model.Entities.Select(e => e.Id).ToHashSet();
+            reader.Apply(edit);
+            Links.Tag(edit, link.Id, edit.Model.Entities.Select(e => e.Id).Where(id => !before.Contains(id)).ToList());
+            linkId = link.Id;
+        });
+        reader.Measure(session);
+        var r = reader.Result();
+        return r with { Notes = [.. r.Notes, $"Linked as {linkId}."], LinkId = linkId };
+    }
+
+    /// <summary>What an intent set says: the attributes, and the Lapin class, predefined type and host it names.</summary>
+    sealed record Intent(JsonObject Attrs, string? Class, string? Predefined, string? Host, string? LapinId);
+
+    /// <summary>
+    /// An element of the file: a rooted product with a placement or a shape, not the spatial structure, an opening, an annotation, a space (those are read apart)
+    /// or a port (carried with its element), nor a structural analysis view's item or action (IfcStructural…: not read back yet, docs/plan-fem.md §8.7).
+    /// </summary>
+    public static bool IsProductEntity(StepEntity e) =>
+        e.Args.Count >= 7 && e[0] is string { Length: 22 } && !e.Type.StartsWith("IFCREL", StringComparison.Ordinal) && !e.Type.EndsWith("TYPE", StringComparison.Ordinal)
+        && !e.Type.StartsWith("IFCSTRUCTURAL", StringComparison.Ordinal)
+        && (e[5] is StepRef || e[6] is StepRef)
+        && e.Type is not ("IFCPROJECT" or "IFCSITE" or "IFCBUILDING" or "IFCBUILDINGSTOREY" or "IFCOPENINGELEMENT" or "IFCANNOTATION" or "IFCSPACE" or "IFCDISTRIBUTIONPORT");
+
+    sealed partial class Reader(Session s, StepFile f, IfcImportOptions o)
+    {
+        readonly IfcModel model = new(f);
+        readonly List<string> notes = [];
+        /// <summary>The file's name, which the types it brings remember (Manage → Map imported types).</summary>
+        public string? FileName;
+        /// <summary>Whether the file's work schedule comes in (not for a link: a linked file brings its elements only).</summary>
+        public bool ReadProcesses = true;
+        /// <summary>
+        /// Whether the file's storeys replace the project's (an import, not a link: <see cref="ImportStoreys"/>): a file's storey is
+        /// the project's only by its GlobalId, else made under it, and the project's own are merged or removed after.
+        /// </summary>
+        public bool ReplaceStoreys;
+        /// <summary>The model's storeys the file's became.</summary>
+        public IReadOnlyList<string> FileStoreys => [.. storeyOf.Values.Distinct()];
+        int elements, updated, references, storeys;
+        readonly Dictionary<int, List<int>> definitions = [];     // product → its property sets
+        readonly Dictionary<int, int> containedIn = [];            // product → its spatial structure
+        readonly Dictionary<int, string> storeyOf = [];            // file storey → model storey
+        readonly Dictionary<int, string> typeIds = [], layerSets = [], materialIds = [];
+        readonly HashSet<string> seen = [];
+        readonly List<Action<IEdit>> relations = [];               // written after every entity is there
+        readonly Dictionary<string, string> contained = [];        // element → the storey it joins (WriteContainment)
+        readonly HashSet<int> sketched = [];                       // Studio solids: Lapin's, built from a sketch the file has not (they come as references)
+
+        static readonly Dictionary<string, string> ProperNames = BuildNames();
+
+        public IfcImportResult Result() => new(elements, updated, references, storeys, notes, recognized, recognizedByClass, referencesByClass, recognition?.Skipped, Fidelity: fidelity);
+
+        public void Apply(IEdit edit)
+        {
+            foreach (var r in f.OfType("IFCRELDEFINESBYPROPERTIES"))
+                foreach (var p in Refs(r[4])) (definitions.TryGetValue(p, out var l) ? l : definitions[p] = []).Add(Ref(r[5]));
+            foreach (var r in f.OfType("IFCRELCONTAINEDINSPATIALSTRUCTURE"))
+                foreach (var p in Refs(r[4])) containedIn[p] = Ref(r[5]);
+            // A part aggregated under an element (a box's wall under its assembly) stands where its whole does; twice, for a part of a part.
+            var aggregates = f.OfType("IFCRELAGGREGATES").Where(r => f.Get(r[4]) is { } whole && whole.Type is not ("IFCPROJECT" or "IFCSITE" or "IFCBUILDING" or "IFCBUILDINGSTOREY")).ToList();
+            for (var pass = 0; pass < 2; pass++)
+                foreach (var r in aggregates)
+                    if (containedIn.TryGetValue(Ref(r[4]), out var sp))
+                        foreach (var part in Refs(r[5])) containedIn.TryAdd(part, sp);
+            // Rooms are aggregated into their storey, not contained.
+            foreach (var r in f.OfType("IFCRELAGGREGATES"))
+                if (f.Get(r[4]) is { Type: "IFCBUILDINGSTOREY" } storey)
+                    foreach (var p in Refs(r[5])) if (f.Entities.GetValueOrDefault(p) is { Type: "IFCSPACE" }) containedIn[p] = storey.Id;
+            Project(edit);
+            Georeference(edit);
+            Storeys(edit);
+            if (!o.ReferenceOnly)
+            {
+                Materials(edit);
+                Types(edit);
+            }
+            Elements(edit);
+            foreach (var r in relations) r(edit);
+            ProvisionOpenings(edit);
+            WriteContainment(edit);
+            Enforce(edit);
+            MapTypes(edit);
+            UnitInstances(edit);
+            if (ReadProcesses && !o.ReferenceOnly) Processes(edit);
+            if (ReadProcesses && !o.ReferenceOnly) Controls(edit);
+            Classified(edit);
+            var left = edit.Model.Entities.Count(e => s.Catalog.Geometry(e.Class) != null && !seen.Contains(e.Id) && e.Class is not (IfcClass.OpeningElement or IfcClass.Annotation or IfcClass.Grid));
+            if (left > 0 && elements + updated > 0) notes.Add($"{left} element(s) of the project are not in the file; they stay as they are.");
+            if (f.ComplexCount is var complex && complex > 0) notes.Add($"{complex} complex STEP instance(s) (several partial records in one) skipped: Lapin does not read them.");
+        }
+
+        /// <summary>
+        /// The file's classifications (docs/plan-user-extensibility.md §7.3): each IfcClassification a system of the project (one of its
+        /// name kept, its items added), each reference's code (Identification, else Location) and title (Name) an item of it, put on
+        /// the elements and types the file relates it to that came in; a reference without a system goes under „IFC classification”.
+        /// </summary>
+        void Classified(IEdit edit)
+        {
+            var rels = f.OfType("IFCRELASSOCIATESCLASSIFICATION").ToList();
+            if (rels.Count == 0) return;
+            var count = 0;
+            foreach (var r in rels)
+            {
+                if (f.Get(r[5]) is not { Type: "IFCCLASSIFICATIONREFERENCE" } reference) continue;
+                var code = Str(reference[1]) ?? Str(reference[0]);
+                if (string.IsNullOrWhiteSpace(code)) continue;
+                // Its system: the classification it names, through references of references (a tree written as one).
+                var source = f.Get(reference[3]);
+                var parentCode = source is { Type: "IFCCLASSIFICATIONREFERENCE" } pr ? Str(pr[1]) ?? Str(pr[0]) : null;
+                for (var i = 0; i < 16 && source is { Type: "IFCCLASSIFICATIONREFERENCE" }; i++) source = f.Get(source[3]);
+                var name = source is { Type: "IFCCLASSIFICATION" } c ? Str(c[3]) ?? "IFC classification" : "IFC classification";
+                var system = Classifications.System(edit.Model, name);
+                if (system == null)
+                {
+                    var attrs = new JsonObject { ["items"] = new JsonArray() };
+                    if (source is { Type: "IFCCLASSIFICATION" } cs)
+                    {
+                        if (Str(cs[0]) is { Length: > 0 } src) attrs["source"] = src;
+                        if (Str(cs[1]) is { Length: > 0 } ed) attrs["edition"] = ed;
+                    }
+                    system = new Entity(GlobalId.New(), Classifications.Class, name, attrs);
+                    edit.Add(system);
+                }
+                if (!Classifications.Items(system).Any(x => x.Code == code))
+                {
+                    var attrs = system.CloneAttrs();
+                    var items = (attrs["items"] as JsonArray)?.DeepClone() as JsonArray ?? [];
+                    var item = new JsonObject { ["code"] = code, ["title"] = Str(reference[2]) ?? "" };
+                    if (parentCode is { Length: > 0 }) item["parent"] = parentCode;
+                    items.Add((JsonNode)item);
+                    attrs["items"] = items;
+                    edit.Replace(system = system.With(attrs: attrs));
+                }
+                foreach (var obj in Refs(r[4]))
+                {
+                    if (f.Get(obj) is not { } fe || Str(fe[0]) is not { } gid || edit.Model.Get(gid) is not { } target) continue;
+                    var refs = Classifications.RefsOf(target).Where(x => x.System != system.Id).Append((system.Id, code)).ToList();
+                    var attrs = target.CloneAttrs();
+                    attrs[Classifications.Key] = new JsonArray(refs.Select(x => (JsonNode)new JsonObject { ["system"] = x.Item1, ["code"] = x.Item2 }).ToArray());
+                    edit.Replace(target.With(attrs: attrs));
+                    count++;
+                }
+            }
+            if (count > 0) notes.Add($"{count} classification code(s) read onto the elements and types.");
+        }
+
+        // ─── Reading ────────────────────────────────────────────────────────
+
+        // The file's values read as the model reads them.
+        static string? Str(object? v) => IfcModel.Str(v);
+        static double Num(object? v) => IfcModel.Num(v);
+        static int Ref(object? v) => IfcModel.Ref(v);
+        static IEnumerable<int> Refs(object? v) => IfcModel.Refs(v);
+        static string? Enum(object? v) => (v as StepEnum)?.Value;
+        List<StepEntity> Items(object? v) => model.Items(v);
+
+        static Dictionary<string, string> BuildNames()
+        {
+            var d = new Dictionary<string, string>();
+            foreach (var field in typeof(IfcClass).GetFields(BindingFlags.Public | BindingFlags.Static))
+                if (field.GetValue(null) is string name) d[name.ToUpperInvariant()] = name;
+            foreach (var name in new[] { "IfcBuildingElementPart", "IfcMember", "IfcPlate", "IfcCovering", "IfcRailing", "IfcStair", "IfcRamp", "IfcChimney", "IfcFurnishingElement", "IfcPipeSegment", "IfcDiscreteAccessory", "IfcElementAssembly", "IfcCurtainWall", "IfcStairFlight", "IfcRampFlight", "IfcPile", "IfcWallStandardCase", "IfcSpace", "IfcMemberType", "IfcPlateType", "IfcCoveringType", "IfcRailingType", "IfcStairType", "IfcRampType", "IfcBuildingElementProxyType" })
+                d[name.ToUpperInvariant()] = name;
+            return d;
+        }
+
+        /// <summary>
+        /// The file's relationships by the entity they are read for, indexed once: looked up per element, a scan of every
+        /// relationship of the file for each element was quadratic (10,000 elements, some 10⁹ steps).
+        /// </summary>
+        sealed class RelIndex
+        {
+            readonly Dictionary<int, List<StepEntity>> _of = [];
+
+            public RelIndex(IEnumerable<StepEntity> relationships, Func<StepEntity, IEnumerable<int>> keys)
+            {
+                foreach (var r in relationships)
+                    foreach (var k in keys(r).Distinct())
+                        (_of.TryGetValue(k, out var l) ? l : _of[k] = []).Add(r);
+            }
+
+            /// <summary>The relationships read for an entity, in the file's order.</summary>
+            public IReadOnlyList<StepEntity> this[int id] => _of.TryGetValue(id, out var l) ? l : [];
+        }
+
+        /// <summary>The indexes <see cref="Native"/>, <see cref="Types"/>, <see cref="Materials"/>, <see cref="Assembly"/> and <see cref="Referenced"/> read.</summary>
+        sealed class RelIndexes(StepFile f)
+        {
+            public RelIndex TypeOf => _typeOf ??= new(f.OfType("IFCRELDEFINESBYTYPE"), r => Refs(r[4]));                       // object → by type
+            public RelIndex MaterialOf => _materialOf ??= new(f.OfType("IFCRELASSOCIATESMATERIAL"), r => Refs(r[4]));          // object → its material
+            public RelIndex VoidsOf => _voidsOf ??= new(f.OfType("IFCRELVOIDSELEMENT"), r => [Ref(r[4])]);                   // element → its voids
+            public RelIndex FillsOf => _fillsOf ??= new(f.OfType("IFCRELFILLSELEMENT"), r => [Ref(r[4])]);                   // opening → its fills
+            public RelIndex JoinsOf => _joinsOf ??= new(f.OfType("IFCRELCONNECTSPATHELEMENTS"), r => [Ref(r[5])]);           // relating element → its joins
+            public RelIndex ConnectedBy => _connectedBy ??= new(f.OfType("IFCRELCONNECTSELEMENTS"), r => [Ref(r[6])]);       // related element → its connections
+            public RelIndex PartsOf => _partsOf ??= new(f.OfType("IFCRELAGGREGATES"), r => [Ref(r[4])]);                     // whole → its aggregations
+            public RelIndex PropertiesOf => _propertiesOf ??= new(f.OfType("IFCMATERIALPROPERTIES"), p => [Ref(p[3])]);       // material → its properties
+            public RelIndex RepresentationsOf => _repsOf ??= new(f.OfType("IFCMATERIALDEFINITIONREPRESENTATION"), r => [Ref(r[3])]); // material → its looks
+            RelIndex? _typeOf, _materialOf, _voidsOf, _fillsOf, _joinsOf, _connectedBy, _partsOf, _propertiesOf, _repsOf;
+        }
+
+        RelIndexes Rels => rels ??= new RelIndexes(f);
+        RelIndexes? rels;
+
+        static string ClassName(string upper) => ProperNames.TryGetValue(upper, out var n) ? n : IfcModel.ClassName(upper);
+
+        /// <summary>The file's intent set on an entity: through IfcRelDefinesByProperties, or a type's own HasPropertySets, or a material's properties.</summary>
+        Intent? IntentOf(int id, object? hasPropertySets = null)
+        {
+            var sets = Items(hasPropertySets).Select(x => x.Id).Concat(definitions.GetValueOrDefault(id) ?? []);
+            foreach (var sid in sets)
+                if (f.Entities.GetValueOrDefault(sid) is { Type: "IFCPROPERTYSET" } set && IfcExport.IsIntentSet(Str(set[2]))) return Parse(Items(set[4]));
+            return null;
+        }
+
+        /// <summary>The cage a SubD solid's Lapin_SubD set carries (decision 780), as the JSON it was written as; null when none.</summary>
+        JsonNode? SubDCageOf(int id)
+        {
+            foreach (var sid in definitions.GetValueOrDefault(id) ?? [])
+                if (f.Entities.GetValueOrDefault(sid) is { Type: "IFCPROPERTYSET" } set && Str(set[2]) == IfcExport.SubDSetName)
+                    foreach (var p in Items(set[4]))
+                        if (p.Type == "IFCPROPERTYSINGLEVALUE" && Str(p[0]) == IfcExport.SubDCageProperty && Value(p[2]) is JsonObject cage) return cage;
+            return null;
+        }
+
+        /// <summary>The provision openings of Lapin's own IFC (decision 296): their host's GlobalId and the IfcOpeningElement.</summary>
+        readonly List<(string Host, StepEntity Opening)> provisions = [];
+
+        /// <summary>An opening's Lapin_ProvisionOpening set (decision 293: an MEP run's provision opening): its properties, or null.</summary>
+        Dictionary<string, object?>? ProvisionOf(int id)
+        {
+            foreach (var sid in definitions.GetValueOrDefault(id) ?? [])
+                if (f.Entities.GetValueOrDefault(sid) is { Type: "IFCPROPERTYSET" } set && Str(set[2]) == IfcExport.ProvisionSetName)
+                {
+                    var o = new Dictionary<string, object?>();
+                    foreach (var p in Items(set[4]))
+                        if (p.Type == "IFCPROPERTYSINGLEVALUE" && Str(p[0]) is { } name) o[name] = Value(p[2]);
+                    return o;
+                }
+            return null;
+        }
+
+        /// <summary>
+        /// Lapin's own IFC read back (decision 296): a provision opening is not taken as an opening when the run that cut it
+        /// came too and cuts it again by the cut order (it would be cut twice); without its run (left out, or a project that
+        /// does not cut), it comes in as a real opening of its host — a bare one in a wall, an outline in a floor — so nothing is lost.
+        /// </summary>
+        void ProvisionOpenings(IEdit edit)
+        {
+            if (provisions.Count == 0) return;
+            var makers = s.Catalog.All<Lapin.Platform.Coordination.IOpeningMaker>();
+            int made = 0, lost = 0;
+            foreach (var (hostId, op) in provisions)
+            {
+                if (edit.Model.Get(hostId) is not { } host || ProvisionOf(op.Id) is not { } p) continue;
+                var source = p.GetValueOrDefault("Source") as string;
+                if (source != null && Lapin.Platform.Coordination.Provisions.Of(edit.Model, s.Catalog, host).Any(x => x.Cuts && x.SourceId == source)) continue;
+                var pts = model.Shape(op.Id).Body.SelectMany(b => b.Mesh.V).ToList();
+                double W(string k) => p.GetValueOrDefault(k) is double d ? d * model.Scale : 0;
+                var (width, height) = (W("Width"), W("Height"));
+                if (pts.Count == 0 || width <= 0 || height <= 0) { lost++; continue; }
+                var min = new Vec3(pts.Min(q => q.X), pts.Min(q => q.Y), pts.Min(q => q.Z));
+                var max = new Vec3(pts.Max(q => q.X), pts.Max(q => q.Y), pts.Max(q => q.Z));
+                var round = p.GetValueOrDefault("Shape") as string == Lapin.Platform.Coordination.OpeningVoids.Round;
+                // A rectangle's direction in plan: the side of its outline as long as its width.
+                Vec2? along = null;
+                var hull = Polygon2.ConvexHull(pts.Select(q => q.Xy).ToList());
+                for (var i = 0; i < hull.Length && along == null; i++)
+                {
+                    var side = hull[(i + 1) % hull.Length] - hull[i];
+                    if (Math.Abs(side.Length - width) < 2e-3) along = side.Normalized();
+                }
+                try
+                {
+                    if (makers.Select(x => x.MakeAt(edit, host, (min + max) * 0.5, width, height, round, along)).FirstOrDefault(x => x != null) != null) made++;
+                    else lost++;
+                }
+                catch (Exception ex) when (ex is CommandException or ModelException or ArgumentException or InvalidOperationException) { lost++; }
+            }
+            if (made > 0) notes.Add($"{made} provision opening(s) came without the MEP run that cut them: kept as openings of their hosts.");
+            if (lost > 0) notes.Add($"{lost} provision opening(s) came without their run and could not be kept as openings.");
+        }
+
+        Intent Parse(IEnumerable<StepEntity> properties)
+        {
+            var attrs = new JsonObject();
+            string? cls = null, pre = null, host = null, lapinId = null;
+            foreach (var p in properties)
+            {
+                if (p.Type != "IFCPROPERTYSINGLEVALUE" || Str(p[0]) is not { } name) continue;
+                var value = Value(p[2]);
+                switch (name)
+                {
+                    case "LapinClass": cls = value as string; break;
+                    case "LapinPredefinedType": pre = value as string; break;
+                    case "LapinHost": host = value as string; break;
+                    case "LapinId": lapinId = value as string; break;
+                    case "LapinVersion": break;
+                    // A part's id beside its definition (decision 520 P3): the type's GlobalId and tag carry it already.
+                    case "LapinPartId": break;
+                    default: attrs[name] = value switch { JsonNode n => n, bool b => b, double d => d, string t => t, _ => null }; break;
+                }
+            }
+            return new Intent(attrs, cls, pre, host, lapinId);
+        }
+
+        /// <summary>A property's value as Lapin held it: a bool, a number, text, or the JSON a list or object was written as.</summary>
+        static object? Value(object? v) => v switch
+        {
+            StepTyped { Type: "IFCBOOLEAN", Value: StepEnum e } => e.Value == "T",
+            StepTyped { Type: "IFCLOGICAL", Value: StepEnum e } => e.Value == "T",
+            StepTyped { Type: "IFCTEXT", Value: string t } => Json(t),
+            StepTyped t => Value(t.Value),
+            double d => d,
+            long l => (double)l,
+            string str => str,
+            StepEnum e => e.Value,
+            _ => null,
+        };
+
+        static object? Json(string text)
+        {
+            try { return JsonNode.Parse(text); }
+            catch (JsonException) { return text; }
+        }
+
+        static bool IsProduct(StepEntity e) => IsProductEntity(e);
+
+        Func<int, int>? storeyOfProduct;
+
+        /// <summary>What the user chose to bring (the import's options): this element's kind and the storey it stands on (up its space or its whole, <see cref="IfcSurvey.StoreyResolver"/>); everything without a choice.</summary>
+        bool Takes(StepEntity e, IReadOnlyDictionary<int, int>? parentOf = null)
+        {
+            if (!o.Filtered) return true;
+            if (o.Kinds != null && !o.Kinds.Contains(IfcSurvey.KindOf(e))) return false;
+            if (o.Storeys == null) return true;
+            var sp = (storeyOfProduct ??= IfcSurvey.StoreyResolver(f))(e.Id);
+            var gid = sp != 0 && f.Entities.TryGetValue(sp, out var storey) ? Str(storey[0]) ?? "" : "";
+            return o.Storeys.Contains(gid);
+        }
+
+        void Report(string stage, int done, int total) => s.Progress?.Invoke(stage, done, total);
+
+        /// <summary>Progress told every hundredth of <paramref name="total"/>, and at the end.</summary>
+        static bool Due(int done, int total) => total > 0 && (done == total || done % Math.Max(1, total / 100) == 0);
+
+        // ─── Writing ────────────────────────────────────────────────────────
+
+        /// <summary>An entity put as the file says: the one with the same id updated (its class changed if need be), else added.</summary>
+        Entity Put(IEdit edit, string id, string cls, string name, JsonObject attrs, string? predefined, bool counts = true)
+        {
+            seen.Add(id);
+            if (edit.Model.Get(id) is { } existing)
+            {
+                if (existing.Class == cls)
+                {
+                    var e = existing.With(name: name, attrs: attrs, predefinedType: predefined);
+                    edit.Replace(e);
+                    if (counts) updated++;
+                    return e;
+                }
+                edit.Remove(id);
+            }
+            var made = new Entity(id, cls, name, attrs, predefined);
+            edit.Add(made);
+            if (counts) elements++;
+            return made;
+        }
+
+        /// <summary>
+        /// A relationship as the model keeps it: typing and material associations grouped by what relates (one relation per type), the
+        /// first of them with the file's id, so an element's layer set usage is written back under the association's GlobalId it came
+        /// with; the others one each, with the file's id.
+        /// </summary>
+        void Relate(IEdit edit, string? id, string cls, string relating, string related, JsonObject? attrs = null)
+        {
+            if (edit.Model.Get(relating) == null || edit.Model.Get(related) == null) return;
+            var existing = edit.Model.RelationsOf(relating, cls).Where(r => r.Relating == relating).ToList();
+            if (existing.Any(r => r.Related.Contains(related))) return;
+            var free = id != null && GlobalId.IsValid(id) && edit.Model.GetRelation(id) == null;
+            if ((cls is IfcClass.RelDefinesByType or IfcClass.RelAssociatesMaterial) && (existing.Count > 0 || !free)) { edit.Relate(cls, relating, related); return; }
+            var rid = free ? id! : edit.NewId();
+            edit.AddRelation(new Relation(rid, cls, relating, [related], attrs));
+        }
+
+        void Contain(IEdit edit, string elementId, string? storeyId)
+        {
+            storeyId ??= ReplaceStoreys && storeyOf.Count > 0 ? DefaultStorey(edit) : Spatial.Storeys(edit.Model).FirstOrDefault()?.Id;
+            if (storeyId == null) return;
+            var now = Spatial.StoreyOf(edit.Model, elementId);
+            if (now?.Id == storeyId) return;
+            if (now != null) edit.Unrelate(IfcClass.RelContainedInSpatialStructure, elementId);
+            contained[elementId] = storeyId;
+        }
+
+        /// <summary>
+        /// The elements gathered by <see cref="Contain"/> joined to their storeys, each storey's
+        /// relationship written once: one at a time, it was copied and indexed again for every
+        /// element (quadratic: a million elements never finished).
+        /// </summary>
+        void WriteContainment(IEdit edit)
+        {
+            foreach (var group in contained.GroupBy(c => c.Value, c => c.Key))
+            {
+                var own = edit.Model.RelationsOf(group.Key, IfcClass.RelContainedInSpatialStructure).FirstOrDefault(r => r.Relating == group.Key);
+                if (own == null) edit.AddRelation(new Relation(edit.NewId(), IfcClass.RelContainedInSpatialStructure, group.Key, group.ToList()));
+                else edit.ReplaceRelation(own with { Related = [.. own.Related, .. group] });
+            }
+            contained.Clear();
+            KeepContainmentIds(edit);
+        }
+
+        string? StoreyFor(int product) => containedIn.TryGetValue(product, out var sp) && storeyOf.TryGetValue(sp, out var id) ? id : null;
+
+        void Project(IEdit edit)
+        {
+            if (o.ReferenceOnly || f.OfType("IFCPROJECT").FirstOrDefault() is not { } p || IntentOf(p.Id) is not { } intent) return;
+            var project = Spatial.Project(edit.Model) ?? Spatial.Project(edit.Model);
+            if (project == null) { Spatial.EnsureBuilding(edit); project = Spatial.Project(edit.Model)!; }
+            var attrs = project.CloneAttrs();
+            foreach (var (k, v) in intent.Attrs) attrs[k] = v?.DeepClone();
+            locationFromIntent = intent.Attrs.ContainsKey("location");
+            ProjectInformation(p.Id, attrs);
+            edit.Replace(project.With(name: Str(p[2]) ?? project.Name, attrs: attrs));
+        }
+
+        /// <summary>
+        /// The project's information read back from Lapin_ProjectInformation (decision 340): a field by its key, any other
+        /// property as a parameter of the user's (its description the label, a date or a number as such); what the project
+        /// has already is kept.
+        /// </summary>
+        void ProjectInformation(int project, System.Text.Json.Nodes.JsonObject attrs)
+        {
+            var props = PropertiesOf(project, IfcExport.ProjectInfoSetName);
+            if (props.Count == 0) return;
+            var info = (attrs[Lapin.Platform.Documents.ProjectInfo.Key] as System.Text.Json.Nodes.JsonObject)?.DeepClone() as System.Text.Json.Nodes.JsonObject ?? [];
+            var custom = info[Lapin.Platform.Documents.ProjectInfo.CustomKey] as System.Text.Json.Nodes.JsonArray ?? [];
+            var labels = new Dictionary<string, (string? Label, string Type)>();
+            foreach (var sid in definitions.GetValueOrDefault(project) ?? [])
+                if (f.Entities.GetValueOrDefault(sid) is { Type: "IFCPROPERTYSET" } set && Str(set[2]) == IfcExport.ProjectInfoSetName)
+                    foreach (var pv in Items(set[4]))
+                        if (pv.Type == "IFCPROPERTYSINGLEVALUE" && Str(pv[0]) is { } pname)
+                            labels[pname] = (Str(pv[1]), pv[2] switch { StepTyped { Type: "IFCDATE" } => "date", StepTyped { Type: "IFCREAL" or "IFCINTEGER" } => "number", _ => "text" });
+            foreach (var (name, value) in props)
+            {
+                if (value.Length == 0) continue;
+                if (Lapin.Platform.Documents.ProjectInfo.Fields.Any(x => x.Key == name)) { if (info[name] is null) info[name] = value; continue; }
+                if (custom.OfType<System.Text.Json.Nodes.JsonObject>().Any(c => string.Equals((string?)c["key"], name, StringComparison.OrdinalIgnoreCase))) continue;
+                if (!System.Text.RegularExpressions.Regex.IsMatch(name, "^[A-Za-z][A-Za-z0-9_]{0,39}$")) continue;
+                var (label, type) = labels.GetValueOrDefault(name, (null, "text"));
+                custom.Add((System.Text.Json.Nodes.JsonNode)new System.Text.Json.Nodes.JsonObject { ["key"] = name, ["label"] = label ?? name, ["type"] = type, ["group"] = "other", ["value"] = value });
+            }
+            if (custom.Count > 0) info[Lapin.Platform.Documents.ProjectInfo.CustomKey] = custom;
+            if (info.Count > 0) attrs[Lapin.Platform.Documents.ProjectInfo.Key] = info;
+        }
+
+        /// <summary>
+        /// The file's storeys: the project's by id, else by name, else by elevation; new ones added under the building with the
+        /// file's GlobalId. A project made from the file (<see cref="Open"/>) has them all by id already.
+        /// </summary>
+        void Storeys(IEdit edit)
+        {
+            var building = Spatial.EnsureBuilding(edit);
+            var matched = new HashSet<string>();
+            foreach (var st in f.OfType("IFCBUILDINGSTOREY"))
+            {
+                var gid = Str(st[0]) ?? "";
+                var name = Str(st[2]) ?? Str(st[7]) ?? "Level";
+                var z = Length(st[9]);
+                var existing = Spatial.Storeys(edit.Model).Where(x => !matched.Contains(x.Id)).ToList();
+                var match = edit.Model.Get(gid) is { Class: IfcClass.BuildingStorey } byId ? byId
+                    : ReplaceStoreys ? null
+                    : existing.FirstOrDefault(x => string.Equals(x.Name, name, StringComparison.OrdinalIgnoreCase))
+                    ?? existing.FirstOrDefault(x => Math.Abs(x.Num("elevation") - z) < 1e-6);
+                var attrs = (o.ReferenceOnly ? null : IntentOf(st.Id)?.Attrs) ?? match?.CloneAttrs() ?? new JsonObject();
+                attrs["elevation"] = z;
+                if (attrs["height"] == null) attrs["height"] = 3.0;
+                if (match != null)
+                {
+                    edit.Replace(match.With(name: name, attrs: attrs));
+                    storeyOf[st.Id] = match.Id;
+                    matched.Add(match.Id);
+                    KeepContainmentId(st, match.Id);
+                    continue;
+                }
+                var made = new Entity(GlobalId.IsValid(gid) && edit.Model.Get(gid) == null ? gid : edit.NewId(), IfcClass.BuildingStorey, name, attrs);
+                edit.Add(made);
+                edit.Relate(IfcClass.RelAggregates, building.Id, made.Id);
+                storeyOf[st.Id] = made.Id;
+                matched.Add(made.Id);
+                KeepContainmentId(st, made.Id);
+                storeys++;
+            }
+        }
+
+        /// <summary>A length in metres, clean of the noise a unit conversion leaves (2.8000000000000003 from millimetres).</summary>
+        double Length(object? v) => Math.Round(Num(v) * model.Scale, 9);
+
+        /// <summary>The file's materials: those with a Lapin id keep it (what refers to them still holds); the others by name.</summary>
+        void Materials(IEdit edit)
+        {
+            foreach (var mat in f.OfType("IFCMATERIAL"))
+            {
+                var name = Str(mat[0]) ?? "Material";
+                var props = Rels.PropertiesOf[mat.Id].FirstOrDefault(p => IfcExport.IsIntentSet(Str(p[0])));
+                var intent = props == null ? null : Parse(Items(props[2]));
+                string id;
+                if (intent?.LapinId is { } lapinId && GlobalId.IsValid(lapinId))
+                {
+                    var attrs = intent.Attrs;
+                    if (attrs["color"] == null && Colour(mat.Id) is { } c) attrs["color"] = c;
+                    MaterialMaps(edit, mat.Id, attrs);
+                    id = Put(edit, lapinId, IfcClass.Material, name, attrs, null, counts: false).Id;
+                }
+                else
+                {
+                    var had = Lapin.Platform.Materials.Find(edit.Model, name);
+                    var found = Lapin.Platform.Materials.Ensure(edit, name, Colour(mat.Id));
+                    // See-through in its file (glass: its surface style's transparency, report #76): a material the import makes, or one
+                    // that sets no transparency of its own, takes it.
+                    if (Transparency(mat.Id) is { } t && (had == null || had.Attrs["transparency"] == null))
+                    {
+                        var a = found.CloneAttrs();
+                        a["transparency"] = Math.Round(t, 3);
+                        found = found.With(attrs: a);
+                        edit.Replace(found);
+                    }
+                    // Its drawing graphics from its IfcFillAreaStyles (decision 678), when the project's material sets none of its own.
+                    if (!Lapin.Drawing.MaterialGraphics.Kinds.Any(k => found.Attrs[k] != null) && FillGraphics(mat.Id, Lapin.Platform.DraftingResources.Patterns(edit.Model)) is { Count: > 0 } graphics)
+                    {
+                        var a = found.CloneAttrs();
+                        foreach (var (k, v) in graphics) a[k] = v!.DeepClone();
+                        found = found.With(attrs: a);
+                        edit.Replace(found);
+                    }
+                    id = found.Id;
+                    // Another program's material: its description and its property sets (docs/plan-buildup-tags.md), what the project's lacks.
+                    if (ForeignData(found, mat) is { } withData) edit.Replace(withData);
+                }
+                materialIds[mat.Id] = id;
+            }
+        }
+
+        /// <summary>
+        /// A Lapin material's maps back from its file (docs/plan-render.md, S1): each image its attributes name (textureImage,
+        /// normalImage… with the ids they had) made again, under that id, from the IfcBlobTexture of its surface style whose Mode
+        /// says that map (IfcExport.TextureModes); an image the file does not hold is taken off the material.
+        /// </summary>
+        void MaterialMaps(IEdit edit, int material, JsonObject attrs)
+        {
+            Dictionary<string, StepEntity>? blobs = null;
+            foreach (var (map, key) in Lapin.Platform.Images.MapKeys)
+            {
+                if ((string?)(attrs[key] as JsonValue) is not { Length: > 0 } imageId) continue;
+                if (edit.Model.Get(imageId) is { Class: Lapin.Platform.Images.Class }) { seen.Add(imageId); continue; }
+                blobs ??= Blobs(material);
+                if (blobs.TryGetValue(IfcExport.TextureModes[map], out var blob) && Str(blob[5]) is { } format && blob[6] is string code && code.Length > 1)
+                {
+                    try
+                    {
+                        var bytes = Convert.FromHexString(code[1..]);
+                        var mime = Lapin.Platform.Images.Sniff(bytes) ?? (format.Equals("PNG", StringComparison.OrdinalIgnoreCase) ? "image/png" : "image/jpeg");
+                        Put(edit, imageId, Lapin.Platform.Images.Class, $"{map}.{(mime == "image/png" ? "png" : "jpg")}", new JsonObject { ["mime"] = mime, ["data"] = Convert.ToBase64String(bytes) }, null, counts: false);
+                        continue;
+                    }
+                    catch (FormatException) { }
+                }
+                attrs.Remove(key);
+            }
+        }
+
+        /// <summary>A material's IfcBlobTextures by their Mode, from the surface styles of its representation.</summary>
+        Dictionary<string, StepEntity> Blobs(int material)
+        {
+            var o = new Dictionary<string, StepEntity>(StringComparer.OrdinalIgnoreCase);
+            foreach (var rep in Rels.RepresentationsOf[material])
+                foreach (var styled in Items(rep[2]).SelectMany(r => Items(r[3])).Where(i => i.Type == "IFCSTYLEDITEM"))
+                    foreach (var style in Items(styled[1]).Where(x => x.Type == "IFCSURFACESTYLE"))
+                        foreach (var item in Items(style[2]).Where(x => x.Type == "IFCSURFACESTYLEWITHTEXTURES"))
+                            foreach (var tex in Items(item[0]).Where(x => x.Type == "IFCBLOBTEXTURE"))
+                                if (Str(tex[2]) is { Length: > 0 } mode) o.TryAdd(mode, tex);
+            return o;
+        }
+
+        /// <summary>The measures of a material's properties a project may give a unit of its own (IfcUnitEnum, IfcDerivedUnitEnum): read in SI.</summary>
+        static readonly Dictionary<string, string> MeasureUnits = new()
+        {
+            ["IFCVOLUMEMEASURE"] = "VOLUMEUNIT", ["IFCMASSMEASURE"] = "MASSUNIT", ["IFCMASSDENSITYMEASURE"] = "MASSDENSITYUNIT",
+            ["IFCTHERMALCONDUCTIVITYMEASURE"] = "THERMALCONDUCTANCEUNIT", ["IFCSPECIFICHEATCAPACITYMEASURE"] = "SPECIFICHEATCAPACITYUNIT",
+            ["IFCMODULUSOFELASTICITYMEASURE"] = "MODULUSOFELASTICITYUNIT", ["IFCPRESSUREMEASURE"] = "PRESSUREUNIT",
+            ["IFCTHERMALEXPANSIONCOEFFICIENTMEASURE"] = "THERMALEXPANSIONCOEFFICIENTUNIT", ["IFCTHERMALTRANSMITTANCEMEASURE"] = "THERMALTRANSMITTANCEUNIT",
+        };
+
+        /// <summary>
+        /// A foreign material's IfcMaterial.Description and IfcMaterialProperties read into the project's material: the description
+        /// when it has none, each property it lacks as a parameter (a standard set's by its own names, Lapin_Material's as the user's
+        /// own, any other set as a set of the user's); null when nothing is added.
+        /// </summary>
+        Entity? ForeignData(Entity material, StepEntity mat)
+        {
+            var attrs = material.CloneAttrs();
+            var changed = false;
+            if (material.Str("description") is not { Length: > 0 } && mat.Args.Count > 1 && Str(mat[1]) is { Length: > 0 } description) { attrs["description"] = description; changed = true; }
+            var list = attrs["params"] as JsonArray ?? [];
+            foreach (var props in Rels.PropertiesOf[mat.Id])
+            {
+                var setName = Str(props[0]);
+                if (setName is not { Length: > 0 } || IfcExport.IsIntentSet(setName) || setName == IfcExport.LightSetName) continue;
+                string? pset = setName == StandardPsets.MaterialOwn || setName == StandardPsets.Own ? null : setName;
+                foreach (var p in Items(props[2]))
+                {
+                    if (p.Type != "IFCPROPERTYSINGLEVALUE" || Str(p[0]) is not { Length: > 0 } pname) continue;
+                    if (list.OfType<JsonObject>().Any(x => Params.Same(x, pset, pname))) continue;
+                    // A measure in SI: by the property's own unit, else the project's of its kind (an area in square metres
+                    // in a project in millimetres, as Revit writes it, is not the length unit squared).
+                    double Si(StepTyped t, string unitType) => Math.Round(Num(t.Value) * model.UnitOf(p[3], unitType), 9);
+                    var (kind, value) = p[2] switch
+                    {
+                        StepTyped { Type: "IFCLENGTHMEASURE" or "IFCPOSITIVELENGTHMEASURE" } t => ("length", (JsonNode?)Si(t, "LENGTHUNIT")),
+                        StepTyped { Type: "IFCAREAMEASURE" } t => ("area", (JsonNode?)Si(t, "AREAUNIT")),
+                        StepTyped { Type: "IFCBOOLEAN" or "IFCLOGICAL", Value: StepEnum e } => ("bool", (JsonNode?)(e.Value == "T")),
+                        StepTyped { Value: double or long } t when MeasureUnits.TryGetValue(t.Type, out var unitType) => ("number", (JsonNode?)Si(t, unitType)),
+                        StepTyped { Value: double or long } t => ("number", (JsonNode?)Num(t.Value)),
+                        StepTyped { Value: string text } => ("text", (JsonNode?)text),
+                        _ => ("", null),
+                    };
+                    if (kind == "" || value is null) continue;
+                    try
+                    {
+                        var (set, standardKind) = StandardPsets.Check(IfcClass.Material, pset, pname);
+                        var entry = new JsonObject { ["name"] = pname, ["kind"] = standardKind ?? kind, ["value"] = Params.Check(standardKind ?? kind, value, null) };
+                        if (set != null) entry["pset"] = set;
+                        list.Add((JsonNode)entry);
+                        changed = true;
+                    }
+                    // A standard set Lapin does not know, or a value not of its kind: left out.
+                    catch (CommandException) { }
+                }
+            }
+            if (!changed) return null;
+            if (list.Count > 0) attrs["params"] = list;
+            return material.With(attrs: attrs);
+        }
+
+        /// <summary>A material's colour from its representation (a styled item with a surface style).</summary>
+        string? Colour(int material)
+        {
+            foreach (var rep in Rels.RepresentationsOf[material])
+                foreach (var styled in Items(rep[2]).SelectMany(r => Items(r[3])).Where(i => i.Type == "IFCSTYLEDITEM"))
+                    foreach (var style in Items(styled[1]).Where(x => x.Type == "IFCSURFACESTYLE"))
+                        foreach (var shading in Items(style[2]))
+                            if (f.Get(shading[0]) is { Type: "IFCCOLOURRGB" } rgb)
+                                return HexColor.Of(Num(rgb[1]), Num(rgb[2]), Num(rgb[3]));
+            return null;
+        }
+
+        /// <summary>
+        /// A material's drawing graphics from the IfcFillAreaStyles of its representation (decision 678), by kind of view (its
+        /// name: Lapin's <see cref="IfcExport.FillAreaStyleNames"/>, else a name saying plan or elevation, else the section):
+        /// an IfcColourRgb its fill; each IfcFillAreaStyleHatching a hatch, its IfcCurveStyle's name its pattern (a library
+        /// pattern, or what the name suggests, else lines at its angle) and „Background …” the background hatch, its colour and
+        /// width (paper metres) the hatch's, its spacing over the pattern's first family's its scale.
+        /// </summary>
+        JsonObject? FillGraphics(int material, IReadOnlyList<Lapin.Drawing.Hatch.HatchPattern> patterns)
+        {
+            JsonObject? o = null;
+            foreach (var rep in Rels.RepresentationsOf[material])
+                foreach (var styled in Items(rep[2]).SelectMany(r => Items(r[3])).Where(i => i.Type == "IFCSTYLEDITEM"))
+                    foreach (var style in Items(styled[1]).SelectMany(x => x.Type == "IFCPRESENTATIONSTYLEASSIGNMENT" ? Items(x[0]) : [x]).Where(x => x.Type == "IFCFILLAREASTYLE"))
+                    {
+                        var name = Str(style[0]) ?? "";
+                        var kind = IfcExport.FillAreaStyleNames.FirstOrDefault(kv => string.Equals(kv.Value, name, StringComparison.OrdinalIgnoreCase)).Key
+                            ?? (name.Contains("elevation", StringComparison.OrdinalIgnoreCase) ? "elevation" : name.Contains("plan", StringComparison.OrdinalIgnoreCase) ? "plan" : "section");
+                        if (o?.ContainsKey(kind) == true) continue;
+                        var g = new JsonObject();
+                        foreach (var item in Items(style[1]))
+                        {
+                            if (item.Type == "IFCCOLOURRGB") { g["fill"] = HexColor.Of(Num(item[1]), Num(item[2]), Num(item[3])); continue; }
+                            if (item.Type != "IFCFILLAREASTYLEHATCHING") continue;
+                            var curve = f.Get(item[0]);
+                            var curveName = Str(curve?[0]) ?? "";
+                            var background = curveName.StartsWith("Background ", StringComparison.OrdinalIgnoreCase);
+                            var patternName = background ? curveName["Background ".Length..].Trim() : curveName.Trim();
+                            var angle = Num(item[4]) * 180 / Math.PI;
+                            var spacing = Num(item[1]);
+                            var known = patternName.Length > 0 ? Lapin.Drawing.MaterialGraphics.FromIfcHatch(patternName, null, null, null, patterns) : null;
+                            var h = new JsonObject();
+                            if (known?.Hatch is { Length: > 0 } pattern && Lapin.Drawing.Hatch.HatchLibrary.Find(pattern, patterns) is { Families.Count: > 0 } p)
+                            {
+                                h["hatch"] = pattern;
+                                var fam = p.Families[0];
+                                if (Math.Abs(fam.DeltaY) > 1e-9 && spacing > 0 && Math.Round(spacing * 1000 / Math.Abs(fam.DeltaY), 3) is var sc && Math.Abs(sc - 1) > 1e-6) h["hatchScale"] = sc;
+                                if (Math.Round(angle - fam.AngleDeg, 3) is var ha && Math.Abs(ha) > 1e-6) h["hatchAngle"] = ha;
+                            }
+                            else h["hatch"] = Lapin.Drawing.MaterialGraphics.FromIfcHatch(null, null, angle, null)!.Hatch;
+                            if (curve != null && f.Get(curve[3]) is { Type: "IFCCOLOURRGB" } rgb && HexColor.Of(Num(rgb[1]), Num(rgb[2]), Num(rgb[3])) is var hc && hc != "#000000") h["hatchColor"] = hc;
+                            if (curve != null && curve[2] != null && Num(curve[2]) is var w && w > 0 && Math.Abs(w * 1000 - Lapin.Drawing.Views.Pens.Default.Hatch) > 1e-6) h["hatchWeight"] = Math.Round(w * 1000, 3);
+                            if (background) g["backgroundHatch"] = h;
+                            else foreach (var (k, v) in h) g[k] = v!.DeepClone();
+                        }
+                        if (g.Count > 0) (o ??= [])[kind] = g;
+                    }
+            return o;
+        }
+
+        /// <summary>A material's transparency from its representation's surface style (IfcSurfaceStyleShading or Rendering), when it has one above 0.</summary>
+        double? Transparency(int material)
+        {
+            foreach (var rep in Rels.RepresentationsOf[material])
+                foreach (var styled in Items(rep[2]).SelectMany(r => Items(r[3])).Where(i => i.Type == "IFCSTYLEDITEM"))
+                    foreach (var style in Items(styled[1]).SelectMany(x => x.Type == "IFCPRESENTATIONSTYLEASSIGNMENT" ? Items(x[0]) : [x]).Where(x => x.Type == "IFCSURFACESTYLE"))
+                        foreach (var shading in Items(style[2]))
+                            if (shading.Type is "IFCSURFACESTYLESHADING" or "IFCSURFACESTYLERENDERING" && shading.Args.Count > 1 && shading[1] != null && Math.Clamp(Num(shading[1]), 0, 1) is var t)
+                                return t > 0.001 ? t : null;
+            return null;
+        }
+
+        string MaterialId(IEdit edit, int fileMaterial)
+        {
+            if (materialIds.TryGetValue(fileMaterial, out var id)) return id;
+            var name = Str(f.Entities.GetValueOrDefault(fileMaterial)?[0]) ?? "Material";
+            return materialIds[fileMaterial] = Lapin.Platform.Materials.Ensure(edit, name, null).Id;
+        }
+
+        /// <summary>Whether a layer's Lapin_LayerJoins says it goes on into the floors' layers (the forum's topic #30): true, else null.</summary>
+        bool? LayerJoin(int layer, string property)
+        {
+            foreach (var props in Rels.PropertiesOf[layer])
+            {
+                if (Str(props[0]) != IfcExport.LayerJoinsSetName) continue;
+                foreach (var p in Items(props[2]))
+                    if (p.Type == "IFCPROPERTYSINGLEVALUE" && Str(p[0]) == property && p[2] is StepTyped { Value: StepEnum { Value: "T" } }) return true;
+            }
+            return null;
+        }
+
+        /// <summary>A layer set as the model's entity, its id derived from its owner's (a type) so a second import finds it.</summary>
+        string LayerSet(IEdit edit, int fileSet, string ownerId)
+        {
+            if (layerSets.TryGetValue(fileSet, out var id)) return id;
+            var set = f.Entities[fileSet];
+            // IFC4's Priority (0–100): how the layer meets another element's where they join (report #81).
+            var layers = Items(set[0]).Select(l => new MaterialLayer(MaterialId(edit, Ref(l[0])), Length(l[1]), Str(l[5]) == "Core", Str(l[3]),
+                Priority: l.Args.Count > 6 && l[6] is long or double or StepTyped ? (int)Math.Clamp(Math.Round(Num(l[6])), 0, 100) : null,
+                // Its Description: how the layer is laid in this build-up (the layer's note, docs/plan-buildup-tags.md).
+                Note: l.Args.Count > 4 && Str(l[4]) is { Length: > 0 } note ? note : null,
+                // Its Category when it is one of the materials' (Finish, Insulation…; the forum's topic #30); Core (LoadBearing) marks the core.
+                Category: Str(l[5]) is { } cat ? Lapin.Platform.Materials.Categories.FirstOrDefault(c => string.Equals(c, cat, StringComparison.OrdinalIgnoreCase)) : null,
+                ExtendDown: LayerJoin(l.Id, "ExtendToFloorBelow"), ExtendUp: LayerJoin(l.Id, "ExtendToFloorAbove"))).ToList();
+            id = Step.Guid(ownerId, "layerset");
+            Put(edit, id, IfcClass.MaterialLayerSet, Str(set[1]) ?? "Layers", Layers.Write(layers), null, counts: false);
+            return layerSets[fileSet] = id;
+        }
+
+        void Types(IEdit edit)
+        {
+            foreach (var t in f.Rooted.Where(e => e.Type.EndsWith("TYPE", StringComparison.Ordinal) && e.Args.Count >= 9 && e[0] is string { Length: 22 }))
+            {
+                if (IntentOf(t.Id, t[5]) is not { } intent) continue;
+                // A door's or window's mirrored type (written for elements flipped on one axis) is the type itself.
+                var gid = intent.Attrs["LapinMirrorOf"] is JsonValue mirror && mirror.TryGetValue<string>(out var of) && of.Length > 0 ? of : Str(t[0])!;
+                intent.Attrs.Remove("LapinMirrorOf");
+                var cls = intent.Class ?? ClassName(t.Type);
+                var typeName = Str(t[2]) ?? cls[3..];
+                if (gid != Str(t[0]) && typeName.EndsWith(" (mirrored)", StringComparison.Ordinal)) typeName = typeName[..^" (mirrored)".Length];
+                Put(edit, gid, cls, typeName, intent.Attrs, intent.Predefined ?? Enum(t[9]), counts: false);
+                typeIds[t.Id] = gid;
+                foreach (var rel in Rels.MaterialOf[t.Id])
+                    if (f.Get(rel[5]) is { Type: "IFCMATERIALLAYERSET" } set)
+                    {
+                        var setId = LayerSet(edit, set.Id, gid);
+                        var relId = Str(rel[0]);
+                        relations.Add(e => Relate(e, relId, IfcClass.RelAssociatesMaterial, setId, gid));
+                    }
+            }
+        }
+
+        void Elements(IEdit edit)
+        {
+            // Parts aggregated under an element that is rebuilt natively are its own again; under a foreign one they are what carries the body.
+            var parentOf = partParents;
+            foreach (var r in f.OfType("IFCRELAGGREGATES"))
+                if (f.Get(r[4]) is { } whole && whole.Type is not ("IFCPROJECT" or "IFCSITE" or "IFCBUILDING" or "IFCBUILDINGSTOREY"))
+                    foreach (var part in Refs(r[5])) parentOf[part] = whole.Id;
+            var booleans = s.Catalog.Get<ISolidBooleans>();
+            var fills = new HashSet<int>(f.OfType("IFCRELFILLSELEMENT").Select(r => Ref(r[5])));
+            // What a module rebuilds from the whole file (alignments: outside the storeys), taken before the elements; an alignment's
+            // segments are never references of their own (without a module that takes them, the alignment comes as one by its axis).
+            var taken = new HashSet<int>();
+            if (!o.ReferenceOnly && s.Catalog.All<IIfcFileRecognizer>() is { Count: > 0 } fileRecognizers && DefaultStorey(edit) is { } storey)
+            {
+                if (recognition == null) PrepareRecognition();
+                foreach (var r in fileRecognizers) taken.UnionWith(r.Recognize(edit, f, storey, recognition!));
+            }
+            var products = f.Rooted.Where(IsProduct).Where(e => !taken.Contains(e.Id) && e.Type != "IFCALIGNMENTSEGMENT" && Takes(e, parentOf)).OrderBy(e => e.Id).ToList();
+            // First what is rebuilt natively (Lapin's intent, or recognised); then, as references, the rest: not the
+            // parts of a native element (its body is its own), nor a door or window made with its wall.
+            var native = new HashSet<int>();
+            var rest = new List<StepEntity>();
+            // What the recognisers will be offered, read from the file on every core first.
+            if (!o.ReferenceOnly)
+                PrepareForeign(edit, [.. products.Where(e => !fills.Contains(e.Id) && !parentOf.ContainsKey(e.Id) && IntentOf(e.Id) == null)]);
+            var seenProducts = 0;
+            foreach (var e in products)
+            {
+                if (Due(++seenProducts, products.Count)) Report("Recognising the elements", seenProducts, products.Count);
+                var intent = o.ReferenceOnly ? null : IntentOf(e.Id);
+                // A reference Lapin wrote is one again, from the body the file gives it (its intent carries no body).
+                if (intent != null && (bool?)intent.Attrs["reference"] == true) { rest.Add(e); continue; }
+                // A Studio solid (docs/plan-studio-thick.md) is built from a sketch the file does not carry: it comes back as a
+                // reference with the body the file gives it, under its class, with its type and its assembly; the project it came
+                // from keeps its own, live solid.
+                if (intent != null && Sketched(intent))
+                {
+                    if (edit.Model.Get(Str(e[0]) ?? "") is { } own && own.Str("operation") != null) { seen.Add(own.Id); continue; }
+                    sketched.Add(e.Id);
+                    rest.Add(e);
+                    continue;
+                }
+                if (intent != null)
+                {
+                    Native(edit, e, intent);
+                    native.Add(e.Id);
+                    // A placed part (decision 520 P3) is rebuilt from its part and values: measured against the file's body by the
+                    // gate as a recognised element is, and the file's body where they differ.
+                    if (intent.Attrs["operation"] is JsonValue op && op.TryGetValue<string>(out var operation) && operation == "part" && o.Gate.On && Str(e[0]) is { } partGid)
+                    {
+                        if (recognition == null) PrepareRecognition();
+                        gated.Add(new Gated(e, partGid, ClassName(e.Type), false, [], []) { Native = true });
+                    }
+                    continue;
+                }
+                if (fills.Contains(e.Id)) { rest.Add(e); continue; } // decided by its wall, below
+                if (!o.ReferenceOnly && !parentOf.ContainsKey(e.Id) && Recognize(edit, e)) { native.Add(e.Id); continue; }
+                rest.Add(e);
+            }
+            // A wall Lapin wrote over its parts also carries their bodies as its own (issue #29, for readers that colour the wall): read as
+            // references, its parts are taken, as before, and that body is left, so nothing comes twice.
+            var wholes = parentOf.Values.ToHashSet();
+            bool BodyOfItsParts(StepEntity e) => o.ReferenceOnly && e.Type is "IFCWALL" or "IFCWALLSTANDARDCASE" && wholes.Contains(e.Id) && IntentOf(e.Id) != null;
+            rest.RemoveAll(e =>
+            {
+                if (!BodyOfItsParts(e)) return false;
+                var cls = ClassName(e.Type);
+                bodiless[cls] = bodiless.GetValueOrDefault(cls) + 1;
+                return true;
+            });
+            // The references to come, read from the file on every core before they are put in the model in order.
+            PrepareAll([.. rest.Where(e => !(parentOf.TryGetValue(e.Id, out var parent) && (native.Contains(parent) || (!o.ReferenceOnly && IntentOf(parent) != null)))
+                && !recognizedFills.Contains(e.Id) && (o.ReferenceOnly || !parentOf.ContainsKey(e.Id) || fills.Contains(e.Id)))], booleans);
+            var seenRest = 0;
+            foreach (var e in rest)
+            {
+                if (Due(++seenRest, rest.Count)) Report("Bringing the references", seenRest, rest.Count);
+                if (parentOf.TryGetValue(e.Id, out var parent) && (native.Contains(parent) || (!o.ReferenceOnly && IntentOf(parent) != null))) continue;
+                if (recognizedFills.Contains(e.Id)) continue;
+                if (!o.ReferenceOnly && parentOf.ContainsKey(e.Id) && !fills.Contains(e.Id) && !sketched.Contains(e.Id) && Recognize(edit, e)) continue;
+                Reference(edit, e, booleans);
+            }
+            Spaces(edit);
+            Annotations(edit);
+            FinishRecognition(edit);
+            RuleNotes();
+            UnreadableNotes();
+            if (keptUncut > 0) notes.Add($"{keptUncut} reference(s) drawn whole: their openings could not be cut (no booleans, or a body that is not closed); the openings are kept, and an IFC export writes them back.");
+            if (left2d > 0) notes.Add($"{left2d} element(s) drawn only in 2D left out, as chosen.");
+            if (without2d > 0) notes.Add($"{without2d} element(s) brought without their own 2D, as chosen: plans draw their cut.");
+            foreach (var (cls, n) in bodiless.OrderByDescending(kv => kv.Value))
+                notes.Add($"{n} × {cls} left out: no body Lapin can read (nor 2D for plans).");
+            if (with2d > 0) notes.Add($"{with2d} reference(s) brought their own 2D for plans; plans draw it instead of their cut (a view's style can turn it off).");
+        }
+
+        int with2d, left2d, without2d;
+
+        /// <summary>
+        /// Lapin's own components and apartment types (docs/plan-units.md): an IfcGroup saying Lapin_Component or Lapin_Unit, whose members came back natively,
+        /// is an instance again. Not when the file comes in as one group, for groups do not nest; then, and in anyone else's
+        /// file, they are plain elements.
+        /// </summary>
+        void UnitInstances(IEdit edit)
+        {
+            if (o.ReferenceOnly || o.Group) return;
+            var members = new Dictionary<int, List<string>>();
+            foreach (var r in f.OfType("IFCRELASSIGNSTOGROUP"))
+                if (f.Get(r[6]) is { Type: "IFCGROUP" } g)
+                    (members.TryGetValue(g.Id, out var l) ? l : members[g.Id] = []).AddRange(Items(r[4]).Select(e => Str(e[0])).OfType<string>());
+            foreach (var g in f.OfType("IFCGROUP"))
+                foreach (var sid in definitions.GetValueOrDefault(g.Id) ?? [])
+                {
+                    if (f.Entities.GetValueOrDefault(sid) is not { Type: "IFCPROPERTYSET" } set || Str(set[2]) is not (IfcExport.UnitSetName or IfcExport.ComponentSetName)) continue;
+                    var unit = Str(set[2]) == IfcExport.UnitSetName;
+                    var p = new Dictionary<string, object?>();
+                    foreach (var x in Items(set[4]))
+                        if (x.Type == "IFCPROPERTYSINGLEVALUE" && Str(x[0]) is { } name) p[name] = Value(x[2]);
+                    if (Str(g[0]) is not { } gid || !GlobalId.IsValid(gid) || p.GetValueOrDefault("TypeId") as string is not { } typeId || !GlobalId.IsValid(typeId)) continue;
+                    double N(string k) => Convert.ToDouble(p.GetValueOrDefault(k) ?? 0d, System.Globalization.CultureInfo.InvariantCulture);
+                    Components.Restore(edit, gid, Str(g[2]) ?? (unit ? "Apartment" : "Component"), typeId, p.GetValueOrDefault("Type") as string ?? (unit ? "Apartment type" : "Component"), members.GetValueOrDefault(g.Id) ?? [],
+                        [N("X"), N("Y"), N("Z"), N("Degrees"), p.GetValueOrDefault("Mirrored") is true ? 1 : 0], unit);
+                }
+        }
+
+        /// <summary>Whether the intent is a Studio solid's: an operation on a sketch (its profile, or the box a bottom or top belongs to).</summary>
+        static bool Sketched(Intent intent) =>
+            intent.Attrs["operation"] is JsonValue && (intent.Attrs["profile"] is JsonValue || intent.Attrs["box"] is JsonValue);
+
+        /// <summary>
+        /// An assembly without a body of its own (a Studio box with its bottom and top): an IfcElementAssembly entity in its
+        /// storey, aggregating the parts the file gives it (references by now), so the box reads as one thing again. The project
+        /// it came from keeps its own assembly.
+        /// </summary>
+        bool Assembly(IEdit edit, StepEntity e, string gid)
+        {
+            var parts = Rels.PartsOf[e.Id].SelectMany(r => Refs(r[5]))
+                .Select(id => f.Entities.GetValueOrDefault(id)).OfType<StepEntity>().Select(p => Str(p[0])).OfType<string>().ToList();
+            if (parts.Count == 0) return false;
+            if (edit.Model.Get(gid) is { } own && own.Attrs["reference"] == null) { seen.Add(gid); return true; }
+            var attrs = new JsonObject { ["reference"] = true, ["ifcClass"] = "IfcElementAssembly", ["objectType"] = Str(e[4]) };
+            var predefined = e.Args.Count > 8 ? Enum(e[8]) : null;
+            Put(edit, gid, "IfcElementAssembly", Str(e[2]) ?? "Assembly", attrs, predefined, counts: false);
+            references++;
+            referencesByClass["IfcElementAssembly"] = referencesByClass.GetValueOrDefault("IfcElementAssembly") + 1;
+            var storey = StoreyFor(e.Id);
+            relations.Add(x => Contain(x, gid, storey));
+            foreach (var part in parts) relations.Add(x => Relate(x, null, IfcClass.RelAggregates, gid, part));
+            return true;
+        }
+
+        /// <summary>
+        /// The file's rooms (IfcSpace): Lapin's own rebuilt from their intent,
+        /// the others recognised by the modules (a room of the outline of their
+        /// body); without a module that makes rooms, or reading for reference
+        /// only, they are left out (a space is air, not something to show).
+        /// </summary>
+        void Spaces(IEdit edit)
+        {
+            if (o.ReferenceOnly) return;
+            var rooms = 0;
+            foreach (var e in f.OfType("IFCSPACE").OrderBy(x => x.Id))
+            {
+                if (e[0] is not string { Length: 22 } || !Takes(e)) continue;
+                if (IntentOf(e.Id) is { } intent) { Native(edit, e, intent); rooms++; continue; }
+                if (Recognize(edit, e)) rooms++;
+            }
+            // Where to find them: a room is air, drawn in plans only.
+            if (rooms > 0)
+                notes.Add($"{rooms} room(s) from the file's spaces, each on its storey: its plan shows their stamps (View → Room colours fills them; a Rooms schedule, + under Schedules in the browser, lists them); the 3D view leaves rooms out until its Visibility/Graphics shows them.");
+        }
+
+        /// <summary>
+        /// The file's annotations Lapin wrote for an element of its own (a feature line, T2: an IfcAnnotation whose Lapin_Intent names a
+        /// class the product has): made again from their intent. Any other annotation is left as before.
+        /// </summary>
+        void Annotations(IEdit edit)
+        {
+            if (o.ReferenceOnly) return;
+            foreach (var e in f.OfType("IFCANNOTATION").OrderBy(x => x.Id))
+            {
+                if (e[0] is not string { Length: 22 } || !Takes(e)) continue;
+                if (IntentOf(e.Id) is { Class: { } cls } intent && cls != IfcClass.Annotation && s.Catalog.Class(cls) != null) Native(edit, e, intent);
+            }
+        }
+
+        /// <summary>Where what has no storey of its own goes: the storey at ±0.00 or the lowest above it, else the lowest.</summary>
+        string? DefaultStorey(IEdit edit)
+        {
+            // An import's: the file's storeys only (the project's own give way to them, ImportStoreys).
+            var all = ReplaceStoreys && storeyOf.Count > 0 ? [.. storeyOf.Values.Distinct().Select(edit.Model.Get).OfType<Entity>().OrderBy(x => x.Num("elevation"))] : Spatial.Storeys(edit.Model).ToList();
+            return (all.Where(x => x.Num("elevation") >= -1e-6).OrderBy(x => x.Num("elevation")).FirstOrDefault() ?? all.FirstOrDefault())?.Id;
+        }
+
+        void Native(IEdit edit, StepEntity e, Intent intent)
+        {
+            var gid = Str(e[0])!;
+            var cls = intent.Class ?? ClassName(e.Type);
+            var predefined = intent.Predefined ?? (e.Args.Count > 8 && e.Type is not ("IFCDOOR" or "IFCWINDOW" or "IFCSPACE") ? Enum(e[8]) : null);
+            if (predefined is "NOTDEFINED" or "USERDEFINED") predefined = intent.Predefined;
+            // A room's name is its LongName (its Name is its number).
+            var name = e.Type == "IFCSPACE" && e.Args.Count > 7 && Str(e[7]) is { Length: > 0 } longName ? longName : Str(e[2]);
+            // A SubD solid's cage rides in a set of its own (decision 780).
+            if (SubDCageOf(e.Id) is { } cage) intent.Attrs["cage"] = cage;
+            // What it stands by, from its IfcRelConnectsElements when its intent does not name it (a kerb's hardscape).
+            foreach (var c in IfcExport.Connections.Where(c => c.Class == cls && intent.Attrs[c.Key] == null))
+                foreach (var rel in Rels.ConnectedBy[e.Id])
+                    if (Str(rel[2]) == c.Name && f.Get(rel[5]) is { } by && Str(by[0]) is { Length: 22 } byGid) { intent.Attrs[c.Key] = byGid; break; }
+            Put(edit, gid, cls, name ?? cls[3..], intent.Attrs, predefined);
+            var storey = StoreyFor(e.Id);
+            relations.Add(x => Contain(x, gid, storey));
+            if (intent.Host is { } host) relations.Add(x => Relate(x, null, IfcClass.RelVoidsElement, host, gid));
+            foreach (var rel in Rels.TypeOf[e.Id])
+                if (typeIds.TryGetValue(Ref(rel[5]), out var typeId)) relations.Add(x => Relate(x, null, IfcClass.RelDefinesByType, typeId, gid));
+            foreach (var rel in Rels.MaterialOf[e.Id])
+                if (f.Get(rel[5]) is { Type: "IFCMATERIALLAYERSETUSAGE" } usage && f.Get(usage[0]) is { } set)
+                {
+                    var owner = Rels.TypeOf[e.Id].FirstOrDefault() is { } byType && typeIds.TryGetValue(Ref(byType[5]), out var tid) ? tid : gid;
+                    var setId = LayerSet(edit, set.Id, owner);
+                    var attrs = Layers.WriteUsage(new LayerUsage(setId, Enum(usage[2]) == "NEGATIVE", Length(usage[3])));
+                    attrs["layerSetDirection"] = Enum(usage[1]) ?? "AXIS2";
+                    var usageId = Step.Guid(gid, "usage");
+                    Put(edit, usageId, IfcClass.MaterialLayerSetUsage, "", attrs, null, counts: false);
+                    var relId = Str(rel[0]);
+                    relations.Add(x => Relate(x, relId, IfcClass.RelAssociatesMaterial, usageId, gid));
+                }
+            foreach (var rel in Rels.VoidsOf[e.Id])
+            {
+                if (f.Get(rel[5]) is not { } op) continue;
+                var opGid = Str(op[0]) ?? "";
+                var relId = Str(rel[0]);
+                if (op.Type == "IFCOPENINGELEMENT")
+                {
+                    // A provision opening an MEP run cut (decision 296): made again by the run when it comes too, else a real opening (ProvisionOpenings).
+                    if (ProvisionOf(op.Id) != null) { provisions.Add((gid, op)); continue; }
+                    if (IntentOf(op.Id) is not { } opIntent) continue;
+                    // A recess of Lapin's own (a wall reveal, decision 297) comes back as its class.
+                    Put(edit, opGid, opIntent.Class ?? IfcClass.OpeningElement, Str(op[2]) ?? "Opening", opIntent.Attrs, opIntent.Predefined ?? "OPENING", counts: false);
+                    foreach (var fill in Rels.FillsOf[op.Id])
+                        if (f.Get(fill[5]) is { } filler && Str(filler[0]) is { } fillGid)
+                        {
+                            var fillRel = Str(fill[0]);
+                            relations.Add(x => Relate(x, fillRel, IfcClass.RelFillsElement, opGid, fillGid));
+                        }
+                }
+                relations.Add(x => Relate(x, relId, IfcClass.RelVoidsElement, gid, opGid));
+            }
+            foreach (var rel in Rels.JoinsOf[e.Id])
+                if (f.Get(rel[6]) is { } other && Str(other[0]) is { } otherGid)
+                {
+                    var attrs = new JsonObject
+                    {
+                        ["relatingConnection"] = Enum(rel[10]) ?? "NOTDEFINED", ["relatedConnection"] = Enum(rel[9]) ?? "NOTDEFINED",
+                        ["kind"] = Str(rel[2]) ?? "L", ["style"] = Str(rel[3]) is { } style && style != Joins.StopsOn ? style : "butt",
+                    };
+                    if (Str(rel[3]) == Joins.StopsOn) attrs[Joins.StopsOn] = true;
+                    var relId = Str(rel[0]);
+                    relations.Add(x => Relate(x, relId, IfcClass.RelConnectsPathElements, gid, otherGid, attrs));
+                }
+        }
+
+        /// <summary>
+        /// An element the file describes only by its body: kept as it is, its openings cut where the booleans are;
+        /// with the 2D the file drew for its plans (<see cref="Plan2d"/>), and kept for that alone when it has no body.
+        /// </summary>
+        /// <summary>What a reference needs from the file, read before it is put in the model: its 2D, its shared key or else its own body, its description and properties.</summary>
+        sealed record Prepared((string Key, Xf At)? Shared, BodyRead Body, Vec3 Centre, bool Pseudo,
+            List<Plan2dItem> Plan2d, int Sections2d, int Elevations2d, JsonNode? Shape, JsonObject Properties, (JsonObject Own, List<IfcCarry.Shared> Shared) Carried,
+            KeptOpenings? Openings = null);
+
+        /// <summary>
+        /// What a reference keeps of its file's openings (docs/spec-ifc.md, Golurile referințelor): its body before the cut,
+        /// where the cut changed it (null where it did not, or could not), and the openings with their bodies and fills.
+        /// </summary>
+        sealed record KeptOpenings(List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)>? Uncut, JsonArray Openings);
+
+        readonly System.Collections.Concurrent.ConcurrentDictionary<int, Prepared> prepared = [];
+
+        /// <summary>
+        /// The references to come read from the file on every core (the model warmed first, then only read):
+        /// each one's body evaluated, welded, cut and read by the import's rules, its 2D, description and properties.
+        /// Putting them in the model stays in order, one by one. A few are read as they come, unless a rule needs
+        /// them all first (the middle of the model, the bodies the file repeats).
+        /// </summary>
+        void PrepareAll(IReadOnlyList<StepEntity> references, ISolidBooleans? booleans)
+        {
+            if (references.Count < 8 && o.FarAway == null && !o.Dedupe) return;
+            model.Warm();
+            // The indexes the references' openings are read through (Openings), built once before the cores share them.
+            _ = Rels.VoidsOf; _ = Rels.FillsOf;
+            var done = 0;
+            Parallel.ForEach(references, e =>
+            {
+                if (Guarded(e, () => Prepare(e, booleans)) is { } p) prepared[e.Id] = p;
+                var n = Interlocked.Increment(ref done);
+                if (Due(n, references.Count)) Report("Reading the references", n, references.Count);
+            });
+            FindMiddle();
+        }
+
+        /// <summary>
+        /// What reading the file's description of an element throws when the file is malformed there (a loop of
+        /// references, an index past its list, a body the booleans cannot take): that element is left out with a note,
+        /// the import goes on.
+        /// </summary>
+        static bool Unreadable(Exception ex) => ex is FormatException or InvalidOperationException or ArgumentException or IndexOutOfRangeException
+            or KeyNotFoundException or NullReferenceException or ArithmeticException or InvalidCastException;
+
+        /// <summary>The elements left out because the file could not be read there: their id, with why.</summary>
+        readonly System.Collections.Concurrent.ConcurrentDictionary<int, string> unreadable = [];
+
+        /// <summary><paramref name="read"/> of one element, or null (the element noted as unreadable) when the file is malformed there.</summary>
+        T? Guarded<T>(StepEntity e, Func<T> read) where T : class
+        {
+            try { return read(); }
+            catch (Exception ex) when (Unreadable(ex)) { unreadable[e.Id] = ex.Message; return null; }
+        }
+
+        void UnreadableNotes()
+        {
+            if (unreadable.IsEmpty) return;
+            var some = unreadable.OrderBy(kv => kv.Key).Take(3).Select(kv => $"#{kv.Key} {ClassName(f.Entities.GetValueOrDefault(kv.Key)?.Type ?? "")} {Str(f.Entities.GetValueOrDefault(kv.Key)?[2])}: {kv.Value}".Replace("  ", " "));
+            notes.Add($"{unreadable.Count} element(s) left out: the file could not be read there ({string.Join("; ", some)}{(unreadable.Count > 3 ? "; …" : "")}).");
+        }
+
+        Prepared Prepare(StepEntity e, ISolidBooleans? booleans)
+        {
+            var (plan2d, sections2d, elevations2d) = model.Drawing2d(e.Id);
+            var shared = model.SharedKey(e.Id);
+            KeptOpenings? kept = null;
+            BodyRead body;
+            if (shared is var (key, _)) body = SharedRead(key, booleans);
+            else
+            {
+                var own = OwnBody(e, booleans, out var uncut);
+                body = Read(own);
+                // A body its file voids keeps its openings and its uncut body, for the export (an instance of a body shared by its
+                // content too: the cut body shared, these its own).
+                if (Openings(e, booleans) is { } openings)
+                {
+                    kept = new KeptOpenings(uncut is { Count: > 0 } ? Simplified(uncut) : null, openings);
+                    if (uncut == null && body.Parts.Count > 0) Interlocked.Increment(ref keptUncut);
+                }
+            }
+            var centre = shared is var (_, at) ? at.Apply(body.Centre) : body.Centre;
+            if (body.Hash != null && body.Parts.Count > 0) hashUses.AddOrUpdate(body.Hash, 1, (_, n) => n + 1);
+            return new Prepared(shared, body, centre, o.Pseudo && IsPseudo(e), plan2d, sections2d, elevations2d, model.Describe(e.Id), PropertiesJson(e.Id),
+                IfcCarry.Capture(f, carryIndex.Value, e, Seed, o.Keeps, o.Numbers), kept);
+        }
+
+        /// <summary>The references whose openings no boolean could cut (none at hand, or a body not closed): drawn whole, their openings kept for the export.</summary>
+        int keptUncut;
+
+        /// <summary>
+        /// The openings (IfcOpeningElement, IfcOpeningStandardCase, IfcVoidingFeature) the file voids a product with, as a
+        /// reference keeps them (<see cref="StoredBodies.OpeningsKey"/>): the opening's GlobalId, name, class and predefined
+        /// type, its IfcRelVoidsElement's GlobalId, its body in world coordinates, the elements filling it with their
+        /// IfcRelFillsElement's GlobalIds; null when it has none.
+        /// </summary>
+        JsonArray? Openings(StepEntity e, ISolidBooleans? booleans)
+        {
+            JsonArray? list = null;
+            foreach (var rel in Rels.VoidsOf[e.Id])
+            {
+                if (f.Get(rel[5]) is not { Type: "IFCOPENINGELEMENT" or "IFCOPENINGSTANDARDCASE" or "IFCVOIDINGFEATURE" } op || Str(op[0]) is not { Length: 22 } opGid) continue;
+                var parts = new List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)>();
+                foreach (var mesh in model.OpeningBody(op.Id, booleans))
+                {
+                    var w = mesh.Welded();
+                    if (w.T.Count > 0) parts.Add(("Opening", "#c9ced6", w.V, w.T));
+                }
+                if (parts.Count == 0) continue;
+                var fills = new JsonArray();
+                foreach (var fill in Rels.FillsOf[op.Id])
+                    if (f.Get(fill[5]) is { } filler && Str(filler[0]) is { Length: 22 } fillGid)
+                        fills.Add((JsonNode)new JsonObject { ["id"] = fillGid, ["rel"] = Str(fill[0]) });
+                (list ??= []).Add((JsonNode)new JsonObject
+                {
+                    ["id"] = opGid, ["name"] = Str(op[2]), ["class"] = op.Type == "IFCVOIDINGFEATURE" ? "IfcVoidingFeature" : IfcClass.OpeningElement,
+                    ["objectType"] = Str(op[4]), ["predefined"] = op.Args.Count > 8 ? Enum(op[8]) : null, ["rel"] = Str(rel[0]),
+                    [StoredBodies.Key] = Colours(parts), ["fills"] = fills,
+                });
+            }
+            return list;
+        }
+
+        /// <summary>The relationships the carried IFC is read through, indexed once (on the first core that asks).</summary>
+        readonly Lazy<IfcCarry.Index> carryIndex = new(() => new IfcCarry.Index(f), LazyThreadSafetyMode.ExecutionAndPublication);
+
+        /// <summary>What the records' ids derive from: the file's project, so importing again finds them.</summary>
+        string Seed => seed ??= Str(f.OfType("IFCPROJECT").FirstOrDefault()?[0]) ?? "ifc";
+        string? seed;
+
+        readonly HashSet<string> recordsPut = [];
+        readonly Dictionary<string, int> bodiless = [];
+
+        void Reference(IEdit edit, StepEntity e, ISolidBooleans? booleans)
+        {
+            var gid = Str(e[0])!;
+            if (unreadable.ContainsKey(e.Id)) return;
+            var p = prepared.TryRemove(e.Id, out var ready) ? ready : Guarded(e, () => Prepare(e, booleans));
+            if (p == null) return;
+            var bodied = p.Body.Parts.Count > 0;
+            if (!bodied && e.Type == "IFCELEMENTASSEMBLY" && Assembly(edit, e, gid)) return;
+            // The 2D the user left out: an element's own (it is drawn by its cut), or an element that is nothing but 2D.
+            if (p.Plan2d.Count > 0 || p.Sections2d + p.Elevations2d > 0)
+            {
+                if (!bodied && !o.Only2d) { left2d++; return; }
+                if (bodied && !o.Plan2d) { p = p with { Plan2d = [], Sections2d = 0, Elevations2d = 0 }; without2d++; }
+            }
+            // The import's rules: what they leave out.
+            if (LeftOutBy(p, p.Plan2d.Count > 0) is { } reason) { Drop(reason); return; }
+            var plan2d = p.Plan2d;
+            // A body many products share: kept once, each product an instance of it (docs/plan-instancing.md); a body
+            // the file repeats under other names, kept once by what it is, each instance placed from its low corner.
+            if (p.Shared is var (key, at) && bodied)
+            {
+                if (o.Dedupe && ContentBody(edit, e, p.Body, fromCorner: false) is var (byContent, kept))
+                {
+                    // This map's body is the one kept moved by the difference of their corners.
+                    Referenced(edit, e, gid, WithOpenings(Instance(byContent, at with { O = at.Apply(p.Body.Lo - kept) }), p), p);
+                    instancesByContent++;
+                    return;
+                }
+                if (SharedBody(edit, key, e, p.Body.Parts) is { } bodyId) { Referenced(edit, e, gid, Instance(bodyId, at), p); return; }
+            }
+            if (!bodied && plan2d.Count == 0)
+            {
+                var cls = ClassName(e.Type);
+                bodiless[cls] = bodiless.GetValueOrDefault(cls) + 1;
+                return;
+            }
+            if (bodied && o.Dedupe && p.Body.Hash is { } hash && hashUses.GetValueOrDefault(hash) > 1 && ContentBody(edit, e, p.Body, fromCorner: true) is var (shared, keptLo))
+            {
+                Referenced(edit, e, gid, WithOpenings(Instance(shared, Xf.Identity with { O = p.Body.Lo - keptLo }), p), p);
+                instancesByContent++;
+                return;
+            }
+            Referenced(edit, e, gid, WithOpenings(new JsonObject { [StoredBodies.Key] = Stored(edit, p.Body.Parts) }, p), p);
+        }
+
+        /// <summary>A reference's attributes with what it keeps of its openings (<see cref="KeptOpenings"/>), if any: its uncut body and the openings.</summary>
+        static JsonObject WithOpenings(JsonObject attrs, Prepared p)
+        {
+            if (p.Openings is not { } kept) return attrs;
+            if (kept.Uncut != null) attrs[StoredBodies.UncutKey] = Colours(kept.Uncut);
+            attrs[StoredBodies.OpeningsKey] = kept.Openings;
+            return attrs;
+        }
+
+        /// <summary>A product's own body: its meshes welded, cut by its openings where the booleans are.</summary>
+        List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)> OwnBody(StepEntity e, ISolidBooleans? booleans) =>
+            OwnBody(e, booleans, out _);
+
+        /// <summary>
+        /// A product's own body, and (<paramref name="uncut"/>) the same before its openings cut it, where they did; null where
+        /// nothing was cut (no openings, no booleans, or a cut that failed).
+        /// </summary>
+        List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)> OwnBody(StepEntity e, ISolidBooleans? booleans,
+            out List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)>? uncut)
+        {
+            uncut = null;
+            var whole = new List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)>();
+            var anyCut = false;
+            var (body, openings) = model.Shape(e.Id, booleans);
+            List<Solid>? cutters = null;
+            if (openings.Count > 0 && booleans != null)
+                cutters = openings.Select(m => { var w = m.Welded(); return SolidFromMesh.Build(w.V, w.T); }).OfType<Solid>().ToList();
+            var parts = new List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)>();
+            foreach (var (mesh, colour) in body)
+            {
+                var m = mesh.Welded();
+                if (m.T.Count > 0) whole.Add(("Body", colour ?? "#c9ced6", m.V, m.T));
+                if (cutters is { Count: > 0 })
+                {
+                    try
+                    {
+                        if (SolidFromMesh.Build(m.V, m.T) is { } solid && booleans!.Difference(solid, cutters) is { } cut) { m = MeshBuilder.FromSolid(cut); anyCut = true; }
+                    }
+                    catch (InvalidOperationException) { /* uncut, as it came */ }
+                }
+                if (m.T.Count > 0) parts.Add(("Body", colour ?? "#c9ced6", m.V, m.T));
+            }
+            if (anyCut) uncut = whole;
+            return parts;
+        }
+
+        /// <summary>What each part aggregated under an element (not the spatial structure) belongs to, by the file's ids.</summary>
+        readonly Dictionary<int, int> partParents = [];
+
+        /// <summary>
+        /// The direction an element's layer set is laid in, world (decision 400): its placement's Y for AXIS2 (a wall), Z for
+        /// AXIS3 (a slab, a roof), X for AXIS1; null when the file gives it no layer set.
+        /// </summary>
+        Vec3? LayerAxis(StepEntity e)
+        {
+            if (!carryIndex.Value.MaterialOf.TryGetValue(e.Id, out var mat) || f.Entities.GetValueOrDefault(mat.Material) is not { } m) return null;
+            string? direction = m.Type switch
+            {
+                "IFCMATERIALLAYERSETUSAGE" => Enum(m[1]),
+                "IFCMATERIALLAYERSET" => e.Type is "IFCWALL" or "IFCWALLSTANDARDCASE" or "IFCCURTAINWALL" ? "AXIS2" : "AXIS3",
+                _ => null,
+            };
+            if (direction == null) return null;
+            // A wall's layers lie to the left of its axis (IFC's positive sense), whatever its placement: the Axis curve's chord turned a quarter.
+            if (direction == "AXIS2" && model.AxisCurve(e.Id) is { Count: >= 2 } curve && curve[^1] - curve[0] is var d && Math.Sqrt(d.X * d.X + d.Y * d.Y) > 1e-6)
+                return new Vec3(-d.Y, d.X, 0).Normalized();
+            var xf = model.Placement(e[5]);
+            return direction switch { "AXIS1" => xf.X, "AXIS2" => xf.Y, _ => xf.Z };
+        }
+
+        /// <summary>A reference put in the model: its body (its own, or an instance's) in <paramref name="attrs"/>, what the file says of it added.</summary>
+        void Referenced(IEdit edit, StepEntity e, string gid, JsonObject attrs, Prepared p)
+        {
+            var cls = ClassName(e.Type);
+            // A body an external program made in Lapin (docs/plan-external-geometry.md) comes back as one: its owner, its own
+            // attributes and its class (an IFC class Lapin's writer does not name was written as a proxy naming it).
+            if (!o.ReferenceOnly && IntentOf(e.Id) is { } own && (string?)own.Attrs[ExternalBodies.OwnerKey] is { Length: > 0 } owner)
+            {
+                attrs[ExternalBodies.OwnerKey] = owner;
+                if (own.Attrs[ExternalBodies.ExtraKey] is JsonObject extra) attrs[ExternalBodies.ExtraKey] = extra.DeepClone();
+                if (IfcElementClasses.Resolve(own.Class) is { } given) cls = given;
+            }
+            // Its layers' direction, so the views split its body by them (ReferenceLayers); the element it is a part of, for its category.
+            if (LayerAxis(e) is { } axis && axis.Length > 1e-9)
+                attrs[ReferenceLayers.AxisKey] = new JsonArray(Math.Round(axis.X, 9), Math.Round(axis.Y, 9), Math.Round(axis.Z, 9));
+            if (e.Type == "IFCBUILDINGELEMENTPART" && partParents.TryGetValue(e.Id, out var whole) && f.Entities.GetValueOrDefault(whole) is { } host)
+                attrs[ReferenceLayers.PartOfKey] = ClassName(host.Type);
+            attrs["reference"] = true;
+            attrs["ifcClass"] = cls;
+            attrs["objectType"] = Str(e[4]);
+            // Its file type's name (a steel shape's "HEA200"), which recognition from its triangles names a native type after and
+            // matches a catalogue profile by (decision 826).
+            if (typeOf?.GetValueOrDefault(e.Id) is { } fileType && Str(fileType[2]) is { Length: > 0 } fileTypeName) attrs[MeshRecognition.TypeNameKey] = fileTypeName;
+            attrs["properties"] = p.Properties;
+            // Its quantity sets in SI, by the file's units: what the takeoff and the estimate measure it by (ReferenceQuantities).
+            if (model.QuantitiesSi(e.Id, o.SkipSets == null ? null : name => o.Keeps(name)) is { Count: > 0 } quantities)
+                attrs[ReferenceQuantities.Key] = ReferenceQuantities.Write(quantities);
+            attrs["shape"] = p.Shape;
+            if (p.Plan2d.Count > 0) { attrs[Plan2d.Key] = Plan2d.Write(p.Plan2d, p.Sections2d, p.Elevations2d); with2d++; }
+            // What the file says of it that Lapin does not model, for the export to write back as it came.
+            attrs[IfcSource.Key] = p.Carried.Own;
+            foreach (var r in p.Carried.Shared)
+                if (recordsPut.Add(r.Id)) Put(edit, r.Id, IfcSource.RecordClass, IfcCarry.RecordName(r.Attrs) ?? ReferenceTypes.RecordDefault, r.Attrs, null, counts: false);
+            Put(edit, gid, cls, Str(e[2]) ?? cls[3..], attrs, null, counts: false);
+            references++;
+            referencesByClass[cls] = referencesByClass.GetValueOrDefault(cls) + 1;
+            var storey = StoreyFor(e.Id);
+            relations.Add(x => Contain(x, gid, storey));
+            // A Studio solid keeps its type (Lapin's, read from its intent), as the native elements do.
+            if (sketched.Contains(e.Id))
+                foreach (var rel in Rels.TypeOf[e.Id])
+                    if (typeIds.TryGetValue(Ref(rel[5]), out var typeId)) relations.Add(x => Relate(x, null, IfcClass.RelDefinesByType, typeId, gid));
+        }
+
+        readonly Dictionary<string, string?> sharedBodies = [];
+
+        /// <summary>The shared body a key names, made the first time (its id from the file and the key, so importing again finds it); null when it has no triangles.</summary>
+        string? SharedBody(IEdit edit, string key, StepEntity first, List<(string Name, string Color, IReadOnlyList<Vec3> Vertices, IReadOnlyList<(int A, int B, int C)> Triangles)> parts)
+        {
+            if (sharedBodies.TryGetValue(key, out var known)) return known;
+            string? id = null;
+            if (parts.Count > 0)
+            {
+                id = Step.Guid(Seed, "shared-body\n" + key);
+                Put(edit, id, StoredBodies.SharedClass, $"{Str(first[2]) ?? ClassName(first.Type)[3..]} (shared)", new JsonObject { [StoredBodies.Key] = Stored(edit, parts), ["source"] = key }, null, counts: false);
+            }
+            return sharedBodies[key] = id;
+        }
+
+        JsonObject PropertiesJson(int product)
+        {
+            var json = new JsonObject();
+            foreach (var (set, props) in model.Properties(product, o.SkipSets == null ? null : name => o.Keeps(name), o.Numbers))
+            {
+                var p = new JsonObject();
+                foreach (var (k, v) in props) p[k] = v;
+                json[set] = p;
+            }
+            return json;
+        }
+    }
+}

@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    MEP: the building's services as systems drawn as schematics on the plan
+    (docs/plan-mep.md): systems with their defaults, nodes with ports, runs
+    between them, the IFC distribution network. It needs the platform and
+    Architecture (the walls a run crosses). The engineering on the network
+    (sizing, checks, assistants, laying rules) is the premium module mep-pro,
+    which hooks into this one (MepHooks).
+  -->
+  <PropertyGroup>
+    <LapinModuleId>mep</LapinModuleId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../../Model/Lapin.Model/Lapin.Model.csproj" Private="false" />
+    <ProjectReference Include="../../../Platform/Lapin.Platform/Lapin.Platform.csproj" Private="false" />
+    <ProjectReference Include="$(LapinGeometryDir)Lapin.Geometry/Lapin.Geometry.csproj" Private="false" />
+    <ProjectReference Include="../../Architecture/Lapin.Architecture/Lapin.Architecture.csproj" Private="false" />
+    <!-- Tags: the MEP module's Tag system makes Annotate's tags (Lapin.Drafting.Tags). -->
+    <ProjectReference Include="../../Drafting/Lapin.Drafting/Lapin.Drafting.csproj" Private="false" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- The built-in MEP symbol sets, data (MepSymbols): a role's symbol by name, size and drawing. -->
+    <EmbeddedResource Include="SymbolSets/*.json" LogicalName="Lapin.Mep.SymbolSets.%(Filename).json" />
+    <!-- The MEP legend's words in every language, from the interface's (scripts/mep-words.mjs). -->
+    <EmbeddedResource Include="MepWords.json" LogicalName="Lapin.Mep.MepWords.json" />
+  </ItemGroup>
+</Project>

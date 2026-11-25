@@ -1,0 +1,140 @@
+---
+title: Il sito e i suoi dati
+order: 52
+summary: Porta il rilievo, il lotto, gli edifici vicini e un’ortofoto in coordinate reali, da DXF, CSV, GeoJSON, CityJSON e da un’immagine georeferenziata.
+---
+
+La scheda **Sito** contiene il terreno su cui sorge l’edificio: il terreno, il lotto, gli edifici vicini e una foto aerea, ognuno dove si trova davvero. Il gruppo **Importa** li porta dai file che consegnano i topografi e il catasto.
+
+![La scheda Sito](shots/ribbon-site.webp)
+
+## Coordinate reali
+
+Un rilievo arriva in coordinate cartografiche: est e nord, a centinaia di chilometri dallo zero. Lapin tiene il modello vicino alla sua origine e lo lega alla mappa tramite il **punto di rilievo**. La prima importazione in un progetto lo fa per te: il punto di rilievo va all’origine della pianta, sulle prime coordinate del file arrotondate al metro, e ogni importazione successiva arriva nello stesso posto.
+
+**Gestisci → Posizione** mostra il **sistema di coordinate** in cui sono le coordinate est e nord, e il punto base e il punto di rilievo. Lapin conosce Stereo 70 (EPSG:3844, il sistema nazionale della Romania), i fusi UTM 34 e 35 (EPSG:32634, 32635), Web Mercator (EPSG:3857) e la longitudine e la latitudine (WGS 84, EPSG:4326). Un file in un altro di questi sistemi viene convertito quando entra: un GeoJSON in longitudine e latitudine arriva sulla pianta in Stereo 70 dove deve stare. L’esportazione IFC scrive il sistema e il punto di rilievo, così anche gli altri programmi collocano il modello sulla mappa. Anche Lambert-93 (EPSG:2154, la rete nazionale della Francia) è noto.
+
+![Gestisci → Posizione: il sistema di coordinate e il punto di rilievo](shots/site-location.webp)
+
+## Importare
+
+- **Terreno da punti** legge un file CSV o di testo di un rilievo: x y z, oppure numero nord est quota, un punto per riga.
+- **Punti da DXF** legge un disegno di rilievo: entità POINT con le loro quote, blocchi inseriti a una quota o che la portano come attributo, quote scritte accanto ai punti ("245.37" vicino alla sua croce) e curve di livello alla loro quota. Quando il disegno ha punti su più layer, Lapin li elenca con quanti punti contiene ciascuno, e tu scegli quali prendere. I punti formano un terreno. Un DXF non nomina alcun sistema, quindi Lapin riconosce i numeri della dimensione di una mappa dal loro intervallo (Stereo 70, Lambert-93, UTM). I numeri di un sistema che non conosce restano così come sono, e Lapin lo dice: indica il sistema in **Gestisci → Posizione** oppure converti prima il disegno.
+- **GeoJSON** porta lotti, linee e punti. Un file con un solo poligono dà il **lotto**; uno con più poligoni dà delle aree. Il lotto delimita anche il lotto del terreno, con la sua area. I file del catasto in Stereo 70 lo dichiarano nel file, e Lapin lo legge; un file che non dice nulla è in longitudine e latitudine, come richiede lo standard GeoJSON.
+- **CityJSON** porta gli edifici vicini con le loro superfici, al loro posto e alla loro altezza. Sono riferimenti di sola lettura; proietteranno ombre nello studio del soleggiamento.
+- **Ortofoto** stende una foto aerea sotto il sito. Scegli l’immagine (JPEG o PNG, fino a 8 MB) insieme al suo world file (`.jgw`, `.pgw` o `.wld`): il world file dice dove si trova l’immagine. La foto viene disegnata sotto la pianta e riveste il terreno in 3D.
+
+![La planimetria: l’ortofoto, le curve di livello del terreno rilevato, il lotto e l’impronta dell’edificio vicino](shots/site-plan.webp)
+
+![Lo stesso sito in 3D: la foto sul terreno, l’edificio vicino alla sua altezza](shots/site-3d.webp)
+
+Tutto ciò che importi è conservato nel file del progetto. Un elemento prende il nome dal file (il numero catastale di un lotto, quando il file lo ha) e conserva con sé le altre proprietà del file; selezionalo per vederne l’area o la lunghezza.
+
+## Strade, curve e linee CAD
+
+Una **strada** o un **percorso** segue il suo asse. In **Corridoio stradale…** (CR), la scheda **Curve** dà a ogni vertice dell’asse un raggio con una clotoide in entrata e in uscita, come un progettista stradale traccia una curva; un vertice lasciato a 0 resta uno spigolo, e le curve che non stanno tra le loro vicine vengono rifiutate con il motivo. Le progressive, il profilo longitudinale e le sezioni trasversali seguono l’asse curvo, e IFC 4.3 lo scrive come tracciato.
+Un sentiero o una strada, un muro di sostegno o un fosso si dividono, si tagliano, si estendono e si spostano in parallelo con gli strumenti dei muri (**Modifica → Dividi elemento**, **Modifica → Taglia/estendi elementi**, **Offset**). Le sue stazioni proseguono: la seconda parte inizia alla stazione dove cadeva il taglio, così il profilo di progetto, le sezioni trasversali e i giunti richiesti alle stazioni restano dove erano. Un taglio deve cadere su un tratto rettilineo dell’asse, non in una curva, e ogni vertice mantiene la sua curva. Un asse importato come segmenti di allineamento IFC 4.3 non viene tagliato qui.
+
+
+Le linee CAD diventano elementi del sito: **Strada da linee CAD** (LR) e **Linea di discontinuità da linee CAD** (BL) prendono una linea o una polilinea disegnata o portata da un DXF, seguono ogni linea del suo layer che la incontra estremo a estremo, e ne fanno una strada lungo di essa o una linea di discontinuità del terreno. Quando le linee portano delle quote (le linee 3D di un DXF), danno il profilo della strada o le quote della linea di discontinuità. Queste linee sono conservate con le loro quote e possono essere mostrate in 3D (la categoria *linework*).
+
+## Piattaforme e lotto
+
+**Site → Platform** (<kbd>PD</kbd>) livella il terreno dentro un contorno a una quota, con scavo e riporto; **Site → Parcel** (<kbd>PC</kbd>) disegna il confine della proprietà, a tratto e punto con la sua area. Entrambi disegnano il contorno con la stessa barra di un solaio: un **Polygon** i cui bordi possono essere archi (<kbd>Space</kbd>), un **Rectangle** o un **Circle**. Selezionati, angoli e bordi hanno maniglie (quelli del lotto, sul suo terreno), e il clic destro offre **Make arc**, **Make straight**, **Fillet corner…** e **Chamfer corner…**, ciascuno un passo di annullamento. La piattaforma livella lungo gli archi veri; area e perimetro del lotto sono misurati su di essi, e l’elenco delle coordinate ne riporta gli angoli.
+**Modifica → Dividi elemento** divide una piattaforma in due lungo una linea di due punti (ogni parte livellata alla stessa quota, i suoi fori sulla parte in cui cadono; un foro attraversato dalla linea viene rifiutato), e **Modifica → Taglia/estendi elementi** taglia una piattaforma o il lotto con un limite rettilineo, mantenendo il lato su cui fai clic. Un terreno mantiene un solo lotto: viene tagliato, non divisa.
+
+
+## Planimetrie e inquadramenti territoriali
+
+Il browser di progetto ha un **Sito** sotto i livelli: i disegni propri del sito, che non appartengono a nessun piano. Un nuovo progetto inizia con due:
+
+- la **Planimetria** (in rumeno *plan de situație*), a 1:500: l’intero modello visto dall’alto, tutti i piani insieme, tetti compresi, con il terreno, i percorsi, le piante, il lotto e gli edifici vicini. Ciò che sta interamente sotto ±0.00 (le fondazioni) è escluso, niente è tagliato e niente di nascosto è disegnato. I vertici del lotto sono numerati;
+- l’**Inquadramento territoriale** (*plan de încadrare în zonă*), a 1:2000: lo stesso disegno per il sito nella sua zona, sopra l’ortofoto, senza i numeri dei vertici; gli edifici del progetto sono riempiti in rosso e il lotto è contornato in rosso, così il sito si distingue dai vicini.
+
+**+** accanto a Sito ne crea un altro di uno dei due tipi; i pulsanti di copia ne duplicano uno. Entrambi portano una **freccia del nord** che punta al nord geografico (Gestisci → Posizione: l’angolo rispetto al nord geografico), una **scala grafica** e, quando il progetto è legato alla mappa, la **griglia delle coordinate**: croci dove si incontrano valori tondi di est e nord, ogni decimo della scala (50 m a 1:500, 200 m a 1:2000), con i loro valori. Seleziona la vista nel browser e impostali nelle sue proprietà, sotto **Impostazioni di vista**: che cos’è (planimetria o inquadramento territoriale), il passo della griglia (0: nessuna), la freccia, la scala grafica e **Evidenzia il progetto** (il riempimento e il contorno rossi, attivo per impostazione predefinita in un inquadramento territoriale, anche per una planimetria quando lo vuoi).
+
+**La mappa sotto di essi.** L’ortofoto viene disegnata sotto ogni planimetria e ogni inquadramento territoriale, su qualunque piano sia stata importata, e si stampa con essi sulle tavole e nel PDF. Per la planimetria catastale o il disegno del topografo, apri la planimetria e usa **Importa DXF…** con **Posizionato: dalle coordinate della mappa**. Lapin lo propone da solo quando le coordinate del file sembrano quelle di una mappa, per esempio Stereo 70. Il disegno arriva allora dove dicono le sue coordinate est e nord, tramite il punto di rilievo del progetto e il suo angolo rispetto al nord geografico. Se il progetto non è ancora legato alla mappa, è il disegno a legarlo. Spunta **Come collegamento** per mantenerlo in sola lettura e ricaricarlo quando il topografo ne invia uno nuovo. Importalo una volta in ogni disegno che ne ha bisogno.
+
+![Un inquadramento territoriale: la casa riempita in rosso, il lotto contornato in rosso, tra i vicini](shots/site-location-plan.webp)
+
+![Una planimetria: la casa vista dall’alto sul suo lotto, i vertici numerati, la griglia della mappa, la freccia del nord e la scala grafica](shots/site-drawings.webp)
+
+![Il Sito nel browser di progetto](shots/site-browser.webp)
+
+L’abaco **Coordinate del lotto** (Abachi → + → Coordinate del lotto) è l’inventario delle coordinate del lotto: ogni vertice come lo numera la planimetria, il suo nord e il suo est nel sistema del progetto, il lato fino al vertice successivo e l’area. Come ogni abaco va su una tavola accanto alla planimetria, ed esce come CSV o XLSX.
+
+## Alberi e arbusti
+
+**Pianta (vegetale)** (PN) mette una pianta con un clic, **Area di piantumazione** (PZ) semina un contorno con un insieme di specie a una certa densità; seleziona l’una o l’altra e scegli la specie nelle proprietà. L’elenco delle specie è una libreria di piante autoctone o tradizionali in Romania, in gruppi: **alberi da frutto** (melo, pero, susino, ciliegio e amarena, albicocco, cotogno), **conifere** (abete bianco, abete rosso, pino silvestre e pino nero), **alberi a foglia caduca** (noce, tiglio, betulla, acero), **arbusti** (nocciolo, corniolo, sambuco, rosa canina, lillà, olivello spinoso, ribes rosso, tuia, bosso) e **tappezzanti**. Ognuna ha il suo nome latino, la sua altezza e la sua chioma abituali, e viene mostrata con il nome rumeno quando l’interfaccia è in rumeno. L’abaco delle piantumazioni elenca i nomi latino e rumeno accanto a ogni specie.
+
+In pianta ogni pianta è disegnata vista dall’alto con un tratto sottile, larga quanto la sua chioma, solo con il suo contorno: un noce o un tiglio una chioma a lobi morbidi, un albero da frutto un cerchio, un abete o un peccio una stella, un pino un anello frastagliato, un arbusto una piccola nuvola, una pianta da siepe potata un cerchio, con una crocetta sul tronco di un albero. Prospetti e sezioni disegnano ogni pianta con un solo contorno: la chioma di un albero sul suo tronco, il cono a palchi di una conifera, la cupola di un arbusto. Poche linee ciascuna, così una planimetria con centinaia di alberi resta leggera. In 3D le conifere sono coni, gli altri alberi hanno una chioma arrotondata sul tronco e gli arbusti una cupola bassa.
+
+![Un piccolo frutteto in pianta: alberi da frutto, un noce, conifere e arbusti](shots/planting-symbols.webp)
+
+Imposta l’**Entourage in 2D** dello stile di vista su **dettagliato** per i simboli di un progetto del paesaggio, in nero: un albero da frutto come chioma lobata con rami biforcati, un noce o un tiglio come chioma smerlata attorno a un nucleo scuro, un abete o un peccio come stella di rametti di aghi, un pino come ciuffo rotondo di aghi, un arbusto come piccola nuvola. Lapin disegna da sé ogni simbolo, così alberi vicini differiscono un poco e una zona non sembra mai timbrata; a 1:1000 e meno (un inquadramento) si disegnano solo i contorni delle chiome.
+
+![Lo stesso frutteto disegnato dettagliato](shots/planting-symbols-detailed.webp)
+
+## Persone e automobili
+
+**Entourage** (EN) mette una persona o un’auto con un clic; scegli quale nella barra della riga di comando mentre lo strumento è attivo: un **uomo in piedi**, una **donna che cammina**, un **bambino**, una **persona al telefono**, un’**auto** o un **SUV / furgone**. **Fila di entourage** (ER) ne mette una fila lungo una linea che disegni: auto ogni 2,5 m, parcheggiate una accanto all’altra di traverso, con il muso verso la sinistra della linea, persone ogni 1,2 m, che camminano lungo di essa. Ognuna poggia sul terreno sottostante, o sul pavimento del suo piano dove non c’è terreno.
+
+![Persone alla porta e auto parcheggiate accanto alla casa](shots/entourage-3d.webp)
+
+Selezionane una per cambiarla nelle proprietà: il tipo, la **rotazione**, l’**altezza** (di base la misura consueta del suo tipo), quanto sta **sopra il terreno** (su una terrazza o un balcone) e il **colore** dei vestiti o della carrozzeria. Si sposta, ruota, specchia e copia come ogni elemento.
+
+In 3D sono figure semplici: persone con arti, vestiti, capelli e scarpe, auto con vetri, ruote e fari. I disegni le tengono semplici, come un architetto disegna l’entourage, con un tratto sottile: piante e planimetrie dall’alto, le spalle e la testa di una persona, il contorno di un’auto con gli angoli arrotondati e il suo parabrezza; prospetti e sezioni come sagome, un solo contorno ciascuna, la figura di una persona, il fianco o il fronte di un’auto come la vista lo vede, mai le linee dei loro corpi.
+
+![In pianta](shots/entourage-plan.webp)
+
+![Nel prospetto sud](shots/entourage-elevation.webp)
+
+![Le proprietà di un’auto](shots/entourage-properties.webp)
+
+Come si disegnano in 2D persone, auto e piante è un’impostazione dello stile di vista, **Entourage in 2D** (nelle proprietà della vista o in **Vista → Impostazioni di vista**; per uno stile intero, **Gestisci → Stili di vista**): **contorni** (predefinito), **astratto** (una persona un cerchio in pianta e una testa sopra un corpo in un prospetto, un’auto una scatola arrotondata, un albero un cerchio con il suo tronco), **dettagliato** (i simboli del paesaggio delle piante e ogni linea dei corpi, con le ombre solari della vista, come Lapin li disegnava prima) o **non disegnato**. **Riempimento delle sagome** riempie le sagome di prospetti e sezioni di grigio chiaro o verde pallido. Si disegnano con la penna 2 (0,13 mm a 1:100), salvo che **Gestisci → Stili oggetto** ne dia un’altra alla categoria **Entourage**, e **Visibilità / Grafica** nasconde la categoria in una vista. Le tavole, il PDF e il DXF li stampano come li disegna la vista; i loro corpi 3D non cambiano mai. Anche i progetti fatti prima li disegnano come contorni.
+
+Danno la scala ai disegni e alle immagini, ma non fanno parte dell’edificio. Un’esportazione IFC o Fragments (File → Export…) le lascia fuori se non spunti **Entourage** nel suo elenco di tipi; IFC le scrive come IfcBuildingElementProxy «Entourage». Le esportazioni 3D (glTF, USD, COLLADA) le includono. I test di interferenza le lasciano fuori.
+
+Le figure seguono le persone e le auto di [BimGo](https://github.com/aussieBIMguru/BimGo) di Aussie BIM Guru (MIT-0): le loro proporzioni, pose e profili.
+
+## Cancelli
+
+Il gruppo **Cancelli** nella scheda Sito mette i cancelli con i loro pilastri: un **Cancello a battente**, un **Cancello a due battenti** (<kbd>GT</kbd>), un **Cancello scorrevole**, un **Cancello scorrevole autoportante**, un **Cancelletto pedonale**, un **Cancello con porta pedonale laterale** e un **Cancello a libro**. Lapin non ha una recinzione propria: disegna la recinzione come un muro (basso, del tipo che vuoi), oppure lascia che i pilastri del cancello stiano sulla linea del lotto.
+
+Fai clic sulle due estremità del cancello. Con **Sulle linee** attivo nella barra (predefinito), il centro del cancello va sull’asse del muro o sulla linea disegnata più vicina entro 1,5 m (un muro, il bordo del lotto, una linea disegnata), lungo di essa; disattivato, sta tra i due punti. La barra sceglie anche il tipo che mette, tra gli stili del progetto o quelli predefiniti di Lapin.
+
+Un cancello posto su un muro lo taglia dalle facce esterne dei pilastri, per tutta l’altezza, così il muro di recinzione si ferma ai pilastri.
+
+![Un cancello scorrevole e un cancelletto pedonale in un muro di recinzione, un cancello a due battenti sul bordo del lotto](shots/gates-plan.webp)
+
+Le piante disegnano i pilastri sezionati, le ante aperte del loro angolo di apertura con il loro arco, i pannelli di un cancello a libro piegati; un cancello scorrevole chiuso, con una freccia nel verso in cui apre, il binario e la zona in cui si ritira tratteggiata, lunga quanto la sua anta (l’anta di un cancello autoportante è più lunga dell’apertura della sua coda di contrappeso, circa il 45%). Prospetti, sezioni e 3D disegnano i corpi.
+
+![I cancelli in 3D](shots/gates-3d.webp)
+
+### Il configuratore
+
+**Tipi di cancello** apre il configuratore: gli stili del progetto e quelli predefiniti di Lapin da aggiungere con un clic (un cancello a due battenti in ferro battuto, uno scorrevole a doghe orizzontali, uno a libro in acciaio, un cancelletto pedonale ad arco, un cancello carraio in legno, uno di sicurezza in rete, uno autoportante automatico, uno a due battenti con porta pedonale, un cancello agricolo, uno scorrevole in lamiera forata, un cancelletto da giardino in legno). Un tipo imposta, per gruppi, solo ciò che il suo genere prevede:
+
+- **Cancello:** la larghezza netta e l’altezza, la distanza dal terreno, la larghezza di una porta pedonale, i pannelli per lato di un cancello a libro, l’angolo di apertura;
+- **Ante:** la dimensione del telaio, il riempimento (sbarre verticali, doghe orizzontali, un pannello pieno, rete o lamiera forata), il passo di sbarre o doghe, le punte a lancia sulle sbarre, la sommità (piana, ad arco o a punta) e la sua freccia;
+- **Pilastri:** in muratura, montanti in acciaio o nessuno, dimensione e altezza, il cappello di un pilastro in muratura (piano o a piramide);
+- **Ferramenta:** un motore (un braccio sulle ante di un cancello a battente, una scatola accanto al binario di uno scorrevole) e una maniglia con serratura;
+- **Materiali** per ruolo: telaio, riempimento, pilastri, cappelli, ferramenta e motore. Un materiale indicato qui che il progetto non ha viene creato.
+
+L’anteprima è quella del motore: la pianta con l’arco o la zona di ritiro sopra, il prospetto sotto. Ogni cancello di un tipo segue una modifica.
+
+![Il configuratore dei cancelli con un cancello a due battenti in ferro battuto](shots/gates-types.webp)
+
+Seleziona un cancello per cambiarne il tipo, la rotazione, quanto sta sopra il terreno, verso quale lato **si aprono** le ante, da quale mano sono le cerniere (o dove si ritira uno scorrevole) e quanto è disegnato aperto (0: chiuso). **Altro lato** e **Altra mano** nelle sue proprietà, o le frecce accanto in pianta, li invertono. **Modifica → Specchia** gli dà l’altra mano.
+
+![Le proprietà di un cancello](shots/gates-properties.webp)
+
+### Abaco, costi e IFC
+
+L’**Abaco cancelli** elenca i cancelli per tipo: genere, luce netta, ante, riempimento, sommità, pilastri, motore e quantità. Un nuovo tipo ha le voci di costo `LAP-GATE` e, con il motore, `LAP-GATEMOT`, contate per cancello.
+
+IFC scrive un cancello come **IfcDoor** con PredefinedType **GATE**, di un **IfcDoorType** con il suo funzionamento (DOUBLE_DOOR_SINGLE_SWING, SLIDING_TO_LEFT, DOUBLE_DOOR_FOLDING…; un cancello con porta pedonale USERDEFINED), la larghezza netta e l’altezza come OverallWidth e OverallHeight e Pset_DoorCommon. I pilastri fanno parte del corpo del cancello, così un solo elemento porta il cancello come è stato configurato, e Lapin lo rilegge come proprio cancello.
+
+## Regole urbanistiche e il sole (Lapin Urban)
+
+L’edizione **Lapin Urban** aggiunge a questa scheda un gruppo **Urbanistica**: le regole urbanistiche del lotto (POT, CUT, le altezze massime, le distanze dalla strada, dai lati, dal retro e dall’asse stradale), il **volume edificabile** che lasciano, gli indicatori che il modello raggiunge rispetto a esse, e lo **studio del soleggiamento**: il sole e le sue ombre in 3D per qualsiasi giorno e ora nel luogo del progetto, e le piante delle ombre per l’equinozio e i solstizi.

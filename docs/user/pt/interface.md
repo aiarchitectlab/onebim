@@ -1,0 +1,179 @@
+---
+title: A interface e os atalhos
+order: 15
+summary: Os modos Confortável, Compacta e Foco, como recolher os painéis laterais e os atalhos de teclado que você pode alterar.
+---
+
+<!-- video interface -->
+
+## Espaços de trabalho
+
+Um espaço de trabalho mostra só as guias da faixa de opções de que o seu trabalho precisa, na ordem em que esse trabalho as usa. Escolha-o no botão ao lado de **Arquivo**, que mostra o espaço de trabalho em que você está, ou na tela inicial, no alto de **Vista → Interface…** ou em **Comandos…** (Espaço de trabalho: …): **Tudo** (todas as guias da sua edição), **Arquitetura**, **Estrutura e armaduras**, **Instalações**, **Implantação e canteiro** ou **Desenho 2D**. O projeto continua sendo um só: as ferramentas de uma guia oculta continuam em Comandos… e nos atalhos de teclado, e um modelo feito em um espaço de trabalho abre inteiro em outro.
+
+![Os espaços de trabalho em Vista → Interface…](shots/workspaces.webp)
+
+Quando as ferramentas da faixa de opções são mais largas que a janela, a roda do mouse sobre elas as rola para o lado.
+
+As guias ficam numa só linha. Quando a janela é estreita demais para todas, as últimas passam para **Mais**, no fim da linha, e a guia em que você está fica sempre à vista.
+
+As guias são agrupadas pelo trabalho a que servem. **Interiores** reúne os acabamentos e o mobiliário. **Implantação** reúne o terreno, o paisagismo e o canteiro de obras (andaimes e fôrmas). **Execução** reúne o cronograma da obra e o orçamento (4D e 5D).
+
+Mostre, oculte ou mova uma guia em **Guias** na mesma caixa de diálogo, e a escolha passa a ser **Minha área de trabalho**, guardado neste computador para a próxima vez; os outros espaços de trabalho continuam lá para você trocar. **Vista** sempre fica, pois Interface… está nela.
+
+## Três modos
+
+**Vista → Interface…** (<kbd>Ctrl</kbd> <kbd>.</kbd>) escolhe quanta coisa fica em volta da vista. Escolha um dos três modos no alto da caixa de diálogo; a mudança aparece na hora.
+
+![A caixa de diálogo Interface: os três modos e cada parte separadamente](shots/interface-dialog.webp)
+
+- **Confortável** é a janela como as outras páginas a mostram: a faixa de opções com ferramentas grandes e seus nomes, uma linha de comando sob cada desenho, e o HUD, a dica, os campos de comprimento e ângulo, a planta-chave e as ferramentas rápidas sobre a vista.
+- **Compacta** dá à vista a maior parte da janela:
+
+![Compacta: mais espaço para o desenho](shots/interface-compact.webp)
+
+1. **A faixa de opções** é uma única faixa de ícones. Linhas finas separam os grupos. Passe o mouse sobre uma ferramenta para ver o nome, as teclas e o grupo dela.
+2. **O navegador de projeto** se recolhe em uma barra. Os ícones dela abrem o projeto, os níveis ou a árvore IFC sobre a vista por um momento.
+3. **As ferramentas rápidas** <kbd>1</kbd>–<kbd>9</kbd> ficam na borda esquerda da vista.
+4. **A planta-chave** é um botão. Clique nele para abrir o mapa, e no × dele para recolhê-lo de novo.
+5. **Uma linha de status** reúne o nome da ferramenta e o que ela pede, o que você digita, os campos de comprimento e ângulo enquanto você desenha, SNAP, ORTHO e POLAR, o nível e a vista, e depois o projeto.
+
+- **Foco** mantém só as guias e uma linha de comando fina. Clique em uma guia e as ferramentas dela descem sobre a vista; a faixa se recolhe de novo assim que você escolhe uma ferramenta, ou com <kbd>Esc</kbd> ou um clique em outro lugar. Os painéis ficam ocultos. Quando algo está selecionado, um pequeno cartão mostra o que é e as primeiras propriedades; **Todas as propriedades…** abre o painel Propriedades sobre a vista. <kbd>Tab</kbd> traz os dois painéis de volta e os oculta de novo.
+
+![Foco: a seleção em um cartão](shots/interface-focus.webp)
+
+Em todos os modos, a barra superior mantém **Desfazer** e **Refazer** na ponta direita: com os nomes no modo Confortável, como duas setas no modo Compacta e no Foco (<kbd>Ctrl</kbd> <kbd>Z</kbd> e <kbd>Ctrl</kbd> <kbd>Y</kbd>; a dica deles diz o que desfazem).
+
+Abaixo dos modos, cada parte pode ser ajustada separadamente: a faixa de opções, as ferramentas rápidas (ou nenhuma: as teclas numéricas continuam funcionando), a linha de comando, o HUD, a solicitação e os campos da ferramenta, a planta-chave, os painéis e a altura das linhas de propriedades. Mudar uma parte torna a escolha **Personalizado**.
+
+Abaixo das partes, **Guias**: desmarque as guias da faixa de opções que você não usa (um arquiteto pode ocultar Estrutura, Armadura simples e Instalações, um engenheiro Arquitetura e Implantação). Vista sempre fica, pois Interface… está nela. As ferramentas de uma guia oculta continuam em Comandos… e nos atalhos de teclado.
+
+O Lapin guarda a sua escolha neste computador, para você. O aplicativo de desktop e o navegador guardam as suas separadamente. No navegador, o Lapin começa no modo Compacta quando a janela tem menos de 800 pixels de altura, até você escolher.
+
+## Ferramentas rápidas
+
+As ferramentas rápidas são os espaços numerados na borda esquerda da vista, junto ao navegador do projeto, de modo que se movem com ele; pequenas e semitransparentes até o ponteiro chegar a elas (View → Interface… pode, em vez disso, deixá-las flutuando no pé da vista); as teclas <kbd>1</kbd>–<kbd>9</kbd> as iniciam. Cada espaço de trabalho tem as suas: começam como sua edição as dá, e você as escolhe:
+
+- arraste uma ferramenta da faixa de opções para um espaço. Uma ferramenta fica em um só espaço, então deixa aquele onde estava;
+- arraste um espaço sobre outro para trocá-los;
+- clique com o botão direito em um espaço: **Escolha uma ferramenta…**, **Esvaziar este espaço** ou **Restaurar as ferramentas rápidas**;
+- **Vista → Ferramentas rápidas…** define os nove espaços em listas, e **Como na edição** traz de volta as da sua edição;
+- uma ferramenta que coloca elementos de um tipo (parede, porta, laje, escada…) pode guardar um dos tipos do projeto: escolha-o no menu do espaço ou ao lado da ferramenta em **Vista → Ferramentas rápidas…**. O espaço mostra então o nome do tipo e inicia a ferramenta com ele. O tipo é guardado pelo nome: o espaço funciona em qualquer projeto com um tipo desse nome, e num projeto sem ele a ferramenta usa seu tipo atual.
+
+No pé da vista, cada espaço mostra o nome da sua ferramenta, e um espaço vazio depois do último espera uma ferramenta. O Lapin guarda suas ferramentas rápidas neste computador, para você.
+
+A seta no fim da barra oculta as ferramentas rápidas; fica no lugar delas uma pequena pega **Ferramentas rápidas** que as traz de volta. Ocultam-se à parte nas vistas do modelo (plantas, 3D, cortes) e nas folhas e mapas, por isso pode tê-las escondidas nos documentos e visíveis nos desenhos.
+
+![As ferramentas rápidas: um tipo de parede no espaço 3, a escada no 7, o espaço 2 vazio](shots/quick-tools.webp)
+
+![Vista → Ferramentas rápidas…](shots/quick-tools-dialog.webp)
+
+## Minhas ferramentas
+
+**Minhas ferramentas** é uma aba da faixa só sua, a primeira da fileira de abas: você coloca nela apenas as ferramentas que usa, tiradas de qualquer aba, em grupos que você mesmo nomeia.
+
+- **Colocar ferramentas.** Clique com o botão direito em uma ferramenta da faixa → **Adicionar a Minhas ferramentas**, **Adicionar a Minhas ferramentas em…** um grupo, ou **Adicionar a um novo grupo de Minhas ferramentas**. Ou arraste uma ferramenta de outra aba para a aba **Minhas ferramentas**: mantida um instante sobre ela, a aba se abre e você solta a ferramenta onde uma linha mostra que ela vai ficar.
+- **Ordená-las na própria faixa.** Arraste uma ferramenta para antes ou depois de outra, no seu grupo ou em outro grupo; arraste um grupo pelo nome para movê-lo entre os grupos. Uma linha mostra onde vai ficar, as outras se afastam, e soltar em outro lugar não muda nada. Clique duas vezes no nome de um grupo para renomeá-lo. Botão direito em uma ferramenta: **Tornar pequena** ou **Tornar grande**, **Mover para antes**, **Mover para depois** e **Remover de Minhas ferramentas**; botão direito no nome de um grupo: **Renomear grupo**, **Excluir grupo**, **Novo grupo** e **Desfazer a última alteração**. Pelo teclado, <kbd>Alt</kbd> <kbd>←</kbd> ou <kbd>→</kbd> move a ferramenta com o foco e <kbd>Delete</kbd> a remove.
+- **Personalizar Minhas ferramentas…** (a engrenagem no fim da aba, View → Interface ou Commands…) mostra à esquerda todas as ferramentas do aplicativo, com busca e agrupadas por aba, e à direita a sua aba. Arraste ferramentas de um lado para o outro, ou pressione **+** (ou <kbd>Enter</kbd>) para adicionar uma; arraste no lado direito para ordenar; arraste uma ferramenta de volta para a esquerda para tirá-la. Cada linha tem também botões para subir ou descer, para mostrá-la como ferramenta grande ou pequena, uma lista para movê-la a outro grupo e **×** para removê-la. Pelo teclado, <kbd>Alt</kbd> <kbd>↑</kbd> <kbd>↓</kbd> movem a ferramenta com o foco (também além das pontas do seu grupo), <kbd>Alt</kbd> <kbd>←</kbd> <kbd>→</kbd> a levam ao grupo anterior ou seguinte, <kbd>Delete</kbd> a remove e <kbd>Ctrl</kbd> <kbd>Z</kbd> desfaz a última alteração. **Desfazer** e **Redefinir** ficam embaixo, então um soltar errado não perde nada.
+- **Exportar…** e **Importar…** salvam a aba como um arquivo pequeno que você leva a outro computador ou dá a um colega.
+
+O Lapin guarda Minhas ferramentas neste computador, para você (o aplicativo de desktop e o navegador separados). Uma ferramenta que a sua edição não tem fica oculta, não perdida: volta com o seu módulo.
+
+![Minhas ferramentas](shots/my-tools-empty.webp)
+
+![Minhas ferramentas](shots/my-tools-menu.webp)
+
+![Minhas ferramentas: dois grupos, Paredes e Aberturas](shots/my-tools-tab.webp)
+
+![View → Interface → Personalizar Minhas ferramentas…](shots/my-tools-dialog.webp)
+
+## O catálogo
+
+A guia **Catálogo** do navegador do projeto mostra os tipos do projeto para cada ferramenta que coloca elementos com tipo: paredes, portas, janelas, lajes, fachadas-cortina, escadas, rampas, forros e rodapés. Cada tipo é desenhado em pequeno (as camadas de uma parede como seu corte em planta, as de uma laje em corte, a elevação de uma porta ou janela, o perfil de um rodapé), com o que ele é em poucas palavras.
+
+- um clique num cartão coloca elementos desse tipo: a ferramenta começa com ele;
+- arraste um cartão para um espaço rápido para guardar ali a ferramenta com esse tipo;
+- **Editar tipos…** abre o diálogo onde esses tipos são criados e alterados.
+
+![O catálogo: os tipos de parede](shots/catalog.webp)
+
+![Os tipos de janela, desenhados pela sua elevação](shots/catalog-windows.webp)
+
+## Recolher os painéis laterais
+
+Em todos os modos, o navegador de projeto e o painel Propriedades se recolhem em uma barra fina do seu lado:
+
+- o botão no canto superior direito do painel o recolhe, e a seta na barra dele o expande;
+- dê um clique duplo na borda entre o painel e a vista;
+- <kbd>Ctrl</kbd> <kbd>B</kbd> recolhe ou expande o navegador, <kbd>Ctrl</kbd> <kbd>⇧</kbd> <kbd>B</kbd> as propriedades, e <kbd>Tab</kbd> os dois.
+
+Clique em um ícone na barra de um painel recolhido para abrir o painel sobre a vista sem expandi-lo. Ele some com <kbd>Esc</kbd> ou um clique em outro lugar; o alfinete o mantém aberto. Arraste a borda de um painel para deixá-lo mais largo; o Lapin lembra a largura.
+
+![Um navegador recolhido aberto sobre a vista a partir da barra](shots/browser-overlay.webp)
+
+## Painéis de cada lado
+
+**Ver → Painéis** (View → Panels) põe o navegador do projeto e o painel de propriedades onde quiser, como no Revit: **Navegador à esquerda, Propriedades à direita** (predefinição), **Navegador à direita, Propriedades à esquerda**, **Ambos os painéis à esquerda** ou **Ambos os painéis à direita**. Com os dois do mesmo lado, ficam um sob o outro; arraste o divisor entre eles para repartir a altura (clique duplo divide ao meio) e a margem do lado para o alargar. Cada painel continua a recolher-se sozinho: um recolhido é uma barra fina na pilha, ou uma barra lateral quando ambos estão recolhidos. O separador do assistente (desktop) fica com as propriedades. O Lapin lembra a disposição neste computador.
+
+![Navegador e propriedades empilhados à esquerda](shots/panel-layouts.webp)
+
+## Claro e escuro
+
+A lua na ponta direita da faixa de opções torna a interface escura (grafite); o sol torna-a clara de novo (papel). No tema escuro, plantas, cortes e alçados ficam sobre o fundo escuro, com as penas pretas em tinta clara; as folhas continuam papel. Os pequenos desenhos dos configuradores (a planta, o corte e o alçado de uma porta ou janela, de uma cobertura, uma varanda, um elevador, um pavilhão, uma escada…) e as pré-visualizações de etiquetas, carimbos e materiais são desenhados num cartão de papel claro nos dois temas, para que as suas linhas, textos e cotas se leiam como num desenho impresso.
+
+## O que um clique seleciona
+
+Um clique, uma caixa de seleção ou um laço tomam só o que a vista mostra, em plantas, cortes, alçados, as vistas das folhas e 3D. Um elemento que a Visibilidade / Gráficos da vista oculta (a sua categoria, uma subcategoria, um filtro), um posto de lado com Ocultar / Isolar ou pela fase da vista, um fora do intervalo ou do recorte da vista, num piso, ligação ou grupo não mostrado, ou cortado por uma caixa de corte, é ignorado: o clique toma o que está desenhado por baixo, e o elemento que se ilumina sob o cursor é um que se vê. Com **Selecionar por níveis de conjunto** ligado, um clique dentro de um conjunto continua a entrar nas suas partes. Com as linhas de modelação em vez do desenho (o botão da caneta no topo da planta), tudo o que está no ecrã pode ser tomado. O navegador do projeto, uma tabela, uma ligação no painel de propriedades e as dependências continuam a selecionar um elemento pelo nome, oculto ou não; o painel de propriedades diz então *Não visível nesta vista*.
+
+## Vários elementos de uma vez
+
+Selecione vários elementos (Shift-clique ou uma caixa) e o painel de propriedades mostra o último escolhido, com **N selecionados** ao lado da sua classe. Um valor que partilham é mostrado; um que difere aparece como *varia*. Mude um campo e cada elemento selecionado que o tem fica com o novo valor, num só passo que **Desfazer** reverte: a altura e o deslocamento da base das paredes, o tipo de cada parede, porta ou viga selecionada, o peitoril das janelas, as fases de cada elemento selecionado seja qual for a sua classe, a camada e a cor das linhas desenhadas, o estilo dos textos. O que é próprio de cada elemento continua seu: o número de um compartimento, o comprimento de uma parede, o lugar de uma porta ao longo da sua parede.
+
+## Corresponder propriedades
+
+**Modificar → Corresponder propriedades** (<kbd>MA</kbd>, ou `MATCHPROP` na linha de comandos como no AutoCAD; o Revit chama-lhe Match Type) dá a outros elementos o que um elemento tem. Selecione o elemento de onde copiar, ou inicie o comando e clique primeiro nele; depois clique em cada elemento que deve ficar com as suas propriedades. O elemento sob o cursor acende antes do clique, em plantas, cortes e 3D. Cada clique é um passo que **Desfazer** reverte. **Aplicar à seleção** dá-as de uma vez a todos os outros elementos selecionados. Prima <kbd>Enter</kbd> ou <kbd>Esc</kbd> quando terminar.
+
+A roda dentada na barra da linha de comandos lista o que é copiado, e o Lapin lembra a sua escolha: **Tipo** (para um elemento da mesma classe), **Dimensões e definições** (altura, deslocamentos, materiais, prioridade de corte, o estilo de um texto, a posição do aro e o peitoril de uma porta ou janela; para outra classe só os campos que ela também tem), **Parâmetros** (os seus; os de um conjunto padrão só para a mesma classe), **Fases**, **Camada, cor e tracejado** (formas desenhadas) e **Nome** (desligado de início). Onde um elemento está, a sua forma e o seu GlobalId nunca são copiados. Um elemento fixado também os recebe: fixar mantém um elemento no lugar, não as suas definições.
+
+![Corresponder propriedades em planta: a parede de onde se copia, a parede sob o cursor acesa e o que é copiado](shots/match-properties.webp)
+
+## Atalhos de teclado
+
+**Vista → Atalhos de teclado…** (<kbd>KS</kbd>) lista, por guia, todos os comandos que o teclado alcança. Cada linha mostra os atalhos do comando.
+
+![Os atalhos de teclado, com a busca "parede"](shots/shortcuts-dialog.webp)
+
+- **Pesquisar** pelo nome de um comando ou por uma tecla.
+- **+** adiciona um atalho: pressione uma combinação (<kbd>Ctrl</kbd> <kbd>⇧</kbd> <kbd>W</kbd>, <kbd>F4</kbd>) ou digite até três letras e pressione <kbd>Enter</kbd>. <kbd>Esc</kbd> interrompe.
+- Se outro comando já tem o atalho, o Lapin diz qual. **Reatribuir** o tira daquele comando, **Manter ambos** o deixa para os dois (vence o primeiro da lista), **Cancelar** não muda nada.
+- **×** remove um atalho. A seta no fim de uma linha devolve aquele comando ao que a predefinição tem, e **Redefinir tudo** faz isso para todos os comandos.
+- **Predefinição** escolhe o conjunto de partida: **Estilo Revit** (o padrão: as letras usuais do Revit, onde o Lapin tem o comando) ou **Lapin clássico** (as letras do próprio Lapin de antes).
+- **Exportar…** grava os seus atalhos em um arquivo, e **Importar…** lê um, para outro computador ou um colega.
+
+As dicas, os menus e a paleta de comandos (<kbd>Ctrl</kbd> <kbd>K</kbd>) sempre mostram os atalhos como estão agora.
+
+### Letras e a linha de comando
+
+Letras como <kbd>WA</kbd> funcionam quando nenhum campo tem o foco e a linha de comando está vazia: digite-as sobre a vista. O comando é executado na hora. Quando um comando da linha de comando começa com as mesmas letras (<kbd>DI</kbd> e <kbd>DIMADD</kbd>), o Lapin espera um momento: continue digitando para escrever o comando mais longo, ou pressione <kbd>Enter</kbd> ou <kbd>Space</kbd> para executar o mais curto agora. Enquanto um comando pede um ponto ou um valor, letras e dígitos vão para ele. Comandos da linha de comando como <kbd>L</kbd>, <kbd>M</kbd> ou <kbd>TRIM</kbd> seguidos de <kbd>Enter</kbd> funcionam em todas as predefinições. <kbd>Esc</kbd> sempre cancela.
+
+Quando os dois colidem, escolhe como partilham o teclado:
+
+- **Atalhos de letras (como no Revit)**, neste diálogo e em **Preferências → Geral → Teclado**, está ligado por predefinição. Desligue-o para ficar só com a linha de comando: cada letra vai para ela, e <kbd>Enter</kbd> ou <kbd>Espaço</kbd> executa um comando, um alias seu ou, se o texto não for nenhum deles, o comando cujas letras são (<kbd>WA</kbd> <kbd>Enter</kbd> continua a iniciar a parede). Os acordes (<kbd>Ctrl</kbd> + uma tecla, as teclas de função, <kbd>Delete</kbd>) e os números das ferramentas rápidas continuam a funcionar.
+- A tecla <kbd>`</kbd> (a da esquerda do <kbd>1</kbd>, encontrada pelo seu lugar em qualquer disposição, e um atalho como os outros: **Linha de comando: toma toda a digitação**) dá à linha de comando toda a digitação, com as letras ligadas ou não. A linha fica contornada e di-lo; nenhuma letra inicia uma ferramenta, nenhum número escolhe uma ferramenta rápida. <kbd>Enter</kbd> executa o que escreveu e devolve a digitação, a não ser que um comando peça depois um ponto ou um valor: o modo fica até o comando acabar. <kbd>Esc</kbd> ou a mesma tecla sai dele.
+
+### Aliases de comandos
+
+A página **Aliases de comandos** do diálogo guarda nomes próprios para comandos. Escreva de 1 a 12 letras ou algarismos (o primeiro uma letra), encontre o comando na lista (um comando da linha de comando como <kbd>LINE</kbd> ou qualquer comando da faixa ou da aplicação) e prima **Adicionar alias**. Escreva o alias na linha de comando e prima <kbd>Enter</kbd> ou <kbd>Espaço</kbd>. Os seus vêm antes dos nomes embutidos. A página diz o que um alias substitui: um nome embutido da linha de comando, um atalho com as mesmas letras ou um atalho que faz esperar (com as letras ligadas, um atalho que é um alias, ou o início de um, espera um momento para poder continuar a escrever e premir <kbd>Enter</kbd>). Os aliases guardam-se com os seus atalhos, também em **Exportar…** e **Importar…**.
+
+![Aliases de comandos, com o que um alias tapa](shots/shortcuts-aliases.webp)
+
+### Os atalhos padrão
+
+Estes são os atalhos no estilo Revit, como o Lapin os tem agora:
+
+<!-- shortcuts -->
+
+As teclas numéricas <kbd>1</kbd>–<kbd>9</kbd> escolhem as ferramentas rápidas.
+
+## Mover uma caixa de diálogo
+
+Toda caixa de diálogo move-se pela barra de título, como uma janela: prima o título e arraste, com o rato ou com o dedo. Fica dentro da janela, volta a abrir onde a deixou enquanto o programa estiver aberto, e um duplo clique no título leva-a de volta ao centro. Assim pode afastá-la da parte do modelo em que trabalha ou ver o modelo por trás.

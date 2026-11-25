@@ -1,0 +1,74 @@
+import { describe, expect, it } from 'vitest';
+import type { NodeDto } from '../../engine/protocol';
+import { appliesTo, furnitureGrips, planBox, planPaths, sizeIndex, sizeLabel, sizeOf, typesOfKind, type FurnitureKind, type KindParam, type KindSize, type PreviewDto } from './furniture';
+
+const node = (id: string, type: string, props: Record<string, unknown>, name = id): NodeDto => ({ id, type, name, props } as unknown as NodeDto);
+
+describe('furniture', () => {
+  const kinds = [{ key: 'sofa', width: 2.2, depth: 0.95, height: 0.82 }, { key: 'kitchen', width: 3, depth: 0.6, height: 0.9 }] as FurnitureKind[];
+
+  it('lists a kind\'s types by name and says their size', () => {
+    const nodes = new Map([
+      ['b', node('b', 'IfcFurnitureType', { spec: { kind: 'sofa', width: 1.8 } }, 'Sofa B')],
+      ['a', node('a', 'IfcFurnitureType', { spec: { kind: 'sofa' } }, 'Sofa A')],
+      ['k', node('k', 'IfcFurnitureType', { spec: { kind: 'kitchen' } }, 'Kitchen')],
+    ]);
+    expect(typesOfKind(nodes, 'sofa').map((t) => t.name)).toEqual(['Sofa A', 'Sofa B']);
+    expect(sizeOf(nodes.get('b'), kinds)).toBe('1800 × 950 × 820');
+    expect(sizeOf(nodes.get('k'), kinds)).toBe('depth 600 · worktop 900');
+  });
+
+  it('turns a piece so its front looks at the cursor', () => {
+    const piece = node('p', 'IfcFurniture', { at: [2, 3], rotation: 0 });
+    const [move, turn] = furnitureGrips(piece, 1);
+    expect(move.at).toEqual({ x: 2, y: 3 });
+    // Its front looks along −y: the handle is in front of it.
+    expect(turn.at.x).toBeCloseTo(2);
+    expect(turn.at.y).toBeLessThan(3);
+    // The cursor to its east: its front turned to +x, a quarter turn anticlockwise.
+    expect(turn.step!({ x: 5, y: 3 })).toEqual({ command: 'element.transform', args: { ids: ['p'], op: 'rotate', center: [2, 3], angle: 90 } });
+    expect(move.step!({ x: 3, y: 3 })).toEqual({ command: 'element.transform', args: { ids: ['p'], op: 'move', by: [1, 0] } });
+  });
+
+  it('draws the preview\'s plan with y up', () => {
+    const p: PreviewDto = { plan: [{ kind: 'symbol', closed: true, points: [0, 0, 1, 0, 1, 0.5] }], front: [], width: 1, depth: 0.5, height: 1 };
+    expect(planPaths(p)[0].d).toBe('M0.0000 0.0000 L1.0000 0.0000 L1.0000 -0.5000 Z');
+    const [x, y, w, h] = planBox(p, 0);
+    expect([x, y, w, h]).toEqual([0, -0.5, 1, 0.5]);
+  });
+});
+
+describe('a kitchen’s layouts (report #124)', () => {
+  const params = [
+    { key: 'layout', label: 'Layout', kind: 'choice' },
+    { key: 'leg', label: 'Leg', kind: 'length', layouts: ['l-shaped', 'u-shaped'] },
+    { key: 'unit', label: 'Unit', kind: 'length' },
+  ] as KindParam[];
+
+  it('shows the parameters the layout uses, the layout of the spec or else the kind’s', () => {
+    const defaults = { layout: 'one-wall' };
+    expect(params.filter((p) => appliesTo(p, {}, defaults)).map((p) => p.key)).toEqual(['layout', 'unit']);
+    expect(params.filter((p) => appliesTo(p, { layout: 'u-shaped' }, defaults)).map((p) => p.key)).toEqual(['layout', 'leg', 'unit']);
+  });
+});
+
+describe('a sanitary kind’s common sizes (forum topic #245)', () => {
+  const sizes: KindSize[] = [
+    { label: 'Wall-hung', spec: { width: 0.36, depth: 0.54, height: 0.4, mount: 'wallHung' } },
+    { label: '', spec: { width: 0.6, depth: 0.46, height: 0.85 } },
+    { label: 'Floor-standing', spec: { width: 0.36, depth: 0.54, height: 0.4, mount: 'floor' } },
+  ];
+
+  it('lists each by its word and its size in mm, the word in the interface’s language', () => {
+    expect(sizeLabel(sizes[0])).toBe('Wall-hung 360 × 540 × 400');
+    expect(sizeLabel(sizes[1])).toBe('600 × 460 × 850');
+    expect(sizeLabel(sizes[2], (w) => (w === 'Floor-standing' ? 'Pe pardoseală' : w))).toBe('Pe pardoseală 360 × 540 × 400');
+  });
+
+  it('knows which one a type is, by every value the size gives, and none when it was changed', () => {
+    expect(sizeIndex(sizes, { width: 0.36, depth: 0.54, height: 0.4, mount: 'floor', cistern: 'concealed' })).toBe(2);
+    expect(sizeIndex(sizes, { width: 0.36, depth: 0.54, height: 0.4, mount: 'wallHung' })).toBe(0);
+    expect(sizeIndex(sizes, { width: 0.37, depth: 0.54, height: 0.4, mount: 'wallHung' })).toBe(-1);
+    expect(sizeIndex(undefined, {})).toBe(-1);
+  });
+});

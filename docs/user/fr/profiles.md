@@ -1,0 +1,90 @@
+---
+title: Bibliothèques de profilés
+order: 57
+summary: Les profilés dont votre travail a besoin, quelle que soit leur norme — le petit jeu EN de Lapin, vos tableaux et fichiers IFC, les dossiers de l'entreprise ; dessinés, avec leurs propriétés calculées et les valeurs du fichier vérifiées, copiés dans le projet à mesure de leur usage.
+---
+
+Lapin ne peut pas fournir tous les profilés d'acier du monde : il apporte un petit jeu européen et lit le reste dans ce que vous avez déjà : un catalogue en tableur (AISC Shapes Database, le tableau d'un fabricant, celui de votre entreprise), une bibliothèque IFC de profilés (celle de Bonsai, par exemple) ou tout modèle IFC, un contour fermé dessiné dans Lapin ou dans un DXF. **Gérer → Bibliothèques de profilés** les réunit tous.
+
+![Bibliothèques de profilés](shots/profile-libraries.webp)
+
+## Les bibliothèques
+
+- **Intégrée** : *EN steel (Lapin)* : IPE, HEA, HEB, HEM, UPN, UPE, cornières égales et inégales, SHS, RHS et CHS finis à chaud en tailles courantes, et C, Z et Σ génériques formés à froid. Seulement les dimensions normalisées ; Lapin calcule toutes les propriétés.
+- **Sur cet ordinateur** : les bibliothèques que vous importez, pour tout projet. La version navigateur les garde aussi, dans ce navigateur.
+- **Dossiers de l'entreprise** : dans l'application de bureau, autant de dossiers locaux, réseau ou synchronisés de fichiers `.lapinprofiles` que vous voulez (**Ajouter un dossier…**). Un dossier est en lecture seule tant que vous ne cochez pas **écriture** ; le bouton d'enregistrement à côté y écrit alors la bibliothèque choisie, pour vos collègues.
+- **Dans le projet** : seuls les profilés utilisés sont copiés, avec le nom de leur bibliothèque, pour que le fichier s'ouvre partout.
+
+Tapez dans la recherche pour parcourir toutes les bibliothèques par nom, famille, norme ou type ; choisissez un profilé pour le voir dessiné avec ses dimensions et ses propriétés.
+
+## Normes
+
+Chaque profilé apparaît sous sa norme : **EN** pour le jeu de Lapin et tout profilé dont la norme est européenne (EN 10365, DIN EN, SR EN…), **AISC / ASTM** pour les tableaux américains (une colonne *Standard* disant ASTM A6, par exemple), BS, DIN, JIS, AS/NZS et les autres sous leur nom, et une bibliothèque dont les profilés n’en disent aucune — celle de votre bureau — sous son propre nom. On peut dire à une bibliothèque de cet ordinateur sous laquelle elle apparaît (**Affichée sous**, au-dessus de sa liste).
+
+Les sélecteurs montrent d’abord les profilés du projet, puis chaque norme sous son titre. Les boutons en haut de la liste masquent ou affichent une norme ; votre choix est gardé sur cet ordinateur, pour tous les projets (aussi dans **Fichier → Préférences → Profils**).
+
+![Le sélecteur groupé par norme, avec ses boutons](shots/profile-picker-standards.webp)
+
+Un projet ne garde que les profilés utilisés par ses types, jamais une bibliothèque entière : une bibliothèque que vous avez ne pèse donc rien dans son fichier. Ce qu’un projet propose est son propre choix : **Normes de ce projet**, sous les bibliothèques, coche les normes que montrent ses sélecteurs ; les profilés déjà dedans restent. **Fichier → Préférences → Profils** choisit les normes avec lesquelles commence un nouveau projet (toutes, sauf si vous choisissez).
+
+![Les normes proposées par un projet](shots/profile-project-standards.webp)
+
+![Les normes proposées par un nouveau projet](shots/prefs-profiles.webp)
+
+Lapin ne fournit pas l’AISC Shapes Database : l’AISC ne permet de l’inclure que sous un contrat de licence propre, qu’un programme MIT ne peut pas transmettre. Téléchargez-la chez l’AISC et importez-la avec **Tableau…** : ses colonnes sont reconnues.
+
+## Propriétés
+
+À partir des dimensions, Lapin calcule l'aire, Iy, Iz, les modules élastiques et plastiques, les rayons de giration, les axes principaux et leur angle (cornières, Z, tout contour dissymétrique), la constante de torsion It et de gauchissement Iw là où une formule existe, la masse par mètre selon la densité du matériau et la surface à peindre par mètre. Elles concordent avec les tableaux publiés à environ 1 % (It et Iw des I laminés à 3 % ; Iw d'un U à ailes inclinées seulement à 20 %). Un contour quelconque n'a ni It ni Iw sauf si son fichier les donne.
+
+Les valeurs d'un fichier sont gardées et montrées à côté de celles de Lapin. Un écart de plus de 2 % (aire, masse), 3 % (inerties, modules) ou 10 % (It, Iw) est marqué et va sur la liste de contrôle de l'import ; pour une colonne entière décalée d'une puissance de dix, Lapin signale une autre unité.
+
+![Une valeur du fichier qui diffère de celle de Lapin](shots/profile-check.webp)
+
+## Importer un tableau
+
+**Tableau…** lit un CSV ou un XLSX, une ligne par profilé. Le sens et l'unité de chaque colonne sont devinés d'après son titre en anglais, roumain, allemand ou français (h, d, Höhe, hauteur, înălțime ; tw, s, Stegdicke ; A, Iy, Wel, Wpl, It, Iw, G, kg/m…), unités comprises (mm, cm, in, cm², cm⁴, in⁴, ×10³ cm⁶, lb/ft). Un tableau avec Ix sans Iz est lu à l'américaine : x l'axe fort, en pouces. Corrigez dans la boîte de dialogue ce qui est faux ; Lapin retient votre choix pour le prochain fichier de même disposition.
+
+![Les colonnes d'un tableau associées](shots/profile-table.webp)
+
+Le type d'une ligne vient de sa colonne de type (W, HP, UPN, HSS, PIPE…) ou de son nom ; pour les autres, choisissez-le dans la boîte de dialogue.
+
+## IFC
+
+**IFC…** lit toutes les définitions de profilé d'un fichier IFC quelconque : une bibliothèque, ou un modèle de Tekla, Revit ou ArchiCAD, où les profilés utilisés par les éléments prennent le nom de leurs types. I, I dissymétrique, U, T, L, C, Z, tubes, rectangle, cercle et ellipse gardent leur type et leurs dimensions ; les profils quelconques, composés et dérivés deviennent des contours. Les propriétés mécaniques de `Pset_ProfileMechanical` (et celles d'IFC2x3) suivent ; les exportateurs divergent sur leurs unités et sur l'axe Y, alors Lapin tranche les deux d'après la géométrie. Les profils de ligne médiane et trapèze sont écartés, et Lapin le dit.
+
+![Profilés lus dans un fichier IFC](shots/profile-ifc.webp)
+
+**IFC** et **CSV** sous la liste écrivent la bibliothèque choisie (ou les profilés du projet) en bibliothèque de profilés IFC4 ou en tableau que Lapin sait relire.
+
+Dans l'IFC de la maquette aussi, poutres, poteaux et profilés d'acier sont écrits par leur profil paramétrique (`IfcIShapeProfileDef`, `IfcLShapeProfileDef`, …, rectangles et cercles), avec le nom du profilé et `Pset_ProfileMechanical` : les autres logiciels voient un IPE 300 et non une polyligne. Contours, Σ et Z à lèvres restent des profils arbitraires ; un élément coupé par un autre reste le solide qu'il est.
+
+## Un contour comme profilé
+
+Dessinez la section avec Dessin en polylignes fermées et cercles (ceux à l'intérieur d'un autre sont ses trous), sélectionnez-les et cliquez sur **Depuis la sélection**, ou lisez le dessin d'un fabricant avec **DXF…**. Nommez-le, choisissez son matériau et sa bibliothèque, gardez-le. C'est ainsi qu'entrent les profilés aluminium et PVC, les sections préfabriquées et les formes en bois : le même stock, avec leur matériau et leur densité.
+
+![Un contour dessiné devenu profilé](shots/profile-outline.webp)
+
+**Dessiner son contour** fait l'inverse : le contour du profilé choisi en polylignes fermées dans la vue active, pour que Studio l'extrude ou le balaie.
+
+**Dessiner un profilé…** ouvre la section sur la toile d’esquisse : une feuille à part en millimètres, les axes de la section tracés comme lignes de construction. Dessinez l’extérieur et ses chambres comme formes fermées avec les outils de **Dessin** sur la barre (**Rectangle**, **Polyligne**, **Cercle**, **Ligne** et **Arc** bout à bout, **Décaler**, **Raccord**, **Ajuster**…), déplacez les points par leurs poignées, et cotez-le et contraignez-le comme toute esquisse ; les courbes sont posées en petits tronçons droits. Le formulaire latéral à côté contient le nom, le matériau et la bibliothèque du profilé, les formes de départ (un rectangle, un caisson creux, un T, une cornière ou un U) avec les dimensions que vous donnez, une chambre ajoutée au milieu, sa taille et sa surface, et les points de l’extérieur ou d’une chambre en millimètres à retaper. **Terminer l’esquisse** crée le profilé (un contour qui se croise lui-même ou en croise un autre, ou resté ouvert, est refusé avec la raison, et l’esquisse reste ouverte) et revient aux bibliothèques pour le nommer et l’enregistrer comme tout contour ; **Annuler** revient sans lui. Un produit sans Studio garde l’éditeur de sections dans la boîte de dialogue. **Modifier son contour…** ouvre sur la même esquisse un profilé que vous avez (terminé sans changement, il reste exactement comme il était) : enregistré de nouveau sous son nom, la copie du projet est marquée plus récente et **Mettre à jour depuis la bibliothèque** l’apporte à chaque type et à chaque barre de mur-rideau qui en est faite. Les meneaux et traverses choisis prennent un profil propre, tourné, aligné et décalé : voir [Murs](walls.md).
+
+![Une section sur la toile d’esquisse : un rectangle avec une chambre, son formulaire latéral à côté](shots/profile-editor.webp)
+
+## Utiliser un profilé
+
+Dans **Acier → Types acier**, **Structure → Types structurels** (poteaux et poutres) et les profilés de la halle à portiques, choisissez **D'une bibliothèque de profilés…** et tapez pour chercher.
+
+![Le sélecteur cherche dans toutes les bibliothèques](shots/profile-picker.webp)
+
+Le profilé est copié dans le projet et le type le garde. Les corps sont légers, à angles vifs, à tous les niveaux sauf un : une vue au **LOD 400** (plan, coupe, élévation, feuille ou 3D) dessine la section réelle, avec congés, rayons de bout d'aile et ailes inclinées. Les exports et la sélection gardent le corps à angles vifs, mais les quantités, les poids, les métrés, la liste des éléments d'acier et les estimations utilisent l'aire réelle de la section (un IPE 300 fait 53,81 cm², pas les 51,88 du contour à angles vifs) ; une section sans rayons ne change pas.
+
+![Une poutre et un poteau d'acier dans une vue 3D au LOD 400 : congés dessinés](shots/profile-real-section.webp)
+
+Ailleurs, le profilé donne ce que l'outil peut utiliser : moulures, engravures et semelles filantes prennent son extérieur comme profil 2D (**D'une bibliothèque de profilés…** dans leur liste), montants et traverses de murs-rideaux, dormants et ouvrants de portes et fenêtres prennent son contour réel, vides compris, le long de chaque barre, avec sa largeur et sa profondeur ; le x du profilé va en travers de la barre (vers le vitrage pour dormant et ouvrant), son y vers l'extérieur du bâtiment. **Simple** retire le contour et garde la taille.
+
+![Montants et traverses de mur-rideau d'une section d'aluminium](shots/profile-real-mullions.webp)
+
+![Dormant et ouvrant d'une fenêtre de la même section](shots/profile-real-frame.webp)
+
+Une bibliothèque peut changer après usage. Un profilé du projet différent de celui de même nom dans sa bibliothèque est marqué **plus récent en bibliothèque** ; **Mettre à jour depuis la bibliothèque** le remplace et tous les types faits avec lui suivent, en une seule étape d'annulation. Rien ne change sans votre demande. Les projets antérieurs gardent leurs types.

@@ -1,0 +1,342 @@
+using Lapin.Geometry;
+
+namespace Lapin.Drawing.Views;
+
+/// <summary>A layer of an element's set, in order: its material (id), name and thickness.</summary>
+public sealed record LayerRef(string? Material, string Name, double Thickness);
+
+/// <summary>A hatch to lay over a cut band: its loops, pattern, scale and pen, and the class it belongs to.</summary>
+/// <param name="Fill">The band's fill colour (its material's), which a solid pattern is drawn in (forum topic 88); null: none.</param>
+/// <param name="Look">The material's graphics, whose hatch colour, weight, line type, opacity and halftone it is drawn with (decision 678); null: the category's and Lapin's.</param>
+/// <param name="Background">The material's background hatch (decision 678), drawn under its hatch in <see cref="Look"/>'s background colour and weight.</param>
+/// <param name="Units">The units its pattern lies in over the pattern's own (a material's <c>hatchUnits</c>, decision 679); null: the pattern's.</param>
+public sealed record MaterialHatch(IReadOnlyList<Vec2[]> Loops, string Pattern, double Scale, int? Pen, string Class, double Angle = 0, Vec2? Origin = null, string? Fill = null,
+    ResolvedMaterial? Look = null, bool Background = false, Lapin.Drawing.Hatch.HatchUnits? Units = null)
+{
+    /// <summary>The frame of its element's axis in the drawing (a wall's in a plan), which a batt is laid along; null: the band's own.</summary>
+    public Lapin.Drawing.Hatch.BandAxis? Axis { get; init; }
+
+    /// <summary>
+    /// What its band joins by (<see cref="MaterialDrawing"/>'s key: its material, or its element's kind), its element, and
+    /// whether one element's bands join each other too: two hatches of one key, of two elements (or of one when it does),
+    /// go on into one another, so a batt goes round the corner they share (<see cref="Lapin.Drawing.Hatch.BattHatch"/>); null:
+    /// it joins nothing.
+    /// </summary>
+    public (string Key, string Element, bool Own)? Join { get; init; }
+
+    /// <summary>Whether this hatch's band goes on into <paramref name="other"/>'s (the drawing draws no line between them).</summary>
+    public bool Joins(MaterialHatch other) => Join is { } a && other.Join is { } b && a.Key == b.Key && (a.Own || a.Element != b.Element);
+
+    /// <summary>A hatch aligned to the band it fills: its origin at the start of the band's longest edge, its angle along that edge (plus the material's own).</summary>
+    public static MaterialHatch Aligned(IReadOnlyList<Vec2[]> loops, string pattern, double scale, int? pen, string cls, double angle, string align)
+    {
+        if (align != HatchAlign.Layer || loops.Count == 0 || loops[0].Length < 2) return new MaterialHatch(loops, pattern, scale, pen, cls, angle);
+        var outer = loops[0];
+        var best = 0; var bestLen = -1.0;
+        for (var i = 0; i < outer.Length; i++)
+        {
+            var len = (outer[(i + 1) % outer.Length] - outer[i]).Length;
+            if (len > bestLen) { bestLen = len; best = i; }
+        }
+        var d = outer[(best + 1) % outer.Length] - outer[best];
+        var along = Math.Atan2(d.Y, d.X) * 180 / Math.PI;
+        // The band's direction, not its sense: a hatch along a wall reads the same from either end.
+        if (along > 90 + 1e-9 || along <= -90 + 1e-9) along += along > 0 ? -180 : 180;
+        return new MaterialHatch(loops, pattern, scale, pen, cls, along + angle, outer[best]);
+    }
+}
+
+/// <summary>What the materials make of a cut (indices into the drawing's polygons and lines).</summary>
+public sealed class MaterialDrawingResult
+{
+    public List<MaterialHatch> Hatches { get; } = [];
+    /// <summary>Lines left out: a boundary inside one material.</summary>
+    public HashSet<int> DropLines { get; } = [];
+    /// <summary>Fill per polygon (null: none).</summary>
+    public Dictionary<int, string?> Fills { get; } = [];
+    /// <summary>Polygons not drawn at all (a membrane's own thin band).</summary>
+    public HashSet<int> HidePolygons { get; } = [];
+    /// <summary>Membrane lines (heavy, dashed).</summary>
+    public List<(Vec2 A, Vec2 B)> Membranes { get; } = [];
+    /// <summary>Per polygon, the sides (over its loops in order) it shares with another element's band of its material.</summary>
+    public Dictionary<int, HashSet<int>> Seams { get; } = [];
+    /// <summary>Per polygon drawn as a band (not a membrane), its material's graphics: its cut and layer lines (decision 678) are read from them.</summary>
+    public Dictionary<int, ResolvedMaterial> Graphics { get; } = [];
+}
+
+/// <summary>
+/// A cut drawn by its building materials (the old Lapin's, the ArchiCAD way):
+/// <list type="bullet">
+/// <item>each band takes its material's hatch, fill and hatch pen;</item>
+/// <item>where bands of the SAME material of two elements touch, the cut line
+/// between them goes and their shared sides are marked as seams, so the
+/// material reads as one; elements with no material join the same way with
+/// others of their kind (walls with walls, beams with members, slabs, columns,
+/// footings); a material whose joints are drawn, or that stays out of joins
+/// (forum topic 59), joins nothing;</item>
+/// <item>a membrane — a layer under 2 mm, or a material marked as one — is a
+/// heavy dashed line: along the middle of its own thin band, or on the
+/// interface between its neighbouring layers when it has no band.</item>
+/// </list>
+/// </summary>
+public static class MaterialDrawing
+{
+    const double Tol = 0.002;
+
+    public static double Len((Vec2 A, Vec2 B) s) => (s.B - s.A).Length;
+
+    /// <summary>How long <paramref name="q"/> runs along <paramref name="p"/> when both lie on one line (within the tolerance); negative when they do not.</summary>
+    static double Overlap((Vec2 A, Vec2 B) p, (Vec2 A, Vec2 B) q, double tol)
+    {
+        var lp = Len(p);
+        if (lp < tol || Len(q) < tol) return -1;
+        var u = (p.B - p.A) * (1 / lp);
+        double Off(Vec2 r) => Math.Abs((r.X - p.A.X) * u.Y - (r.Y - p.A.Y) * u.X);
+        if (Off(q.A) > tol || Off(q.B) > tol) return -1;
+        double T(Vec2 r) => Vec2.Dot(r - p.A, u);
+        var lo = Math.Max(0, Math.Min(T(q.A), T(q.B)));
+        var hi = Math.Min(lp, Math.Max(T(q.A), T(q.B)));
+        return hi - lo;
+    }
+
+    /// <summary>Whether two segments lie on one line and overlap over at least half of the shorter.</summary>
+    public static bool Coincide((Vec2 A, Vec2 B) p, (Vec2 A, Vec2 B) q, double tol = Tol) =>
+        Overlap(p, q, tol) is var o && o >= 0 && o >= 0.5 * Math.Min(Len(p), Len(q));
+
+    /// <summary>Whether a line lies on a side over at least half of the line's own length (a long line is not dropped for a short side on it).</summary>
+    static bool Covers((Vec2 A, Vec2 B) side, (Vec2 A, Vec2 B) line) =>
+        Math.Max(Overlap(line, side, Tol), Overlap(side, line, Tol)) is var o && o >= 0 && o >= 0.5 * Len(line);
+
+    static List<(Vec2 A, Vec2 B)> Edges(DPolygon p)
+    {
+        var o = new List<(Vec2, Vec2)>();
+        foreach (var loop in p.Loops) for (var i = 0; i < loop.Length; i++) o.Add((loop[i], loop[(i + 1) % loop.Length]));
+        return o;
+    }
+
+    /// <summary>
+    /// A coarse hash of segments: each in every cell it runs through (sampled
+    /// at half a cell), looked up through the cells of the query segment and
+    /// their neighbours, so a short side finds the long side it lies on
+    /// however far apart their middles are.
+    /// </summary>
+    sealed class SegIndex<T>(double size = 0.5)
+    {
+        readonly List<((Vec2 A, Vec2 B) Seg, T Item)> _items = [];
+        readonly Dictionary<(long, long), List<int>> _cells = [];
+        (long, long) Key(Vec2 p) => ((long)Math.Floor(p.X / size), (long)Math.Floor(p.Y / size));
+
+        /// <summary>The cells a segment runs through: its points every half cell, and its ends.</summary>
+        HashSet<(long, long)> Cells((Vec2 A, Vec2 B) seg)
+        {
+            var o = new HashSet<(long, long)>();
+            var n = (int)Math.Min(1e6, Math.Ceiling(Len(seg) / (size / 2)));
+            for (var i = 0; i <= n; i++) o.Add(Key(n == 0 ? seg.A : seg.A + (seg.B - seg.A) * ((double)i / n)));
+            return o;
+        }
+
+        public void Add((Vec2 A, Vec2 B) seg, T item)
+        {
+            _items.Add((seg, item));
+            foreach (var k in Cells(seg))
+            {
+                if (!_cells.TryGetValue(k, out var l)) _cells[k] = l = [];
+                l.Add(_items.Count - 1);
+            }
+        }
+
+        public IEnumerable<((Vec2 A, Vec2 B) Seg, T Item)> Near((Vec2 A, Vec2 B) seg)
+        {
+            var seen = new HashSet<int>();
+            foreach (var (cx, cy) in Cells(seg))
+                for (var dx = -1; dx <= 1; dx++)
+                    for (var dy = -1; dy <= 1; dy++)
+                        if (_cells.TryGetValue((cx + dx, cy + dy), out var l))
+                            foreach (var i in l)
+                                if (seen.Add(i)) yield return _items[i];
+        }
+    }
+
+    /// <summary>The middle line of a thin band: along its longest edge, halfway across.</summary>
+    static (Vec2, Vec2)? Midline(DPolygon p)
+    {
+        var pts = p.Loops[0];
+        if (pts.Length < 3) return null;
+        var best = Edges(p).MaxBy(Len);
+        var l = Len(best);
+        if (l < 1e-12) return null;
+        var u = (best.B - best.A) * (1 / l);
+        double t0 = double.PositiveInfinity, t1 = double.NegativeInfinity, n0 = double.PositiveInfinity, n1 = double.NegativeInfinity;
+        foreach (var q in pts)
+        {
+            var t = Vec2.Dot(q - best.A, u);
+            var n = -(q.X - best.A.X) * u.Y + (q.Y - best.A.Y) * u.X;
+            t0 = Math.Min(t0, t); t1 = Math.Max(t1, t); n0 = Math.Min(n0, n); n1 = Math.Max(n1, n);
+        }
+        var nm = (n0 + n1) / 2;
+        Vec2 At(double t) => new(best.A.X + u.X * t - u.Y * nm, best.A.Y + u.Y * t + u.X * nm);
+        return (At(t0), At(t1));
+    }
+
+    /// <summary>The kinds whose bands join one another when they have no material.</summary>
+    static string? KindOf(string cls) => cls.ToUpperInvariant() switch
+    {
+        "IFCWALL" or "IFCWALLSTANDARDCASE" or "IFCWALLELEMENTEDCASE" => "wall",
+        "IFCBEAM" or "IFCMEMBER" or "IFCBEAMSTANDARDCASE" or "IFCMEMBERSTANDARDCASE" => "linear",
+        "IFCSLAB" or "IFCSLABSTANDARDCASE" => "slab",
+        "IFCCOLUMN" or "IFCCOLUMNSTANDARDCASE" => "column",
+        "IFCFOOTING" => "footing",
+        _ => null,
+    };
+
+    /// <summary>
+    /// What a surface joins by where it goes on in one plane (the seams of an
+    /// elevation, of the 3D view): its material's name, else its element's kind
+    /// or class; null joins nothing (a membrane, a material whose joints are drawn).
+    /// </summary>
+    public static string? SeamKey(ResolvedMaterial? g, string ifcClass) =>
+        g != null ? (g.Membrane || g.DrawJoints || !g.Joins ? null : MaterialGraphics.Normalise(g.Name)) : " kind:" + (KindOf(ifcClass) ?? ifcClass.ToUpperInvariant());
+
+    /// <summary>What a band joins by: its material's name, else its kind; null joins nothing (a membrane, a material whose joints are drawn).</summary>
+    static string? JoinKey(DPolygon p, ResolvedMaterial? g)
+    {
+        // A material that stays out of joins (forum topic 59) keeps each element's own outline, as one whose joints are drawn.
+        // A view's small-scale cut (decision 680) joins its bands by what it makes of them (one solid colour, one outline).
+        if (g != null) return g.Membrane || g.DrawJoints || !g.Joins ? null : g.JoinAs ?? MaterialGraphics.Normalise(g.Name);
+        // A leading space: no trimmed material name can be the same key.
+        return KindOf(p.Class) is { } k ? " kind:" + k : null;
+    }
+
+    /// <param name="graphics">A polygon's material graphics, or null when it has none.</param>
+    /// <param name="layers">An element's layers in order, when it has a layer set.</param>
+    /// <param name="membrane">Whether a layer draws as a membrane.</param>
+    /// <param name="joins">Whether one material goes on from one element into another without a line (a view style may turn it off).</param>
+    /// <param name="mergeOwn">Whether one element's bands of one material join each other too (a coarse view: a layered wall one area, decision 401).</param>
+    /// <param name="elementHatch">An element's own hatch alignment (its <c>hatchAlign</c>, decision 369), over its materials'; null: theirs.</param>
+    /// <param name="elementAxis">An element's axis in the drawing (a wall's in a plan): the angle and origin a hatch aligned with
+    /// the element takes (<see cref="HatchAlign.Element"/>, decision 725), and the frame its batts are laid along; null: none.</param>
+    public static MaterialDrawingResult Apply(ViewDrawing d, Func<DPolygon, ResolvedMaterial?> graphics, Func<string, IReadOnlyList<LayerRef>?>? layers = null, Func<LayerRef, bool>? membrane = null, bool joins = true,
+        Func<string, ElementHatch?>? elementHatch = null, bool mergeOwn = false, Func<string, ElementHatch?>? elementAxis = null)
+    {
+        // Without joins each element's bands join only its own: the key carries the element.
+        string? Key(DPolygon p, ResolvedMaterial? g) => JoinKey(p, g) is { } k ? (joins ? k : k + "\u0000" + p.Element) : null;
+        var o = new MaterialDrawingResult();
+        var named = d.Cuts.Select((p, i) => (P: p, I: i, G: graphics(p))).ToList();
+        // A band's layer in its element's set: by its part's key (layer:<index>), else the first layer of its material.
+        int LayerIndex(DPolygon p, IReadOnlyList<LayerRef> ls)
+        {
+            if (p.Key is { } k && k.StartsWith("layer:", StringComparison.Ordinal) && int.TryParse(k[6..], System.Globalization.CultureInfo.InvariantCulture, out var n) && n >= 0 && n < ls.Count && ls[n].Material == p.Material) return n;
+            for (var j = 0; j < ls.Count; j++) if (p.Material != null && ls[j].Material == p.Material) return j;
+            return -1;
+        }
+        // The bands of layers that draw as membranes (a material marked as one, or a layer thinner than a membrane).
+        var membraneBands = new HashSet<int>();
+        foreach (var (p, i, g) in named)
+            if (g?.Membrane == true || layers != null && membrane != null && layers(p.Element) is { } ls && LayerIndex(p, ls) is var k && k >= 0 && membrane(ls[k]))
+                membraneBands.Add(i);
+
+        // Bands: hatch and fill, or (a membrane's own band) a line along its middle.
+        foreach (var (p, i, g) in named)
+        {
+            if (membraneBands.Contains(i))
+            {
+                o.HidePolygons.Add(i);
+                if (Midline(p) is { } m) o.Membranes.Add(m);
+                continue;
+            }
+            if (g == null) continue;
+            o.Graphics[i] = g;
+            // The fill at its opacity (decision 678); a material that gives none is its fill as before.
+            o.Fills[i] = MaterialGraphics.FillInk(g);
+            var axis = elementAxis?.Invoke(p.Element);
+            var join = Key(p, g) is { } jk ? (jk, p.Element, mergeOwn) : ((string, string, bool)?)null;
+            // The element's own alignment over its material's; a material aligned with the element takes its axis (one angle
+            // and origin for all its bands, so courses run on from one layer to the next), an element with none the view's.
+            var mine = elementHatch?.Invoke(p.Element) ?? (g.HatchAlign == HatchAlign.Element ? axis : null);
+            // A material's background hatch (decision 678) under its own, laid as it is: from the element's alignment or the band's.
+            if (g.Background is { Hatch: { } bh } bg)
+            {
+                var bgScale = bg.HatchScale ?? g.HatchScale;
+                var bgAngle = bg.HatchAngle ?? 0;
+                o.Hatches.Add((mine is { } bo
+                    ? new MaterialHatch(p.Loops, bh, bgScale, null, p.Class, (bo.Angle ?? 0) + bgAngle, bo.Origin)
+                    : MaterialHatch.Aligned(p.Loops, bh, bgScale, null, p.Class, bgAngle, g.HatchAlign)) with { Fill = g.Fill, Look = g, Background = true, Axis = axis?.Axis, Join = join });
+            }
+            if (g.Hatch == null) continue;
+            var look = g.Flex ? g : null;
+            if (mine is { } own)
+                o.Hatches.Add(new MaterialHatch(p.Loops, g.Hatch, g.HatchScale, g.HatchPen, p.Class, (own.Angle ?? 0) + g.HatchAngle, own.Origin, g.Fill, look, Units: g.HatchUnits) { Axis = axis?.Axis, Join = join });
+            else o.Hatches.Add(MaterialHatch.Aligned(p.Loops, g.Hatch, g.HatchScale, g.HatchPen, p.Class, g.HatchAngle, g.HatchAlign) with { Fill = g.Fill, Look = look, Units = g.HatchUnits, Axis = axis?.Axis, Join = join });
+        }
+
+        // Edges of every band, by join key.
+        var index = new SegIndex<(int Poly, string Key, int Side)>();
+        foreach (var (p, i, g) in named)
+            if (!membraneBands.Contains(i) && Key(p, g) is { } key)
+            {
+                var es = Edges(p);
+                for (var s = 0; s < es.Count; s++) index.Add(es[s], (i, key, s));
+            }
+
+        // Sides two elements' bands of one material share: their outlines leave them out.
+        var seamSegs = new SegIndex<bool>();
+        foreach (var (p, i, g) in named)
+        {
+            if (membraneBands.Contains(i) || Key(p, g) is not { } key) continue;
+            var es = Edges(p);
+            for (var s = 0; s < es.Count; s++)
+                foreach (var c in index.Near(es[s]))
+                {
+                    if (c.Item.Key != key || c.Item.Poly == i || (!mergeOwn && d.Cuts[c.Item.Poly].Element == p.Element)) continue;
+                    if (Coincide(es[s], c.Seg) || Coincide(c.Seg, es[s]))
+                    {
+                        if (!o.Seams.TryGetValue(i, out var set)) o.Seams[i] = set = [];
+                        set.Add(s);
+                        // The seam is where the two meet: the shorter of the two sides.
+                        seamSegs.Add(Len(es[s]) <= Len(c.Seg) ? es[s] : c.Seg, true);
+                    }
+                }
+        }
+        // Any other line on a seam goes too: the edge between the two solids seen from above.
+        for (var li = 0; li < d.Lines.Count; li++)
+        {
+            var seg = (d.Lines[li].A, d.Lines[li].B);
+            if (seamSegs.Near(seg).Any(c => Covers(c.Seg, seg))) o.DropLines.Add(li);
+        }
+        var cutLines = Enumerable.Range(0, d.Lines.Count).Where(li => d.Lines[li].Role == LineRole.Cut).ToList();
+        foreach (var li in cutLines)
+        {
+            var seg = (d.Lines[li].A, d.Lines[li].B);
+            // Two elements' bands of one material meet along this line: it is inside the material.
+            var byKey = index.Near(seg).Where(c => Covers(c.Seg, seg))
+                .GroupBy(c => c.Item.Key).Select(g => mergeOwn ? g.Select(c => c.Item.Poly).Distinct().Count() : g.Select(c => d.Cuts[c.Item.Poly].Element).Distinct().Count());
+            if (byKey.Any(n => n > 1)) o.DropLines.Add(li);
+        }
+
+        // Thin layers without a band: on the interface between the layers either side of them.
+        if (layers != null && membrane != null)
+            foreach (var group in named.GroupBy(n => n.P.Element))
+            {
+                if (layers(group.Key) is not { } ls) continue;
+                for (var k = 0; k < ls.Count; k++)
+                {
+                    var layer = ls[k];
+                    // A membrane with a band of its own is drawn along its middle already.
+                    if (!membrane(layer) || group.Any(x => membraneBands.Contains(x.I) && LayerIndex(x.P, ls) == k)) continue;
+                    var before = ls.Take(k).Reverse().FirstOrDefault(l => !membrane(l));
+                    var after = ls.Skip(k + 1).FirstOrDefault(l => !membrane(l));
+                    if (before == null || after == null) continue;
+                    List<(Vec2 A, Vec2 B)> Side(LayerRef l) => group.Where(x => x.P.Material == l.Material).SelectMany(x => Edges(x.P)).ToList();
+                    var (a, b) = (Side(before), Side(after));
+                    foreach (var e in a)
+                    {
+                        if (!b.Any(f => Coincide(e, f) || Coincide(f, e))) continue;
+                        o.Membranes.Add(e);
+                        foreach (var li in cutLines)
+                            if (d.Lines[li].Element == group.Key && (Coincide(e, (d.Lines[li].A, d.Lines[li].B)) || Coincide((d.Lines[li].A, d.Lines[li].B), e))) o.DropLines.Add(li);
+                    }
+                }
+            }
+        return o;
+    }
+}

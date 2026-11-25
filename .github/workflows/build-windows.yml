@@ -15,6 +15,9 @@ on:
       ref:
         description: Commit, tag or branch to build (the branch run from if empty)
         required: false
+      release:
+        description: Publish as this release, e.g. v0.1.0 (its notes from .github/release-notes/<release>.md); empty, no release
+        required: false
   push:
     tags: ['v*']
 
@@ -61,9 +64,13 @@ jobs:
             build/${{ env.PRODUCT }}/bundle/nsis/*-portable.zip
           if-no-files-found: error
       - name: Attach to the release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.release || github.ref_name }}
+          name: ${{ format('OneBIM {0}', inputs.release || github.ref_name) }}
+          target_commitish: ${{ github.sha }}
+          body_path: ${{ hashFiles(format('.github/release-notes/{0}.md', inputs.release || github.ref_name)) != '' && format('.github/release-notes/{0}.md', inputs.release || github.ref_name) || '' }}
           files: |
             build/${{ env.PRODUCT }}/bundle/nsis/*-setup.exe
             build/${{ env.PRODUCT }}/bundle/nsis/*-portable.zip

@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { HelpCircle, X } from 'lucide-react';
 import { notify } from '../app/store';
 import { useSession } from '../engine/session';
-import { RECENT, openForumTopic, openLink, reportParams, sendReport } from './support';
+import { OWN_REPO, RECENT, openForumTopic, openHttps, openIssue, openLink, ownEdition, reportParams, sendReport } from './support';
 import { contactFor, useReplies } from './replies';
 import { MessagesDialog } from './MessagesDialog';
 import { useDialogFocus, useEscapeClose } from './dialogFocus';
@@ -118,6 +118,12 @@ export function HelpMenu() {
   const unread = useReplies((s) => s.unread);
   const info = useSession((s) => s.info);
   const lang = useLang((s) => s.lang);
+  // An edition under another brand reports on its own GitHub repository, and links to none of Lapin's server, forum or community.
+  const own = ownEdition(brand.short);
+  const startReport = (r: ReportStart | true) => {
+    if (!own) { setReport(r); return; }
+    if (r === true) openIssue(); else openIssue(r.title, r.description);
+  };
   // F1: Ask Lapin, from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'F1') { e.preventDefault(); setAsking(true); } };
@@ -135,17 +141,19 @@ export function HelpMenu() {
     <>
     <button type="button" className="ask-me" title="Ask Lapin how to do something (F1)" onClick={() => setAsking(true)}><BunnyIcon size={17} /><span data-no-i18n>Ask Me</span></button>
     <div className="help-menu" ref={ref}>
-       <button type="button" className="icon" title="Help: ask Lapin (F1), report an issue, community" onClick={() => setOpen(!open)}><HelpCircle size={15} />{hasKey && unread > 0 && <span className="badge" data-no-i18n>{unread}</span>}</button>
+       <button type="button" className="icon" title="Help: ask Lapin (F1), report an issue, community" onClick={() => setOpen(!open)}><HelpCircle size={15} />{!own && hasKey && unread > 0 && <span className="badge" data-no-i18n>{unread}</span>}</button>
       {open && (
         <div className="menu-pop" role="menu">
           <button type="button" role="menuitem" onClick={() => { setOpen(false); setAsking(true); }}>Ask Lapin…<kbd>F1</kbd></button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('guide'); }}>User guide</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); setReport(true); }}>Report an issue…</button>
-          {hasKey && <button type="button" role="menuitem" onClick={() => { setOpen(false); setMessages(true); }}><span>Messages…</span>{unread > 0 && <span className="badge" data-no-i18n>{unread}</span>}</button>}
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('forum'); }}>Forum</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); openForumTopic(); }}>Ask on the forum…</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('community'); }}>Community (Skool)</button>
-          <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('site'); }}>lapinbim.com</button>
+          <button type="button" role="menuitem" onClick={() => { setOpen(false); startReport(true); }}>Report an issue…</button>
+          {!own && hasKey && <button type="button" role="menuitem" onClick={() => { setOpen(false); setMessages(true); }}><span>Messages…</span>{unread > 0 && <span className="badge" data-no-i18n>{unread}</span>}</button>}
+          {!own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('forum'); }}>Forum</button>}
+          {!own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openForumTopic(); }}>Ask on the forum…</button>}
+          {!own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('community'); }}>Community (Skool)</button>}
+          {!own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('site'); }}>lapinbim.com</button>}
+          {own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openHttps(OWN_REPO); }} data-no-i18n>GitHub: aiarchitectlab/onebim</button>}
+          {own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openHttps('https://aiarchlab.com'); }} data-no-i18n>aiarchlab.com</button>}
           {isDesktop() && <button type="button" role="menuitem" onClick={() => { setOpen(false); void checkForUpdates(true); }}>Check for updates…</button>}
           <div className="menu-langs" role="group" aria-label="Language" data-no-i18n>
             {LANGUAGES.map((l) => (
@@ -158,7 +166,7 @@ export function HelpMenu() {
         </div>
       )}
       {asking && <AskDialog onClose={() => setAsking(false)}
-        onReport={(q) => { setAsking(false); setReport(q ? { kind: 'question', title: q.length > 80 ? `${q.slice(0, 77)}…` : q, description: q } : true); }} />}
+        onReport={(q) => { setAsking(false); startReport(q ? { kind: 'question', title: q.length > 80 ? `${q.slice(0, 77)}…` : q, description: q } : true); }} />}
       {messages && <MessagesDialog onClose={() => setMessages(false)} />}
       {about && <AboutDialog version={info?.engineVersion} overrides={info?.overrides} onClose={() => setAbout(false)} />}
       {report && <ReportDialog onClose={() => setReport(false)} start={report === true ? undefined : report} />}

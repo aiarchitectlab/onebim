@@ -130,3 +130,36 @@ export async function sendReport(params: Record<string, unknown>, post: typeof f
   if (!res.ok) throw new Error(answer.error ?? `The report could not be sent (${res.status}).`);
   return Number(answer.number ?? 0);
 }
+
+/**
+ * An edition under another brand (OneBIM by AI ARCH LAB) does not reach Ciuntuc BIM Studio's server, forum or community:
+ * its issues are opened on its own GitHub repository, the sender posting them there (or not).
+ */
+export const OWN_REPO = 'https://github.com/aiarchitectlab/onebim';
+export const ownEdition = (short: string): boolean => short !== 'Lapin';
+
+/** A new GitHub issue with its title and text filled in, the text cut so the address stays short enough to open. */
+export function issueUrl(title: string, body: string, repo = OWN_REPO): string {
+  const t = title.trim().slice(0, 200);
+  const b = body.trim().slice(0, 4000);
+  const q: string[] = [];
+  if (t) q.push(`title=${encodeURIComponent(t)}`);
+  if (b) q.push(`body=${encodeURIComponent(b)}`);
+  return `${repo}/issues/new${q.length ? `?${q.join('&')}` : ''}`;
+}
+
+/** The issue's text: the question or problem, then the version, where it runs and the app's last errors (nothing of the project). */
+export function issueBody(text: string, version: string | undefined, where: 'desktop' | 'web', errors: readonly string[]): string {
+  const errs = errors.length ? `\n\n<details><summary>ข้อผิดพลาดล่าสุด / Recent errors</summary>\n\n\`\`\`\n${errors.slice(-10).join('\n')}\n\`\`\`\n</details>` : '';
+  return `${text.trim()}\n\n---\nOneBIM ${version ?? ''} · ${where}${errs}`.trim();
+}
+
+/** Open an https address in the system's browser (desktop: through the engine's https-only link) or a new tab. */
+export const openHttps = (url: string) => {
+  if (engineInBrowser) { window.open(url, '_blank', 'noopener'); return; }
+  void engine.call('support.open', { link: 'extensionPage', url }).catch(() => notify('The link could not be opened.'));
+};
+
+/** Report an issue on the edition's GitHub repository, with what is known filled in. */
+export const openIssue = (title = '', text = '') =>
+  openHttps(issueUrl(title, issueBody(text, useSession.getState().info?.engineVersion, engineInBrowser ? 'web' : 'desktop', RECENT)));

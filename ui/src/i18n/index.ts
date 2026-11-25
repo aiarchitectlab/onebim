@@ -16,7 +16,7 @@
  */
 
 import { create } from 'zustand';
-import { rebrand } from '../platform/brand';
+import { brand, rebrand } from '../platform/brand';
 
 /** A language's phrases: the exact ones, and those with a number or a name in them. */
 export interface Language {
@@ -73,8 +73,11 @@ export const LANGUAGES: { id: Lang; name: string }[] = [
 
 const isLang = (x: unknown): x is Lang => LANGUAGES.some((l) => l.id === x);
 
+/** The language a first start opens in: Thai for OneBIM (an edition under another brand), English for Lapin's own. */
+const firstLang = (): Lang => (brand.short === 'Lapin' ? 'en' : 'th');
+
 function stored(): Lang {
-  try { const v = localStorage.getItem('lapin.lang'); return isLang(v) ? v : 'th'; } catch { return 'th'; }
+  try { const v = localStorage.getItem('lapin.lang'); return isLang(v) ? v : firstLang(); } catch { return firstLang(); }
 }
 
 export const useLang = create<{ lang: Lang }>(() => ({ lang: stored() }));

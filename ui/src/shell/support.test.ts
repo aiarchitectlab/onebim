@@ -56,8 +56,8 @@ describe('the user guide', () => {
   it('opens in each interface language: /docs/ for English, /docs/<lang>/ for the others, by the names the engine knows', async () => {
     const { guideUrl, guideLink } = await import('./support');
     const { LANGUAGES } = await import('../i18n');
-    expect(LANGUAGES.map((l) => guideUrl(l.id))).toEqual(['', 'ro/', 'es/', 'de/', 'fr/', 'da/', 'it/', 'pl/', 'pt/', '', ''].map((s) => `https://lapinbim.com/docs/${s}`));
-    expect(LANGUAGES.map((l) => guideLink(l.id))).toEqual(['guide', 'guideRo', 'guideEs', 'guideDe', 'guideFr', 'guideDa', 'guideIt', 'guidePl', 'guidePt', 'guide', 'guide']);
+    expect(LANGUAGES.map((l) => guideUrl(l.id))).toEqual(['', '', 'ro/', 'es/', 'de/', 'fr/', 'da/', 'it/', 'pl/', 'pt/', '', ''].map((s) => `https://lapinbim.com/docs/${s}`));
+    expect(LANGUAGES.map((l) => guideLink(l.id))).toEqual(['guide', 'guide', 'guideRo', 'guideEs', 'guideDe', 'guideFr', 'guideDa', 'guideIt', 'guidePl', 'guidePt', 'guide', 'guide']);
   });
 });
 
@@ -72,5 +72,25 @@ describe('a new topic on the forum', () => {
     const long = forumQuestion('x'.repeat(250), '0.1.500', 'web');
     expect(long.title).toHaveLength(198);
     expect(long.body).toBe(`${'x'.repeat(250)}\n\n\n---\nLapin 0.1.500 · web`);
+  });
+});
+
+describe('OneBIM issues on GitHub', () => {
+  it('opens a new issue on aiarchitectlab/onebim with the title and text escaped', async () => {
+    const { issueUrl } = await import('./support');
+    expect(issueUrl('ผนังหาย', 'a & b')).toBe('https://github.com/aiarchitectlab/onebim/issues/new?title=%E0%B8%9C%E0%B8%99%E0%B8%B1%E0%B8%87%E0%B8%AB%E0%B8%B2%E0%B8%A2&body=a%20%26%20b');
+    expect(issueUrl('', '')).toBe('https://github.com/aiarchitectlab/onebim/issues/new');
+  });
+  it('carries the version and at most ten recent errors, nothing of the project', async () => {
+    const { issueBody } = await import('./support');
+    const b = issueBody('Problem', '1.2.3', 'desktop', Array.from({ length: 15 }, (_, i) => `e${i}`));
+    expect(b).toContain('OneBIM 1.2.3 · desktop');
+    expect(b).toContain('e14');
+    expect(b).not.toContain('e4\n');
+  });
+  it('is only for editions under another brand', async () => {
+    const { ownEdition } = await import('./support');
+    expect(ownEdition('Lapin')).toBe(false);
+    expect(ownEdition('OneBIM')).toBe(true);
   });
 });

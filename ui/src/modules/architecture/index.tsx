@@ -26,11 +26,13 @@ import { drawsFlipped, setJoinStyle, setRememberLine, setWallLine, setWallLineOf
 import { LengthField } from '../../shell/cells';
 import { axisFromReference, referenceArc } from '../../viewport/wallReference';
 import { WallLayers } from './WallLayers';
+import { asStructural } from './structuralTools';
 import { mirrorLine, wallGhost } from './wallLine';
 import { newWallSection } from './newWallSection';
 import { WallDims } from './WallTempDims';
 import { DimRefChoice } from '../../viewport/LineTempDims';
 import { WallTopOption, wallTopArgs } from './WallTop';
+import { WallSlantOption, wallSlantArgs } from './WallLeanFields';
 import { JoinerySection } from './JoinerySection';
 import { SlabSection } from './SlabSection';
 import { FloorSlopesSection } from './FloorSlopesSection';
@@ -126,15 +128,15 @@ const wall: ToolDef = chainTool({
   line: async (a, b, ctx) => {
     const typeId = useUi.getState().wallTypeId;
     const prefs = useWallPrefs.getState();
-    await ctx.execute('architecture.addWall', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, joinStyle: prefs.joinStyle, ...wallLineArgs(prefs), ...(typeId ? { typeId } : {}), ...wallTopArgs() });
+    await ctx.execute('architecture.addWall', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, joinStyle: prefs.joinStyle, ...wallLineArgs(prefs), ...(typeId ? { typeId } : {}), ...wallTopArgs(), ...wallSlantArgs() });
   },
   // An arc is drawn on the chosen line too (GitHub #63): its axis concentric with it.
   arc: async (a, b, p, ctx) => {
     const typeId = useUi.getState().wallTypeId;
     const prefs = useWallPrefs.getState();
-    await ctx.execute('architecture.addWall', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, x3: p.x, y3: p.y, joinStyle: prefs.joinStyle, ...wallLineArgs(prefs), ...(typeId ? { typeId } : {}), ...wallTopArgs() });
+    await ctx.execute('architecture.addWall', { storeyId: ctx.storeyId, x1: a.x, y1: a.y, x2: b.x, y2: b.y, x3: p.x, y3: p.y, joinStyle: prefs.joinStyle, ...wallLineArgs(prefs), ...(typeId ? { typeId } : {}), ...wallTopArgs(), ...wallSlantArgs() });
   },
-  more: () => <><WallLineOption /><WallTopOption /><DimRefChoice /></>,
+  more: () => <><WallLineOption /><WallTopOption /><WallSlantOption /><DimRefChoice /></>,
   // The wall's body beside the line drawn, on the side it will be built (decision 692).
   body: (path) => { const { bands, left } = newWallSection(); return wallGhost(path, bands, left); },
   // Space: the line on the other side (Revit's Spacebar), before the first click or between clicks.
@@ -761,7 +763,7 @@ const architecture: LapinModule = {
   // The edges of the wall or floor edited in "Edit layers", kept in step with the model (forum topic 89).
   background: LayerEditWatcher,
   tabs: [{
-    id: 'architecture', label: 'Architecture', order: 20, include: ['modify', 'joins'],
+    id: 'architecture', label: 'Architecture', order: 20, include: ['modify', 'groups', 'joins'],
     groups: [
       { label: 'Build', tools: [wall, opening, slab, roof], small: [wallFromSolids, curtainWall, roofConfigurator, downpipe, railing] },
       { label: 'Types', tools: [wallTypes, slabTypes, joineryTypes], small: [curtainTypes, sunshadeTypes, windowSillSchedule] },
@@ -780,7 +782,7 @@ const architecture: LapinModule = {
   }, {
     // Finishes, after Architecture: what lines a room (its floor, walls and ceiling by a finish of its own, false ceilings, skirtings). Other modules add their groups by this id.
     // Interior (decision 367): finishes and furniture on one tab; the furniture's "Table" is a piece of furniture there.
-    id: 'interior', label: 'Interior', order: 25, include: ['modify'], i18nCtx: 'furniture',
+    id: 'interior', label: 'Interior', order: 25, include: ['modify', 'groups'], i18nCtx: 'furniture',
     groups: [
       { label: 'Room', tools: [finishRoom], small: [roomFinishes, roomFinishSchedule] },
       // The finish painter (forum topic 83): faces of walls, floors and columns painted, inside and out.
@@ -801,6 +803,8 @@ const architecture: LapinModule = {
     id: 'annotate', label: 'Annotate', order: 60,
     groups: [{ label: 'Rooms', tools: [colorLegend] }],
   }],
+  // The Structure tab's Wall and Floor (docs/plan-structural-usage.md): the same tools, what they draw marked Structural.
+  sharedGroups: { structuralBuild: { label: 'Walls and floors', tools: [asStructural(wall, 'structure.wall', 'Structural wall'), asStructural(slab, 'structure.floor', 'Structural floor')] } },
   legacyTools: [curvedWall, roomDividerArc, mitre, butt, swap, trimTool, extendTool, ...openingAliases, editStairSketchTool],
   hotbar: [wall, door, window_, slab, roof],
   propertySections: [

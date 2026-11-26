@@ -13,8 +13,8 @@ vi.stubGlobal('localStorage', {
   removeItem: (k: string) => void stored.delete(k),
 });
 
-const { choiceKey, forgetFromLibrary, keepInLibrary, library, linesHolding, money, parseRate, qty, remember, remembered, startingChoice, unpricedCount, FORMS } = await import('./estimate');
-const { fieldOf, setColumn } = await import('./PriceListsDialog');
+const { articleArg, choiceKey, durationText, forgetFromLibrary, keepInLibrary, library, linesHolding, money, parseRate, qty, remember, remembered, startingChoice, unpricedCount, FORMS, TIMES } = await import('./estimate');
+const { FIELD_LABELS, fieldOf, setColumn, templateArg } = await import('./PriceListsDialog');
 import type { EstimateDto, LineDto } from './estimate';
 
 const line = (key: string, elements: string[]): LineDto => ({
@@ -68,6 +68,12 @@ describe('the estimate as shown', () => {
 });
 
 describe('the price list import', () => {
+  it('names every column the engine reads, the sources too, and adds a template by its id (Lapin\'s own as true)', () => {
+    for (const f of ['code', 'name', 'unit', 'material', 'price', 'source', 'url', 'checked']) expect(FIELD_LABELS[f], f).toBeTruthy();
+    expect(templateArg({ id: 'lapin' })).toBe(true);
+    expect(templateArg({ id: 'bilka-dedeman-2026-11-24' })).toBe('bilka-dedeman-2026-11-24');
+  });
+
   it('gives each column one meaning, a meaning moved from the column that had it', () => {
     const map = { code: 0, name: 1, unit: null, material: 3, price: null };
     const a = setColumn(map, 2, 'unit');
@@ -113,6 +119,29 @@ describe('Map articles', () => {
     remember({ [choiceKey('type', 'Brick', 'IfcWall')]: { code: 'ZID01', part: 'core' } });
     expect(remembered()[choiceKey('material', 'TENCUIALA VAR')]).toEqual({ code: 'TEN01' });
     expect(Object.keys(remembered())).toHaveLength(2);
+  });
+  it('offers "× duration" beside the measure: by the price\'s unit first, none, then months, working days, calendar days and working hours (R7)', () => {
+    expect(TIMES.map((t) => t.id)).toEqual(['auto', 'none', 'months', 'workingDays', 'days', 'hours']);
+    expect(TIMES[0].label).toBe("By the price's unit");
+  });
+
+  it('sends an article\'s time only when one is chosen, so an article written before stays as it was', () => {
+    expect(articleArg({ code: ' GARD ', part: null, basis: 'length', time: 'auto' })).toEqual({ code: 'GARD', part: null, basis: 'length' });
+    expect(articleArg({ code: 'GARD', basis: 'length' })).toEqual({ code: 'GARD', part: null, basis: 'length' });
+    expect(articleArg({ code: 'SEMN', part: 'core', basis: 'count', time: 'workingDays' })).toEqual({ code: 'SEMN', part: 'core', basis: 'count', time: 'workingDays' });
+    expect(articleArg({ code: 'X', time: 'none' })).toEqual({ code: 'X', part: null, basis: 'auto', time: 'none' });
+  });
+
+  it('remembers the time chosen with the rest of the article', () => {
+    remember({ [choiceKey('type', 'Site fence', 'IfcWall')]: { code: 'GARD', basis: 'auto', time: 'months' } });
+    const past = remembered()[choiceKey('type', 'Site fence', 'IfcWall')];
+    expect(startingChoice(null, past, null, () => true).choice?.time).toBe('months');
+  });
+
+  it('shows the duration a line\'s quantity was multiplied by, nothing when it was not', () => {
+    expect(durationText({ time: 'months', duration: '3 months' })).toBe('× 3 months');
+    expect(durationText({ time: 'months', duration: null })).toBe('');
+    expect(durationText({})).toBe('');
   });
 });
 

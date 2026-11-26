@@ -32,6 +32,14 @@ describe('keyIntent', () => {
     expect(keyIntent(press('ArrowUp'), state())).toBeNull();
   });
 
+  it('goes back to the open project on Escape from the start screen, and only then', () => {
+    expect(keyIntent(press('Escape'), state({ screen: 'start', project: true }))).toEqual({ kind: 'backToProject' });
+    expect(keyIntent(press('Escape'), state({ screen: 'start' }))).toBeNull();
+    expect(keyIntent(press('Escape', { inField: true }), state({ screen: 'start', project: true }))).toBeNull();
+    expect(keyIntent(press('Escape'), state({ screen: 'start', project: true, dialog: 'join' }))).toBeNull();
+    expect(keyIntent(press('Escape'), state({ project: true }))).toBeNull();
+  });
+
   it('gives the keys to an open dialog: Escape closes it, saving still works, nothing reaches the model', () => {
     const open = state({ dialog: 'materials', selected: ['w1'] });
     expect(keyIntent(press('Escape'), open)).toEqual({ kind: 'closeDialog' });
@@ -227,6 +235,17 @@ describe('a value a 3D tool waits for (decision 378)', () => {
     const after: KeyIntent[] = [];
     keydown('6', after);
     expect(after).toEqual([{ kind: 'command', id: 'hotbar.6' }]);
+  });
+
+  it('types = into the live length only while an end grip is kept on its line (decision 865); Tab, < and Alt unchanged', () => {
+    const locked = (text = '') => state({ live: { active: true, text, typed: !!text, lock: true }, hotbar: 9 });
+    expect(keyIntent(press('='), locked())).toEqual({ kind: 'liveType', key: '=' });
+    expect(keyIntent(press('='), locked('3'))).not.toEqual({ kind: 'liveType', key: '=' });
+    expect(keyIntent(press('='), state({ live: { active: true, text: '', typed: false }, hotbar: 9 }))).not.toEqual({ kind: 'liveType', key: '=' });
+    expect(keyIntent(press('-'), locked())).toEqual({ kind: 'command', id: 'app.zoomOut' });
+    expect(keyIntent(press('Tab'), locked())).toEqual({ kind: 'liveFocus' });
+    expect(keyIntent(press('<'), locked('2400'))).toEqual({ kind: 'liveFocus', field: 'ang' });
+    expect(keyIntent(press('Alt'), locked())).not.toEqual({ kind: 'liveType', key: 'Alt' });
   });
 
   it('knows a value\'s keys', () => {

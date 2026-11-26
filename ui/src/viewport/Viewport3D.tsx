@@ -45,6 +45,7 @@ import { LightRig, useLightBudget, whiteBalanceGains, type LightProfileDto, type
 import { onVoxels, placeProbes, probeBudget, weakGpu, type Vec3 as ProbeVec3 } from './probes';
 import { glossySamples, ReflectionProbes, roomOfObject } from './probes3d';
 import { KeyPlan } from './KeyPlan';
+import { ViewCube3D } from './ViewCube3D';
 import { poseOf, positionOf, useCamera, type CameraApi, type CameraPose } from './camera';
 import { Grips3D } from './Grips3D';
 import { AxisDrag3D } from './AxisDrag3D';
@@ -71,7 +72,7 @@ import { planePoint, refPlanesGroup, refPlanesKey, refPlanesOf } from './refPlan
 import { REBAR_GROUP, useRebar3d } from './rebar3d';
 import { useVoids3d, VOIDS_GROUP } from './voids3d';
 import { boxPlanes, modelBounds, planesKey, toggleSectionBoxHidden, useSectionBox, type SectionBox } from './sectionBox';
-import { alignSectionBox, commitBox, cutAtPlan, fitSectionBox } from './sectionBoxTools';
+import { alignSectionBox, commitBox, cutAtPlan, fitSectionBox, toggleSectionBox } from './sectionBoxTools';
 import { useDrawing, type DrawingDto } from './drawing';
 import { CUT_LAYERS, cssColor, dashSegments, drawingPoint, penPixels, evenOddShapes, onCut, sectionPieces, sectionPlanes, sectionPose, textFont, textQuad, useClip3d, useSection3d, type ClipPlane, type DrawingText, type ViewFrameDto } from './section3d';
 import { clampPitch, easeEye, exitWalk, lookVector, toggleFly, useWalk, walkStep, walkWish, EYE_HEIGHT, WALK_KEYS, type WalkStart } from './walk';
@@ -1831,6 +1832,43 @@ export function Viewport3D() {
     renderer.domElement.addEventListener('pointerdown', onRightDown);
     renderer.domElement.addEventListener('contextmenu', onMenu);
 
+    // Direct Right-Click + WASD 3D fly-panning (docs/plan-ux-game-like.md, P7): Unreal/Twinmotion style without entering Walk mode.
+    let rmbHeld = false;
+    const flyKeys = new Set<string>();
+    let flyRaf = 0;
+    let flyLast = 0;
+    const flyTick = (now: number) => {
+      flyRaf = 0;
+      if (!rmbHeld || !flyKeys.size || walk) return;
+      const dt = Math.min(0.05, Math.max(0.004, (now - flyLast) / 1000));
+      flyLast = now;
+      const pose = useCamera.getState();
+      const wish = walkWish(pose.azimuth, flyKeys, flyKeys.has('ShiftLeft') || flyKeys.has('ShiftRight'));
+      const speed = Math.max(2, pose.distance * 0.45);
+      const scale = speed / 1.4;
+      const dx = wish.x * scale * dt, dy = wish.y * scale * dt, dz = wish.z * scale * dt;
+      cam.position.set(cam.position.x + dx, cam.position.y + dy, cam.position.z + dz);
+      controls.target.set(controls.target.x + dx, controls.target.y + dy, controls.target.z + dz);
+      controls.update();
+      invalidate.current();
+      flyRaf = requestAnimationFrame(flyTick);
+    };
+    const onRmbDown = (e: PointerEvent) => { if (e.button === 2 && !walk && usePrefs.getState().precisionTools) { rmbHeld = true; rightAt = { x: e.clientX, y: e.clientY }; } };
+    const onRmbUp = (e: PointerEvent) => { if (e.button === 2) { rmbHeld = false; flyKeys.clear(); cancelAnimationFrame(flyRaf); flyRaf = 0; } };
+    const onFlyKey = (e: KeyboardEvent) => {
+      if (!rmbHeld || walk || e.ctrlKey || e.metaKey || (e.target as HTMLElement | null)?.closest?.('input, select, textarea, [role="dialog"]')) return;
+      if (!WALK_KEYS.has(e.code) && e.code !== 'ShiftLeft' && e.code !== 'ShiftRight') return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.type === 'keyup') { flyKeys.delete(e.code); return; }
+      flyKeys.add(e.code);
+      if (!flyRaf) { flyLast = performance.now(); flyRaf = requestAnimationFrame(flyTick); }
+    };
+    renderer.domElement.addEventListener('pointerdown', onRmbDown);
+    window.addEventListener('pointerup', onRmbUp);
+    window.addEventListener('keydown', onFlyKey, true);
+    window.addEventListener('keyup', onFlyKey, true);
+
     // Selecting by a region (select3d.ts): with Select region on, a left drag draws it (Space: a lasso);
     // the right button turns the view, the middle one moves it.
     const buttons = () => {
@@ -1955,6 +1993,11 @@ export function Viewport3D() {
       cancelAnimationFrame(frame);
       clearTimeout(trailing);
       cancelAnimationFrame(flight);
+      cancelAnimationFrame(flyRaf);
+      renderer.domElement.removeEventListener('pointerdown', onRmbDown);
+      window.removeEventListener('pointerup', onRmbUp);
+      window.removeEventListener('keydown', onFlyKey, true);
+      window.removeEventListener('keyup', onFlyKey, true);
       unkeep();
       if (useCamera.getState().api === api) useCamera.setState({ api: null });
       unlisten();
@@ -2320,6 +2363,7 @@ export function Viewport3D() {
   const sectionNotes = useSection3d((st) => st.annotations);
   const capStyle = useSection3d((st) => st.caps);
   const box = useSectionBox((st) => st.box);
+  const windowRole = useUi((st) => st.windowRole);
   const boxHidden = useSectionBox((st) => st.hidden);
   useEffect(() => { remember3d(keyRef.current, { box }); }, [box]);
   const shown = sectionId && sectionDrawing?.frame && sectionDrawing.kind === 'section' ? sectionDrawing : null;
@@ -2463,6 +2507,11 @@ export function Viewport3D() {
               <button type="button" className="mode-close" title="Stop showing the section in 3D" aria-label="Stop showing the section in 3D" onClick={() => useSection3d.setState({ viewId: null })}><X size={12} /></button>
             </span>
           )}
+          {!box && !walkStart && windowRole === 'view' && (
+            <span className="mode-chip section">
+              <button type="button" onClick={toggleSectionBox} title="Section box">Section box</button>
+            </span>
+          )}
           {box && !walkStart && (
             <span className="mode-chip section">
               <span>Section box</span>
@@ -2519,6 +2568,7 @@ export function Viewport3D() {
       {!walkStart && <RefPlanes3D camera={camRef} canvas={host} />}
       {!walkStart && <Location3D camera={camRef} canvas={host} />}
       {!walkStart && overlays3d().map((Overlay, k) => <Overlay key={k} camera={camRef} canvas={host} scene={scene} invalidate={invalidate} />)}
+      {!walkStart && <ViewCube3D />}
       <KeyPlan mode="3d" />
     </>
   );

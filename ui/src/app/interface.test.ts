@@ -2,10 +2,11 @@ import { describe, expect, it } from 'vitest';
 import { initialSettings, PRESETS, presetOf, visibleTabIds, withPart, withPreset, withTab, withTabMoved, withWorkspace } from './interface';
 
 describe('the interface modes', () => {
-  it('starts comfortable on the desktop, compact in the web build on a short window, until the user chooses', () => {
-    expect(initialSettings(null, { web: false, height: 600 })).toMatchObject({ preset: 'comfortable', chosen: false });
-    expect(initialSettings(null, { web: true, height: 1000 })).toMatchObject({ preset: 'comfortable', chosen: false });
-    expect(initialSettings(null, { web: true, height: 700 })).toMatchObject({ preset: 'compact', parts: PRESETS.compact, chosen: false });
+  it('starts in Flow, on the desktop and the web, whatever the window, until the user chooses (decision 881)', () => {
+    expect(initialSettings(null, { web: false, height: 600 })).toMatchObject({ preset: 'flow', parts: PRESETS.flow, chosen: false });
+    expect(initialSettings(null, { web: true, height: 1000 })).toMatchObject({ preset: 'flow', chosen: false });
+    expect(initialSettings(null, { web: true, height: 700 })).toMatchObject({ preset: 'flow', chosen: false });
+    expect(initialSettings({ chosen: false, workspace: 'mep' }, { web: false, height: 900 })).toMatchObject({ preset: 'flow', workspace: 'mep' });
     // Chosen once: kept, whatever the window.
     expect(initialSettings(withPreset('focus'), { web: true, height: 700 })).toMatchObject({ preset: 'focus', chosen: true });
     expect(initialSettings(withPreset('comfortable'), { web: true, height: 700 })).toMatchObject({ preset: 'comfortable' });
@@ -18,6 +19,17 @@ describe('the interface modes', () => {
     expect(initialSettings({ ...old, rev: 2 }, { web: false, height: 900 }).parts.quickTools).toBe('floating');
   });
 
+  it('shows the tools\' keys while Alt is held by default; Always is a part of its own, and a setting kept before it still reads', () => {
+    for (const p of Object.values(PRESETS)) expect(p.keyTips).toBe('alt');
+    const always = withPart(withPreset('comfortable'), 'keyTips', 'always');
+    expect(always).toMatchObject({ preset: 'custom', parts: { keyTips: 'always' } });
+    expect(initialSettings(JSON.parse(JSON.stringify(always)), { web: false, height: 900 }).parts.keyTips).toBe('always');
+    expect(withPart(always, 'keyTips', 'alt').preset).toBe('comfortable');
+    const { keyTips: _gone, ...before } = PRESETS.comfortable;
+    expect(initialSettings({ chosen: true, parts: before }, { web: false, height: 900 })).toMatchObject({ preset: 'comfortable', parts: { keyTips: 'alt' } });
+    expect(initialSettings({ chosen: true, parts: { ...before, keyTips: 'sometimes' } }, { web: false, height: 900 }).parts.keyTips).toBe('alt');
+  });
+
   it('sets every part from a preset; a part changed on its own makes it custom, and back', () => {
     const compact = withPreset('compact');
     expect(compact.parts.ribbon).toBe('icons');
@@ -26,6 +38,9 @@ describe('the interface modes', () => {
     expect(custom.preset).toBe('custom');
     expect(withPart(custom, 'ribbon', 'icons').preset).toBe('compact');
     expect(presetOf(PRESETS.focus)).toBe('focus');
+    expect(presetOf(PRESETS.flow)).toBe('flow');
+    expect(PRESETS.flow.quickTools).toBe('floating');
+    expect(PRESETS.flow.panels).toBe('bothRail');
   });
 
   it('reads what was kept, leaving out what it does not know', () => {
@@ -33,7 +48,7 @@ describe('the interface modes', () => {
     expect(s.parts.ribbon).toBe('large');
     expect(s.parts.quickTools).toBe('off');
     expect(s.preset).toBe('custom');
-    expect(initialSettings('garbage', { web: false, height: 900 }).preset).toBe('comfortable');
+    expect(initialSettings('garbage', { web: false, height: 900 }).preset).toBe('flow');
   });
 
   // The tabs of the full edition, as the modules give them.

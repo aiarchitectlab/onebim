@@ -502,6 +502,8 @@ public static class Openings
         }
         var bands = Walls.Section(m, wall);
         var z = Spatial.Base(m, wall);
+        // A tapered wall's (plan-wall-lean-taper, L2): its faces over its whole height, so its openings go right through it.
+        if (WallTaper.Of(m, wall) is { } taper && taper.Envelope is var (lo, hi)) return new WallFrame(start, dir, dir.Perp, z, lo, hi);
         return new WallFrame(start, dir, dir.Perp, z, bands.Min(b => b.From), bands.Max(b => b.To));
     }
 
@@ -513,7 +515,9 @@ public static class Openings
     public static Solid? CutterIn(IModelView m, Entity wall, Placed p)
     {
         var f = FrameOf(m, wall, p.Along);
-        return PathCurve.Of(wall) is { IsArc: true } c ? ArcCutter(c, f.Base, f.YMin, f.YMax, p) : Cutter(f, p);
+        if (PathCurve.Of(wall) is { IsArc: true } c) return ArcCutter(c, f.Base, f.YMin, f.YMax, p);
+        // A leaning wall's hole leans with it (plan-wall-lean-taper, L1), as its body is cut.
+        return WallLean.Leaned(m, wall, Cutter(f, p));
     }
 
     /// <summary>
@@ -634,7 +638,10 @@ public static class Openings
         return hull.Length >= 3 ? new ElementGeometry([], [new PlanItem("hit", true, hull)]) : null;
     }
 
-    public static ElementGeometry? FillGeometry(Entity fill, IModelView m)
+    /// <remarks>In a leaning wall (plan-wall-lean-taper, L1) it leans with it, or stands plumb where the wall's middle is (<see cref="WallLean.Follow"/>).</remarks>
+    public static ElementGeometry? FillGeometry(Entity fill, IModelView m) => WallLean.Follow(m, fill, PlumbFillGeometry(fill, m));
+
+    static ElementGeometry? PlumbFillGeometry(Entity fill, IModelView m)
     {
         // A curtain wall's door (report #133): in its cell, drawn as any door is.
         if (CurtainCells.SeatOf(m, fill) is { } seat) return CurtainDoorGeometry(fill, m, seat);
@@ -666,7 +673,9 @@ public static class Openings
     /// A door's or window's plan symbols with the plan cut at <paramref name="cut"/> over its storey's level (audit 22.11.2026):
     /// its dressings and a bay's faces cut or seen as that plan has them; null when nothing of it depends on the cut.
     /// </summary>
-    public static IReadOnlyList<PlanItem>? FillPlanAt(Entity fill, IModelView m, double cut)
+    public static IReadOnlyList<PlanItem>? FillPlanAt(Entity fill, IModelView m, double cut) => WallLean.FollowPlan(m, fill, PlumbFillPlanAt(fill, m, cut), cut);
+
+    static IReadOnlyList<PlanItem>? PlumbFillPlanAt(Entity fill, IModelView m, double cut)
     {
         if (CurtainCells.SeatOf(m, fill) != null || SpecOf(m, fill.Id) is not { } spec || OpeningOf(m, fill.Id) is not { } opening || WallOf(m, opening.Id) is not { } wall) return null;
         var p = Place(m, opening);
@@ -1112,6 +1121,9 @@ public static class Openings
         foreach (var level in new[] { PlanDetail.Coarse, PlanDetail.Medium, PlanDetail.Fine })
             foreach (var st in JoinerySymbols.Plan(spec, level: level, windowSwing: windowSwing, sill: p.FillSill, openMode: openMode))
                 o.Add(new PlanItem(st.Weight == "cut" ? "heavy" : st.Dashed ? "dashed" : "symbol", st.Closed, st.Pts.Select(q => P(q.X, q.Y)).ToList(), level, level));
+        // A door's threshold seen under the cut, when its type asks for it (forum topic 204): at LOD 200 and up.
+        foreach (var st in JoinerySymbols.ThresholdPlan(spec, depth))
+            o.Add(new PlanItem("symbol", true, st.Pts.Select(q => P(q.X, q.Y)).ToList(), PlanDetail.Medium));
         // The dressings seen in plan: what crosses the cut (shutters, a grille) cut, a window box below it seen, a canopy above it overhead.
         if (dressed)
             foreach (var (kind, x0, x1, y0, y1) in DressingPlan(spec, depth, cutOverSill))

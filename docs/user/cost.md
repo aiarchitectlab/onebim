@@ -32,7 +32,9 @@ Prices are yours: Lapin ships no catalogue of prices or norms. **Construction �
 
 Change any column that was guessed wrong, choose the row the headings are on and whether the prices are in RON or EUR, then click **Import**. The list goes into the project. With **Keep in this computer's library too** ticked, it also stays on this computer: under **On this computer**, **Add to the project** brings it into your next project.
 
-**Template** saves a CSV with the columns and a few rows of Lapin's own rough values, marked *indicative*: fill it in with your prices and import it. **Use the indicative values** puts those rough values in the project as a list, so you can try the estimate before you have yours. Replace them before you send an estimate to anyone.
+Optional too: the **Source (supplier)**, a **Link** to its page and the date the **Price checked on**, kept with each row.
+
+**Template** saves a CSV with the columns and a few rows of Lapin's own rough values, marked *indicative*: fill it in with your prices and import it. Under **Templates**, **Add to the project** puts a ready list in the project: **Lapin indicative prices** (those rough values, to try the estimate before you have yours) and the lists the edition's modules bring, such as **Bilka – Dedeman (indicative, 24.11.2026)** for [roof panels](roof-panels.md#what-it-costs), each row with its source and date. A template is added only when you ask, and is marked *indicative*: replace its prices before you send an estimate to anyone.
 
 ## Articles on types, rules on materials
 
@@ -43,6 +45,8 @@ An estimate line comes from an **article**: a code from your price list. There a
 - **On a type.** Every element of the type is priced by it. The article says what it measures: the whole element or a part of it (a layered type's **core**, or its **finishes**), and by which measure (by the price's unit, or net or gross volume, net or gross area, length, count, weight). It can also add a factor and the waste (%).
 - **On a material (a rule).** Every layer of that material, in any type, is priced by it: one rule for the lime plaster prices the plaster of all your walls.
 
+A Studio part is a type too. Its parameters marked **Measure as** in the part's table (Length, Count, Area, Volume) are read first by an article of that measure on the whole part: a fence part of L = 20 m, priced by the metre, gives 20 m (see [Parts](studio-parts.md#a-parts-values-in-schedules-filters-and-the-estimate)).
+
 The type's article comes first. A layer its type's articles already measure is not priced again by a rule. An article on the whole element prices all of it, so the rules stand aside. For a layered wall, give the type an article on its **core** (the masonry by volume), and rules for its finishes (the plaster by area). The wall is then priced layer by layer: the masonry under **Walls**, the plaster under **Finishes and insulation**.
 
 **Construction → Map articles…** lists the project's types that elements use, and the materials of their layers. Each row starts with the article it has, or the one you chose for a type or material of the same name in an earlier project, or the one Lapin suggests: a code written in its name, or the article sharing the most words with it (*zidărie*, *BCA*, *tencuială*, *C25/30*). For a layered type it proposes the core. Type or pick a code, choose the part and the measure, tick the rows you want and click **Apply**: one step to undo. Your choices are remembered on this computer for your next projects.
@@ -50,6 +54,21 @@ The type's article comes first. A layer its type's articles already measure is n
 The formwork and scaffolding types of the site works (the **Site** tab) already had an article code (decision 152): it is an article on the type, measured by the price's unit.
 
 The phases count: an element that was there before the works (made in an *existing* phase) is not priced. A demolished one is priced only by its type's article whose part is **Its demolition (only when demolished)**, under the chapter **Demolition**.
+
+### Articles priced by the time on site
+
+Site set-up and safety items are often hired by the time they stay on site: a fence by the metre and the month (*m × month*), a sign by the piece and the day, a crane by the hour. The **× Duration** column of Map articles multiplies an article's quantity (a count, a length, an area…) by how long its element is on site, taken from the work schedule (see [Planning](planning.md#the-cost-of-the-tasks)):
+
+- **By the price's unit** (the default): the time in the price's unit, if it has one. *m × lună*, *m x month*, *cad × mese* are a length or a count times months; *buc/zi* calendar days; *buc/zi lucrătoare* working days; *oră* or *h* hours. A unit with no time is not multiplied, as before.
+- **No duration**: the unit's time left aside, a plain quantity.
+- **Months on site**: whole calendar months from the start, the rest as a part of its month (1 March to 31 May is 3 months).
+- **Working days on site**: the working days of the project's calendar (its weekdays, holidays and exceptions).
+- **Calendar days on site**: every day, both ends counted.
+- **Working hours on site**: the working days times the calendar's hours of a day.
+
+An element is on site from the start of the first task that takes it to the finish of the last one (tasks take elements by their rule or by hand, see [Planning](planning.md#the-models-elements-in-the-tasks)). It is worked out again every time the estimate is shown: move a task or change the calendar, and the quantity follows. A 20 m fence in a task of three months, priced *m × lună*, gives 60.
+
+The line shows the duration used after its description (**× 3 months**; the least and the most when its elements differ), in the estimate, its forms (XLSX, PDF), the HTML export and IFC. An element no task takes keeps its quantity, not multiplied, and the line says so (**1 element(s) in no task of the schedule**), so nothing is priced at zero without a word. Without a schedule the line says the project has none; in an edition without the Planning module, an article priced by its unit is priced as before, and one set to a duration says why it has none.
 
 ## The estimate
 
@@ -113,6 +132,6 @@ Monthly progress billing (*situații de lucrări*), earned value and several bas
 
 ## IFC
 
-**File → Export IFC…** writes the estimate as an **IfcCostSchedule**: its chapters and lines as **IfcCostItem**s, each line's quantity and its unit prices as four **IfcCostValue**s (Material, Labour, Equipment, Transport), the elements each line measures assigned to it (**IfcRelAssignsToControl**), the currency as the project's **IfcMonetaryUnit**. Imported, an estimate keeps the lines as the file has them, with the same totals. Tick **Lines from the model** to add the lines your model gives.
+**File → Export → Export IFC, Fragments or BOS…** writes the estimate as an **IfcCostSchedule**: its chapters and lines as **IfcCostItem**s, each line's quantity and its unit prices as four **IfcCostValue**s (Material, Labour, Equipment, Transport), the elements each line measures assigned to it (**IfcRelAssignsToControl**), the currency as the project's **IfcMonetaryUnit**. Imported, an estimate keeps the lines as the file has them, with the same totals. Tick **Lines from the model** to add the lines your model gives.
 
-With a work schedule, each line is also assigned to the tasks it is done in (**IfcRelAssignsToControl** to their **IfcTask**s). Imported, the lines keep their tasks, so the S-curve comes back the same.
+With a work schedule, each line is also assigned to the tasks it is done in (**IfcRelAssignsToControl** to their **IfcTask**s). Imported, the lines keep their tasks, so the S-curve comes back the same. A line priced by the time on site carries its **Time** and **Duration** in **Lapin_CostItem**.

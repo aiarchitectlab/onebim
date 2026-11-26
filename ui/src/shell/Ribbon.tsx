@@ -7,22 +7,26 @@
  */
 
 import { quickToggleTheme, setPrefs, usePrefs } from '../app/prefs';
-import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Moon, Redo2, Search, Sun, Undo2 } from 'lucide-react';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { ChevronDown, FolderOpen, Moon, Printer, Redo2, Save, Search, Sun, Undo2 } from 'lucide-react';
 import { HelpMenu } from './HelpMenu';
+import { RichTooltip } from './RichTooltip';
 import { BrandName } from './BrandMark';
 import { useUi } from '../app/store';
 import { ribbonTabs } from '../platform/modules';
 import { redo, undo, useSession } from '../engine/session';
-import { fileActions, GUEST_SECTIONS, HOST_SECTIONS, type FileSection } from './fileActions';
+import { fileActions, GUEST_SECTIONS, HOST_SECTIONS, runFileAction, type FileSection } from './fileActions';
+import { openProject, projectTitle, recentProjects } from '../engine/files';
 import { isGuest } from '../engine/share';
 import { Participants } from './Sharing';
+import { MenuSub } from './MenuSub';
 import { TabStrip, WorkspaceSwitch } from './TabStrip';
 import { useInterface, visibleTabIds } from '../app/interface';
 import { MY_TAB } from '../app/myTools';
 import { MyToolsBand, toolDragProps, toolMenu } from './MyToolsBand';
 import { pressTool } from './pulldown';
 import { bindingText, hint, useBindings } from '../app/commands';
+import { recordToolClick } from '../app/microTips';
 import type { FileAction, RibbonTabDef, ToolDef } from '../platform/module';
 
 /**
@@ -48,31 +52,56 @@ function undoTitle(verb: 'Undo' | 'Redo', label: string | null | undefined, keys
   return `${verb}${label ? ` ${label}` : ''}${keys ? ` (${keys})` : ''}`;
 }
 
-/** Undo and Redo at the top of the File menu, with their keys. */
-function UndoItems({ run }: { run: (f: () => unknown) => () => void }) {
+/**
+ * The quick-access group beside the brand: Open, Save, Undo, Redo and Publish, icons only (forum topic 257). Their tooltips
+ * carry the keys and, for Undo and Redo, the step; a guest of a shared session has no Open, Save or Publish.
+ */
+function QuickAccess() {
   const doc = useSession((s) => s.doc);
+  useBindings();
+  const guest = isGuest();
+  const keys = (id: string) => bindingText(id).split(', ')[0];
+  const plain = (verb: string, id: string) => { const k = keys(id); return `${verb}${k ? ` (${k})` : ''}`; };
   return (
-    <>
-      <button type="button" role="menuitem" disabled={!doc?.canUndo} onClick={run(undo)}>Undo<Keys id="app.undo" /></button>
-      <button type="button" role="menuitem" disabled={!doc?.canRedo} onClick={run(redo)}>Redo<Keys id="app.redo" /></button>
-      <div className="menu-sep" role="separator" />
-    </>
+    <span className="quick-access" role="group" aria-label="Quick access">
+      {!guest && <button type="button" className="qa-btn" onClick={() => void runFileAction('file.open')} title={plain('Open…', 'app.open')} aria-label="Open…"><FolderOpen size={15} strokeWidth={1.8} /></button>}
+      {!guest && <button type="button" className="qa-btn" onClick={() => void runFileAction('file.save')} title={plain('Save', 'app.save')} aria-label="Save"><Save size={15} strokeWidth={1.8} /></button>}
+      <button type="button" className="qa-btn" disabled={!doc?.canUndo} onClick={() => void undo()} title={undoTitle('Undo', doc?.undoLabel, keys('app.undo'))} aria-label="Undo"><Undo2 size={15} strokeWidth={1.8} /></button>
+      <button type="button" className="qa-btn" disabled={!doc?.canRedo} onClick={() => void redo()} title={undoTitle('Redo', doc?.redoLabel, keys('app.redo'))} aria-label="Redo"><Redo2 size={15} strokeWidth={1.8} /></button>
+      {!guest && <button type="button" className="qa-btn" onClick={() => void runFileAction('file.publish')} title="Publish…" aria-label="Publish…"><Printer size={15} strokeWidth={1.8} /></button>}
+    </span>
   );
 }
 
-/** One section of the File menu: its heading and its actions, as the product has them (shell/fileActions.ts). */
+/** One File action as a menu item. */
+function FileItem({ a, run }: { a: FileAction; run: (f: () => unknown) => () => void }) {
+  return <button type="button" role="menuitem" data-menu={a.menu} onClick={run(a.run)}>{a.label}{a.keys && <Keys id={a.keys} />}</button>;
+}
+
+/** The recent projects, as the File menu's Open recent lists them. */
+function RecentItems({ run }: { run: (f: () => unknown) => () => void }) {
+  const paths = recentProjects();
+  if (paths.length === 0) return <div className="menu-empty muted small">No recent projects</div>;
+  return <>{paths.map((p) => <button type="button" role="menuitem" key={p} title={p} onClick={run(() => openProject(p))}><span data-no-i18n>{projectTitle(p)}</span></button>)}</>;
+}
+
+/** One section of the File menu: its heading and its entries, as the product has them (shell/fileActions.ts). */
 function FileItems({ section, first, run }: { section: FileSection; first: boolean; run: (f: () => unknown) => () => void }) {
   const actions = fileActions();
-  const shown = section.ids.map((id) => actions.get(id)).filter((a): a is FileAction => Boolean(a) && (a!.shown?.() ?? true));
-  // A section with nothing shown here (Speckle in the browser) is left out, its heading too.
-  if (shown.length === 0) return null;
+  const shown = (ids: string[]) => ids.map((id) => actions.get(id)).filter((a): a is FileAction => Boolean(a) && (a!.shown?.() ?? true));
+  const entries = section.ids.map((e) => {
+    if (typeof e === 'string') { const a = shown([e])[0]; return a ? { key: e, node: <FileItem a={a} run={run} /> } : null; }
+    if (e.recent) return { key: e.sub, node: <MenuSub label={e.sub}><RecentItems run={run} /></MenuSub> };
+    const items = shown(e.ids ?? []);
+    // A submenu with nothing shown here (Collaborate for a guest, Speckle in the browser) is left out.
+    return items.length ? { key: e.sub, node: <MenuSub label={e.sub}>{items.map((a) => <FileItem key={a.id} a={a} run={run} />)}</MenuSub> } : null;
+  }).filter((x): x is { key: string; node: JSX.Element } => x !== null);
+  if (entries.length === 0) return null;
   return (
     <>
       {!first && <div className="menu-sep" role="separator" />}
       {section.head && <div className="menu-head">{section.head}</div>}
-      {shown.map((a) => (
-        <button type="button" role="menuitem" key={a.id} data-menu={a.menu} onClick={run(a.run)}>{a.label}{a.keys && <Keys id={a.keys} />}</button>
-      ))}
+      {entries.map((x) => <Fragment key={x.key}>{x.node}</Fragment>)}
     </>
   );
 }
@@ -85,8 +114,7 @@ function FileMenu() {
     <span className="menu-host">
       <button type="button" className={`tab${open ? ' on' : ''}`} onClick={() => setOpen(!open)}>File</button>
       {open && (
-        <div className="menu" role="menu" onMouseLeave={() => setOpen(false)}>
-          <UndoItems run={run} />
+        <div className="menu" role="menu" onMouseLeave={() => setOpen(false)} onKeyDown={(e) => { if (e.key === 'Escape') setOpen(false); }}>
           {sections.map((sec, i) => <FileItems key={i} section={sec} first={i === 0} run={run} />)}
         </div>
       )}
@@ -97,6 +125,30 @@ function FileMenu() {
 /** A ribbon tool dragged onto a quick slot goes in it (decision 259); dragged onto the My tools tab, in My tools (decision 479); right-clicked, its menu offers My tools. */
 const dragTool = (tl: ToolDef) => ({ ...toolDragProps(tl.id), onContextMenu: (e: React.MouseEvent) => toolMenu(e, tl) });
 
+/**
+ * Whether a large band is too wide for its window, so its small tools show their icons only (a tester's wish, forum topic 257).
+ * The width the labels need is remembered while they are hidden: the labels come back once the window holds them again.
+ */
+function useTight(): [React.RefObject<HTMLDivElement>, boolean] {
+  const el = useRef<HTMLDivElement>(null);
+  const need = useRef(0);
+  const [tight, setTight] = useState(false);
+  useLayoutEffect(() => {
+    const band = el.current;
+    if (!band) return;
+    const measure = () => {
+      if (!tight) { if (band.scrollWidth > band.clientWidth + 1) { need.current = band.scrollWidth; setTight(true); } }
+      else if (band.clientWidth >= need.current) setTight(false);
+    };
+    measure();
+    if (typeof ResizeObserver === 'undefined') return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(band);
+    return () => ro.disconnect();
+  }, [tight]);
+  return [el, tight];
+}
+
 /** The band of the tab: large tools with their names and keys, or icons only. */
 function Band({ tab: all, icons, onPicked, drop }: { tab: RibbonTabDef; icons: boolean; onPicked?: () => void; drop?: boolean }) {
   const tool = useUi((s) => s.tool);
@@ -105,10 +157,30 @@ function Band({ tab: all, icons, onPicked, drop }: { tab: RibbonTabDef; icons: b
   useSession((s) => s.version);
   const off = (tl: ToolDef) => (tl.enabled ? !tl.enabled() : false);
   useBindings();
+  const [bandRef, tight] = useTight();
   // A group shown only while something holds (`shown`): drawn again when the preferences change (Developer extras).
   usePrefs();
   const tab = { ...all, groups: all.groups.filter((g) => g.shown?.() ?? true) };
-  const press = (tl: ToolDef, el?: HTMLElement) => { pressTool(tl, el); if (!tl.items?.length) onPicked?.(); };
+  const press = (tl: ToolDef, el?: HTMLElement) => {
+    pressTool(tl, el);
+    if (!tl.items?.length) {
+      // A shortcut tip after the third click (a Flow extra, Preferences → General; off by default).
+      if (usePrefs.getState().microTips) recordToolClick(tl.id, tl.label, bindingText(tl.id).split(', ')[0] || tl.shortcut);
+      onPicked?.();
+    }
+  };
+  const [tip, setTip] = useState<{ tool: ToolDef; shortcut?: string; x: number; y: number } | null>(null);
+  const tipTimer = useRef(0);
+  useEffect(() => () => clearTimeout(tipTimer.current), []);
+  const tipProps = (tl: ToolDef, shortcut?: string) => !usePrefs.getState().precisionTools ? {} : ({
+    onMouseEnter: (e: React.MouseEvent<HTMLElement>) => {
+      clearTimeout(tipTimer.current);
+      const r = e.currentTarget.getBoundingClientRect();
+      tipTimer.current = window.setTimeout(() => setTip({ tool: tl, shortcut, x: r.left, y: r.bottom + 6 }), 600);
+    },
+    onMouseLeave: () => { clearTimeout(tipTimer.current); setTip(null); },
+    onMouseDown: () => { clearTimeout(tipTimer.current); setTip(null); },
+  });
   // A pulldown is lit while one of its tools is on, and marked by its arrow.
   const on = (tl: ToolDef) => tool === tl.id || !!tl.items?.some((x) => x.id === tool);
   const mark = (tl: ToolDef, size: number) => (tl.items?.length ? <ChevronDown className="pulldown-mark" size={size} strokeWidth={2} aria-hidden /> : null);
@@ -127,14 +199,14 @@ function Band({ tab: all, icons, onPicked, drop }: { tab: RibbonTabDef; icons: b
     </div>
   );
   return (
-    <div className="band" role="toolbar" aria-label={tab.label} data-i18n-ctx={tab.i18nCtx} onWheel={wheelAcross}>
+    <div className={`band${tight ? ' tight' : ''}`} ref={bandRef} role="toolbar" aria-label={tab.label} data-i18n-ctx={tab.i18nCtx} onWheel={wheelAcross}>
       {tab.groups.map((g) => (
         <div className="group" key={g.label}>
           <div className="group-tools">
             {g.tools.map((tl) => {
               const keys = bindingText(tl.id);
               return (
-                <button type="button" key={tl.id} className={`tool${on(tl) ? ' on' : ''}`} disabled={off(tl)} onClick={(e) => press(tl, e.currentTarget)} {...dragTool(tl)} title={hint(tl.id, tl.label)} data-pulldown={tl.items?.length ? tl.id : undefined}>
+                <button type="button" key={tl.id} className={`tool${on(tl) ? ' on' : ''}`} disabled={off(tl)} onClick={(e) => press(tl, e.currentTarget)} {...dragTool(tl)} {...tipProps(tl, keys ? keys.split(', ')[0] : undefined)} title={hint(tl.id, tl.label)} data-pulldown={tl.items?.length ? tl.id : undefined}>
                   <tl.icon size={22} strokeWidth={1.5} />
                   <span>{tl.label}{mark(tl, 10)}</span>
                   {keys && <kbd className="tool-key" data-no-i18n>{keys.split(', ')[0]}</kbd>}
@@ -144,7 +216,7 @@ function Band({ tab: all, icons, onPicked, drop }: { tab: RibbonTabDef; icons: b
             {g.small && g.small.length > 0 && (
               <div className="small-tools">
                 {g.small.map((tl) => (
-                  <button type="button" key={tl.id} className={`tool small${on(tl) ? ' on' : ''}`} disabled={off(tl)} onClick={(e) => press(tl, e.currentTarget)} {...dragTool(tl)} title={hint(tl.id, tl.label)} data-pulldown={tl.items?.length ? tl.id : undefined}>
+                  <button type="button" key={tl.id} className={`tool small${on(tl) ? ' on' : ''}`} disabled={off(tl)} onClick={(e) => press(tl, e.currentTarget)} {...dragTool(tl)} title={hint(tl.id, tl.label)} aria-label={tl.label} data-pulldown={tl.items?.length ? tl.id : undefined}>
                     <tl.icon size={14} strokeWidth={1.6} /><span>{tl.label}</span>{tl.items?.length ? <ChevronDown size={10} strokeWidth={2} aria-hidden /> : null}
                   </button>
                 ))}
@@ -154,6 +226,7 @@ function Band({ tab: all, icons, onPicked, drop }: { tab: RibbonTabDef; icons: b
           <div className="group-label">{g.label}</div>
         </div>
       ))}
+      {tip && <RichTooltip tool={tip.tool} shortcut={tip.shortcut} x={tip.x} y={tip.y} />}
     </div>
   );
 }
@@ -172,7 +245,6 @@ export function Ribbon() {
   const tabs = [MY_TAB_DEF, ...own];
   const tabId = useUi((s) => s.tab) ?? own[0]?.id;
   const theme = useUi((s) => s.theme);
-  const doc = useSession((s) => s.doc);
   const mode = useInterface((s) => s.parts.ribbon);
   const tab = tabs.find((t) => t.id === tabId) ?? own[0] ?? tabs[0];
   // Focus: the band drops from its tab, over the view, and folds after a tool, on Escape or a click elsewhere.
@@ -191,20 +263,34 @@ export function Ribbon() {
     if (mode === 'dropdown') setDropped(!(dropped && id === tab?.id));
     useUi.setState({ tab: id });
   };
-  const undoKeys = bindingText('app.undo'), redoKeys = bindingText('app.redo'), paletteKeys = bindingText('app.palette');
+  // Office's key tips: the large tools' shortcuts show only while Alt is held down alone (their tooltips always have them).
+  const keysAlways = useInterface((i) => i.parts.keyTips === 'always');
+  const [keytips, setKeytips] = useState(false);
+  useEffect(() => {
+    const down = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') { setKeytips(false); return; }
+      if (e.ctrlKey || e.metaKey || e.shiftKey || (e.target as HTMLElement | null)?.closest?.('input, select, textarea, [contenteditable=true]')) return;
+      setKeytips(true);
+    };
+    const up = (e: KeyboardEvent) => { if (e.key === 'Alt') setKeytips(false); };
+    const off = () => setKeytips(false);
+    // Nothing is stopped or prevented here: Alt keeps meaning what views and grips make of it.
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', off);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', off); };
+  }, []);
+  const paletteKeys = bindingText('app.palette');
   return (
-    <header className={`topbar ribbon-${mode}`} ref={host}>
+    <header className={`topbar ribbon-${mode}${keytips ? ' keytips' : ''}${keysAlways ? ' keys-always' : ''}`} ref={host}>
       <div className="tabs-row">
         <button type="button" className="brand" onClick={() => !isGuest() && useUi.setState({ screen: 'start' })} title="Start screen"><BrandName /></button>
+        <QuickAccess />
         <FileMenu />
         <WorkspaceSwitch />
         <TabStrip tabs={tabs} current={tab?.id} open={mode === 'dropdown' && dropped} onPick={pickTab} />
         <Participants />
         <button type="button" className="search" onClick={() => useUi.setState({ dialog: 'palette' })}><Search size={14} />Commands… {paletteKeys && <kbd data-no-i18n>{paletteKeys.split(', ')[0]}</kbd>}</button>
-        <span className="undo-redo" role="group" aria-label="Undo and redo">
-          <button type="button" className="undo-btn" disabled={!doc?.canUndo} onClick={() => void undo()} title={undoTitle('Undo', doc?.undoLabel, undoKeys)} aria-label="Undo"><Undo2 size={16} strokeWidth={1.8} /><span className="undo-text">Undo</span></button>
-          <button type="button" className="undo-btn" disabled={!doc?.canRedo} onClick={() => void redo()} title={undoTitle('Redo', doc?.redoLabel, redoKeys)} aria-label="Redo"><Redo2 size={16} strokeWidth={1.8} /><span className="undo-text">Redo</span></button>
-        </span>
         <button type="button" className="icon" title="Theme" onClick={() => { const next = quickToggleTheme(theme, usePrefs.getState().lastLight); setPrefs({ theme: next }); useUi.setState({ theme: next }); }}>{theme !== 'graphite' ? <Moon size={15} /> : <Sun size={15} />}</button>
         <HelpMenu />
       </div>

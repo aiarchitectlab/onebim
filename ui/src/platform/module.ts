@@ -238,6 +238,11 @@ export interface Grip {
   slope?: { kind: 'eave' | 'gable'; override?: boolean };
   /** What the grip does, shown over it. */
   title?: string;
+  /**
+   * Gives way to another grip under the pointer: picked only when no other grip is in reach (the hatch origin, which by default
+   * sits on an outline's first corner and would else take that corner's drag and right-click).
+   */
+  yields?: boolean;
   /** The element it belongs to (gripsOf fills it in). */
   owner?: string;
   /** The view it is drawn in, when it belongs to one (a drafted shape's view); else every 2D view. */
@@ -246,6 +251,12 @@ export interface Grip {
   step?: (to: Vec2) => GripStep | null;
   /** A point of a drafted shape: its sketch, where a constrained sketch follows the drag (`studio.dragSketch`, previewed live). */
   sketch?: { viewId: string; shape: string; part: string };
+  /**
+   * An end of a straight element (decision 865): the fixed other end and the unit direction from it to this end. Ctrl/⌘ held
+   * while dragging keeps the point on that line (the element lengthens or shortens along its own angle); with polar on, the
+   * line is always offered as the "own angle" guide.
+   */
+  along?: { from: Vec2; dir: Vec2 };
   /** Where a drag puts it, kept to its own angles (a tag's knee, decision 331); `free` while Shift is held. */
   constrain?: (to: Vec2, free: boolean) => Vec2;
   /**

@@ -90,7 +90,33 @@ export interface Prefs {
   crosshair: boolean;
   /** The arrow keys' nudge step, metres (forum topic 212): 0 follows the zoom (about four pixels), else this one; Shift is ten times as far. */
   nudgeStep: number;
+  /** Subtle synthetic tactile sounds on snap, placement, undo and mission completion (docs/plan-ux-game-like.md, P9); off by default. */
+  tactileSounds: boolean;
+  /**
+   * The Flow extras (docs/plan-ux-game-like.md): on by default (the user's decision of 26.11.2026); the start screen's
+   * Flow extras switch turns them all off or on, Preferences → Flow extras switches each, and the Flow preset turns them on.
+   */
+  viewCube: boolean;
+  selectionToolbar: boolean;
+  healthRadar: boolean;
+  microTips: boolean;
+  quickWalkSplit: boolean;
+  keycapHints: boolean;
+  ghostPreview: boolean;
+  xrayPeek: boolean;
+  scrubFields: boolean;
+  roleCards: boolean;
+  /** The 3D cursor pill, equal-spacing magnets, animated ribbon tooltips, the hold ring and right-click + WASD flight (docs/plan-ux-game-like.md, phase 4). */
+  precisionTools: boolean;
+  /** The quick tools chosen for the workspace (architecture, structure, MEP, site, drafting): on only once a role card was picked, or here. */
+  roleHotbars: boolean;
+  /** The user chose the Flow extras (any of them switched): until then they are all on, whatever settings kept from before they were on by default say. */
+  flowChosen: boolean;
 }
+
+/** The extras the Flow preset turns on, in the order Preferences shows them (tactile sounds and the role's quick tools stay their own choice). */
+export const FLOW_EXTRAS = ['viewCube', 'selectionToolbar', 'healthRadar', 'microTips', 'quickWalkSplit', 'keycapHints', 'ghostPreview', 'xrayPeek', 'scrubFields', 'roleCards', 'precisionTools'] as const;
+export type FlowExtra = (typeof FLOW_EXTRAS)[number];
 
 export const SNAP_MODES: readonly SnapMode[] = ['endpoint', 'midpoint', 'intersection', 'center', 'quadrant', 'perpendicular', 'tangent', 'nearest', 'wallAxis', 'gridAxis', 'division', 'distance'];
 /** The object snaps before forum topic 151 added Tangent and Wall axis: what settings kept with no list of known snaps knew. */
@@ -111,6 +137,10 @@ export const DEFAULT_PREFS: Prefs = {
   snapDivisions: [3, 4],
   snapDistance: 0.5,
   crosshair: false,
+  tactileSounds: false,
+  viewCube: true, selectionToolbar: true, healthRadar: true, microTips: true, quickWalkSplit: true,
+  keycapHints: true, ghostPreview: true, xrayPeek: true, scrubFields: true, roleCards: true, precisionTools: true, roleHotbars: false,
+  flowChosen: false,
 };
 
 const names = (v: unknown): string[] | null => (Array.isArray(v) ? [...new Set(v.filter((x): x is string => typeof x === 'string' && !!x.trim()).map((x) => x.trim()))] : null);
@@ -158,6 +188,11 @@ export function readPrefs(stored: unknown): Prefs {
     snapDivisions: divisionsOf(o.snapDivisions) ?? d.snapDivisions,
     snapDistance: typeof o.snapDistance === 'number' && Number.isFinite(o.snapDistance) && o.snapDistance > 0 ? Math.min(1000, o.snapDistance) : d.snapDistance,
     crosshair: o.crosshair === true,
+    tactileSounds: o.tactileSounds === true,
+    // Until the user chose them, the Flow extras are on: settings kept while they were off by default hold false for each.
+    ...(Object.fromEntries(FLOW_EXTRAS.map((k) => [k, o.flowChosen === true ? o[k] === true : true])) as Record<FlowExtra, boolean>),
+    roleHotbars: o.roleHotbars === true,
+    flowChosen: o.flowChosen === true,
     openingAlong: {
       from: pick((o.openingAlong as { from?: unknown } | undefined)?.from, ['start', 'face', 'core'] as const, d.openingAlong.from),
       point: pick((o.openingAlong as { point?: unknown } | undefined)?.point, ['start', 'centre', 'end'] as const, d.openingAlong.point),
@@ -173,9 +208,16 @@ export const usePrefs = create<Prefs>(() => read());
 
 export function setPrefs(patch: Partial<Prefs>): void {
   const lastLight = LIGHT_THEMES.includes(patch.theme as LightTheme) ? { lastLight: patch.theme as LightTheme } : {};
-  usePrefs.setState(readPrefs({ ...usePrefs.getState(), ...patch, ...lastLight }));
+  // A Flow extra switched is the user's choice from then on.
+  const chosen = FLOW_EXTRAS.some((k) => k in patch) ? { flowChosen: true } : {};
+  usePrefs.setState(readPrefs({ ...usePrefs.getState(), ...patch, ...lastLight, ...chosen }));
   try { localStorage.setItem(KEY, JSON.stringify(usePrefs.getState())); } catch { /* kept for this session */ }
 }
+
+/** The Flow preset's extras switched on together (picking the preset; each stays switchable in Preferences). */
+export const turnOnFlowExtras = (): void => setPrefs(Object.fromEntries(FLOW_EXTRAS.map((k) => [k, true])) as Partial<Prefs>);
+/** Every Flow extra switched off together (the start screen's switch, Preferences' Turn all off): the classic interface. */
+export const turnOffFlowExtras = (): void => setPrefs(Object.fromEntries(FLOW_EXTRAS.map((k) => [k, false])) as Partial<Prefs>);
 
 /** What the sun/moon button switches to: a light theme goes to dark (the choice is kept as the last light one), dark returns to it. */
 export function quickToggleTheme(current: ThemeName, lastLight: LightTheme): ThemeName {

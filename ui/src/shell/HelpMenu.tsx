@@ -11,7 +11,7 @@ import { useEffect, useRef, useState } from 'react';
 import { HelpCircle, X } from 'lucide-react';
 import { notify } from '../app/store';
 import { useSession } from '../engine/session';
-import { OWN_REPO, RECENT, openForumTopic, openHttps, openIssue, openLink, ownEdition, reportParams, sendReport } from './support';
+import { OWN_REPO, RECENT, openForumTopic, openHttps, openIssue, openLink, ownEdition, reportParams, sendReport, useReportRequest, type ReportStart } from './support';
 import { contactFor, useReplies } from './replies';
 import { MessagesDialog } from './MessagesDialog';
 import { useDialogFocus, useEscapeClose } from './dialogFocus';
@@ -20,8 +20,10 @@ import { isDesktop } from '../engine/files';
 import { checkForUpdates } from '../app/updates';
 import { LANGUAGES, setLang, useLang } from '../i18n';
 import { BunnyIcon } from '../icons';
-import { replacements } from '../platform/modules';
+import { modules, productInfo, replacements } from '../platform/modules';
 import { lazyPart } from '../platform/lazyPart';
+import { openOnboarding } from '../app/onboarding';
+import { MenuSub } from './MenuSub';
 import { brand } from '../platform/brand';
 
 // Ask Lapin and its answers (help/faq.ts), fetched the first time it is opened.
@@ -39,8 +41,6 @@ async function shrink(file: File): Promise<string> {
   return canvas.toDataURL('image/jpeg', 0.85);
 }
 
-/** What a report starts with: a question Ask Lapin could not answer comes in as one. */
-interface ReportStart { kind: 'bug' | 'idea' | 'question'; title: string; description: string }
 
 function ReportDialog({ onClose, start }: { onClose: () => void; start?: ReportStart }) {
   const [kind, setKind] = useState<'bug' | 'idea' | 'question'>(start?.kind ?? 'bug');
@@ -124,6 +124,9 @@ export function HelpMenu() {
     if (!own) { setReport(r); return; }
     if (r === true) openIssue(); else openIssue(r.title, r.description);
   };
+  // A report asked for elsewhere (a part of the window that stopped): its form, filled in.
+  const asked = useReportRequest((s) => s.start);
+  useEffect(() => { if (asked) { startReport(asked); useReportRequest.setState({ start: null }); } }, [asked]); // eslint-disable-line react-hooks/exhaustive-deps
   // F1: Ask Lapin, from anywhere.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'F1') { e.preventDefault(); setAsking(true); } };
@@ -145,6 +148,7 @@ export function HelpMenu() {
       {open && (
         <div className="menu-pop" role="menu">
           <button type="button" role="menuitem" onClick={() => { setOpen(false); setAsking(true); }}>Ask Lapin…<kbd>F1</kbd></button>
+          <button type="button" role="menuitem" onClick={() => { setOpen(false); openOnboarding('role'); }}>Interactive missions…</button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); openLink('guide'); }}>User guide</button>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); startReport(true); }}>Report an issue…</button>
           {!own && hasKey && <button type="button" role="menuitem" onClick={() => { setOpen(false); setMessages(true); }}><span>Messages…</span>{unread > 0 && <span className="badge" data-no-i18n>{unread}</span>}</button>}
@@ -155,12 +159,14 @@ export function HelpMenu() {
           {own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openHttps(OWN_REPO); }} data-no-i18n>GitHub: aiarchitectlab/onebim</button>}
           {own && <button type="button" role="menuitem" onClick={() => { setOpen(false); openHttps('https://aiarchlab.com'); }} data-no-i18n>aiarchlab.com</button>}
           {isDesktop() && <button type="button" role="menuitem" onClick={() => { setOpen(false); void checkForUpdates(true); }}>Check for updates…</button>}
-          <div className="menu-langs" role="group" aria-label="Language" data-no-i18n>
-            {LANGUAGES.map((l) => (
-              <button key={l.id} type="button" role="menuitemradio" aria-checked={lang === l.id} className={lang === l.id ? 'on' : ''}
-                onClick={() => { setOpen(false); setLang(l.id); }}>{l.name}</button>
-            ))}
-          </div>
+          <MenuSub label="Language" toLeft>
+            <div className="menu-langs" role="group" aria-label="Language" data-no-i18n>
+              {LANGUAGES.map((l) => (
+                <button key={l.id} type="button" role="menuitemradio" aria-checked={lang === l.id} className={lang === l.id ? 'on' : ''}
+                  onClick={() => { setOpen(false); setLang(l.id); }}>{l.name}</button>
+              ))}
+            </div>
+          </MenuSub>
           <button type="button" role="menuitem" onClick={() => { setOpen(false); setAbout(true); }}>About Lapin…</button>
           <span className="muted small menu-note">Lapin {info?.engineVersion ?? ''}</span>
         </div>
@@ -217,6 +223,8 @@ function AboutDialog({ version, overrides, onClose }: { version?: string; overri
             ? <p>A classic BIM modeller built natively on IFC, by Ciuntuc BIM Studio.</p>
             : <p data-no-i18n>{brand.name} by AI ARCH LAB: BIM ภาษาไทยบน IFC. พัฒนาต่อจาก Lapin ของ Ciuntuc BIM Studio (โอเพนซอร์ส, MIT licence) · Based on Lapin by Ciuntuc BIM Studio.</p>}
           <p>Lapin is free and open source, under the MIT licence. <button type="button" className="link" onClick={() => openLink('source')}>Source code on GitHub</button></p>
+          <h4>This edition</h4>
+          <p className="muted small">{productInfo.name}: {modules.map((m) => m.name).join(' · ')}</p>
           <h4>Helpware</h4>
           <p>If Lapin helps you in any way, we encourage you, without obliging you, to help anyone who needs help, in any way you can: your time, your skills, a hand to someone nearby, a gift to people or a cause you trust.</p>
           <p className="muted small">Lapin asks nothing for itself and takes no donations. This is a request, not a condition of the licence.</p>

@@ -1,7 +1,7 @@
 ---
 title: Working on a CDE server
 order: 126
-summary: Sign in to your office's CDE server (Atrium Server, such as cde.lapinbim.com), clone a project, save your work to the server and get the others', keep the issues in step, and, as an administrator, manage the accounts and projects.
+summary: Sign in to your office's CDE server (Atrium Server, such as cde.lapinbim.com), clone a project, save your work to the server and get the others', keep the issues in step, connect an AI client with an access token, and, as an administrator, manage the accounts and projects.
 ---
 
 A CDE server keeps your office's projects in one place: every save with its author and note, the versions and issue tags, the members of each project and their roles, and the issues (BCF topics) everyone answers. Lapin works on it from the desktop app and from the browser. The company's server is at **cde.lapinbim.com**; your office can run its own, Atrium Server, which is free.
@@ -12,7 +12,7 @@ There is no sign-up: the server's administrator makes your account and gives you
 
 **In the browser**, open the server's address. The start screen asks for your e-mail address and password. Closing the tab signs you out; a reload keeps you signed in.
 
-**On the desktop**, open **File → Collaborate…**, choose **Server**, type the server's address and sign in. The app keeps the sign-in for next time on this computer, never in the project.
+**On the desktop**, open **File → Collaborate → Collaborate…**, choose **Server**, type the server's address and sign in. The app keeps the sign-in for next time on this computer, never in the project.
 
 Signed in, **Change password…** sets your own password; your other sign-ins end.
 
@@ -26,7 +26,7 @@ In the browser, the start screen lists the projects you are a member of, with yo
 
 A project's page shows the history of its main line (who saved, when, with what note, and the versions and issue tags made from each save), the branches in progress, the **Activity**, the **Members** and the **Rules**.
 
-On the desktop, File → Collaborate… shows the Publishing, the Activity and the Rules of the project the file is connected to.
+On the desktop, File → Collaborate → Collaborate… shows the Publishing, the Activity and the Rules of the project the file is connected to.
 
 An **issue tag** is an issue made with **Manage → Issue…** (its revision, status, container and files) once it is on the server; it never changes.
 
@@ -47,15 +47,15 @@ An **issue tag** is an issue made with **Manage → Issue…** (its revision, st
 
 **Clone to work on** brings the project with its history. In the browser the copy lives in the browser until you save to the server; on the desktop it goes into a new file.
 
-**File → Save to server…** asks for a short note and sends your work. The status bar says **Not saved to the server** while you have work the server has not got; a click opens Save to server.
+**File → Collaborate → Save to server…** asks for a short note and sends your work. The status bar says **Not saved to the server** while you have work the server has not got; a click opens Save to server.
 
-**File → Get latest from server** brings the others' saves into your project, in one undo step.
+**File → Collaborate → Get latest from server** brings the others' saves into your project, in one undo step.
 
 **Open latest, read-only** (in the browser) opens the latest save to look at: nothing goes back to the server. Each save can also be downloaded as a `.lapin` file or as its IFC copy.
 
 ## When two people saved
 
-If someone saved to the server after you last got the latest, your save is refused and **File → Collaborate…** opens on the choices:
+If someone saved to the server after you last got the latest, your save is refused and **File → Collaborate → Collaborate…** opens on the choices:
 
 - **Keep my work as a branch** sends your work to the server as a branch in progress (named after you and the date), then brings your project to the server's latest;
 - **Discard my commits** brings your project to the server's latest; your commits stay in the file as a local branch.
@@ -64,7 +64,7 @@ If someone saved to the server after you last got the latest, your save is refus
 
 On a project whose remote is a CDE server, **Manage → Model remarks…** shows the server's issues. The remarks in the project and the issues on the server are the same topics, kept in step by their GUID; the server is the reference, and the project keeps a copy for working offline.
 
-**Sync issues** (in the remarks dialog, and in File → Collaborate…) brings what changed on the server (in one undo step) and sends what you changed. Save to server and Get latest sync the issues too.
+**Sync issues** (in the remarks dialog) brings what changed on the server (in one undo step) and sends what you changed. In File → Collaborate → Collaborate… the button is **Sync issues and documents**: it syncs the project's [reference documents](reference-documents.md) with the server's as well (the server is the truth, field by field, the last writer wins; files above the project's size limit stay on the server and are fetched when opened). Save to server and Get latest sync the issues and the documents too. A server that does not keep reference documents says so and nothing else happens.
 
 - Two people who change **different fields** of one issue (one its priority, the other its description) both keep their change.
 - When two people change **the same field**, the last one to sync wins. The Activity shows who changed what.
@@ -93,10 +93,12 @@ When the project has IDS files, they are checked before **Submit for approval**,
 
 Issuing the same sheets again makes a **new revision of the same issue** (Issue… proposes it: **Issue as** → *New revision of issue #n*, the revision after its last): the submission and the issue tag carry that issue's number and identity, `#1 P01`, then `#1 P02`. Once the later revision is published, the earlier Published one moves to **Archived**. **New issue** gives the documents a new number instead.
 
-The project's page (in the browser) and **File → Collaborate… → Publishing** (on the desktop) have these tabs:
+The project's page (in the browser) and **File → Collaborate → Collaborate… → Publishing** (on the desktop) have these tabs:
 
-- **Containers**: the ISO 19650 containers. **WIP** lists the branches in progress; **Shared** and **Published** list the issue tags with their revision, status, date and who issued them (**approved** when it came through the queue); a Published revision goes to **Archived** when the same issue is published again at a later revision. **Open** opens a revision read-only; **.lapin** and **IFC** download it; **files** lists the issued files, each to download.
-- **Submissions**: the queue, waiting ones first (**Show** picks the others: approved, rejected, withdrawn, all). Click one for its commit, documents, files and **gate**: the open issues that stop it. An issue is tied to a document by a reference link `lapin-document:<document name>`, which Lapin sets itself: a remark made with a sheet in front is tied to that sheet's document, and the remarks dialog shows, adds and removes a remark's documents (see [Remarks](cde.md)); Sync issues sends the ties to the server. With no documents, every open issue of priority Critical stops it. Click an issue of the gate to open it in Model remarks (in the project open here, after Sync issues).
+- **Containers**: the ISO 19650 containers. **WIP** lists the branches in progress; **Shared** and **Published** list the issue tags with their revision, status, date and who issued them (**approved** when it came through the queue); a Published revision goes to **Archived** when the same issue is published again at a later revision. **Open** opens a revision read-only; **.lapin** and **IFC** download it; **files** lists the issued files, each to download. **Group by folder** (when the server keeps reference documents) groups each container's items by the folder of their role: the role is read from the ISO 19650 name (the sixth field, as in `PRJ-ORG-ZZ-XX-DR-A-0001`) and mapped through the project's folders and types settings (Documents → Folders and types); a role no folder takes goes under *Other*.
+- **Documents**: the project's reference documents, directly on the server, without opening the project (in the browser only, and only when the server keeps them). The same folders, list and form as Manage → Reference documents…: drop files to upload them, edit a document's fields, attach or take off files, supersede or withdraw one, tick the certificate's checklist. A file is read in the background (its text, an IFC's header): the document says *Reading the files…* until it is done. Viewers read; editors add and change the documents they added; owners change any document, delete one and edit the folders and types. If someone changed the document at the same time, it is read again and you make your change again.
+  - **A reference model** (an IFC or an .ifczip from a consultant, usually of type *Model*) shows what the server read of it (its schema, the program that wrote it, its IFC project) and, when the project's IDS rule is on, its **IDS** counts; **Show the report** lists each specification that fails with its elements. **Open in viewer** opens it in the browser's 3D, read-only, as a project of its own: every element as the file has it. **Open with the project** opens the project's latest commit read-only and links the model into it (a read-only link, drawn in the views and in 3D: see [Links](import-export.md#links)). Nothing goes back to the server; Save keeps a copy on this computer. A band at the bottom left names the model and opens its IDS report beside the 3D; × closes the band.
+- **Submissions**: the queue, waiting ones first (**Show** picks the others: approved, rejected, withdrawn, all). **Submit files…** (editors and owners) puts another program's drawings and models into the queue, as Lapin's own issues are: **Choose files…** picks PDFs, DXFs and IFCs from this computer, then the **Revision** (P01, C01…), the **Container** (Shared or Published) and its **Status** (S1–S7, or A1–A9, B1–B9, CR), the **Issue number** (empty for the next one) and a **Note**; **Submit for approval** sends them. The files keep their names. The issue they become names the project's latest commit on the server, so a project needs one save to the server first. They go through the same checks (a PDF's or DXF's sheets, every file's name against the naming rule, the IFCs through the project's IDS files, not the project's own model) and the same gate and approval; the queue marks them **Files from disk**. Click one for its commit, documents, files and **gate**: the open issues that stop it. An issue is tied to a document by a reference link `lapin-document:<document name>`, which Lapin sets itself: a remark made with a sheet in front is tied to that sheet's document, and the remarks dialog shows, adds and removes a remark's documents (see [Remarks](cde.md)); Sync issues sends the ties to the server. With no documents, every open issue of priority Critical stops it. Click an issue of the gate to open it in Model remarks (in the project open here, after Sync issues).
   - **Approve** (with an optional note) makes the issue tag; the resolved issues tied to the submission are closed. While the gate fails, only an owner approves, by ticking **Approve despite the open issues** and writing a note: the override and its note are kept.
   - **Reject** needs the reason.
   - **Withdraw** is the author's.
@@ -136,7 +138,7 @@ A server that offers it (Atrium Server from W6b, such as cde.lapinbim.com) also 
 
 **Publishing → IDS on the server** lists the project's IDS files with their title, version, IFC versions, how many specifications they hold, who uploaded them and when. Owners click **Add an IDS file…** (a file of the same name replaces the one there) and the trash button to delete one; the others read them. The download button keeps a copy; the list button opens the file's specifications: what each applies to and what it requires. A file that is not IDS 1.0 is refused, with every problem the server found and its line.
 
-With a project open (File → Collaborate…), owners also have **Put this project's IDS files on the server**: it lists the IDS files kept in the project (Manage → IDS…), each **New** on the server, **The same** as one there, or **Changed** (a file of that name on the server with other content). Tick the ones to send and click **Copy the ticked files**; replacing a changed one is confirmed first. Each file goes on its own: one the server refuses shows its problems beside it, and the others are still sent. The reverse, **Bring server IDS files into this project**, is in Manage → IDS… (editors and owners).
+With a project open (File → Collaborate → Collaborate…), owners also have **Put this project's IDS files on the server**: it lists the IDS files kept in the project (Manage → IDS…), each **New** on the server, **The same** as one there, or **Changed** (a file of that name on the server with other content). Tick the ones to send and click **Copy the ticked files**; replacing a changed one is confirmed first. Each file goes on its own: one the server refuses shows its problems beside it, and the others are still sent. The reverse, **Bring server IDS files into this project**, is in Manage → IDS… (editors and owners).
 
 **Rules** has two switches (owners change them): **IDS files run on every submission**, and **A failing IDS specification stops the approval** (off, a failing specification is a warning, not an error).
 
@@ -144,9 +146,31 @@ A submission's checks show an **IDS** group after the documents: how many specif
 
 Before submitting, **Manage → Issue… → On the CDE server → Check on the server** (editors and owners) saves the project to the server and runs its IDS files there on that commit, showing the same report; nothing is submitted. It is the server's own check, the one the approval counts; the project's own IDS files (Manage → IDS…) still run here before Submit for approval as they did.
 
+## Access tokens and AI clients
+
+An AI client (Claude Code, Claude Desktop, or another client of the Model Context Protocol) can work on the server's projects for you: read the reference documents and the text of their files, the register, the containers, the submissions and the issues, and, when you let it write, add and fill reference documents and comment on issues. It signs in with an **access token** you make; it then has your account's role in each project, no more. Approving and rejecting submissions, superseding, withdrawing or deleting documents, and changing rules or members stay with people.
+
+**Access tokens…** (beside **Change password…**, on the start screen in the browser, and in **File → Collaborate → Collaborate…** on the desktop, signed in to the server) lists your tokens: their name, their scope, when they expire and when they were last used. It shows when the server offers access tokens.
+
+To connect a client:
+
+1. Type a name for the client (*Claude Code on the office laptop*: it shows in the project's activity beside what the client changed), choose **Read only** or **Read and write**, choose how long the token lasts (30 days to a year; 90 days by default), and click **Make a token**.
+2. The token is shown **once**. Copy it with the button beside it; it cannot be shown again (if you lose it, revoke it and make another).
+3. Paste it **only into the AI client's configuration**: never into a chat, a document, an e-mail or a project. Whoever has it works on the server as you until it expires or you revoke it. For Claude Code, the panel shows the command to run, with the token in it:
+
+   ```sh
+   claude mcp add --transport http atrium https://cde.lapinbim.com/mcp --header "Authorization: Bearer <token>"
+   ```
+
+The trash button **revokes** a token: the clients using it stop at once. Changing your password, or an administrator disabling your account, revokes all your tokens too.
+
+What the client changes is in the project's **Activity** like any other change, marked as made through MCP with the token's name.
+
+Whatever a client reads is sent to its model provider: the documents' text, and the people that certificates, land-book extracts and contracts name. Use a client your office may send that to, give a token **Read only** unless it must write, and revoke it when the work is done. For developers, the tools and an example are in docs/mcp.md.
+
 ## Administration
 
-A server administrator sees **Administration** (on the start screen in the browser; **File → Collaborate… → Administration…** on the desktop):
+A server administrator sees **Administration** (on the start screen in the browser; **File → Collaborate → Collaborate… → Administration…** on the desktop):
 
 - **Accounts**: every account with its projects. **Create account** makes one from an e-mail address and a name; the server makes its first password and shows it **once**: copy it and give it to the person. **Disable** ends someone's sign-ins and refuses new ones (their projects, saves and issues stay); **Enable** lets them back. The key button sets a new password, shown once. **Administrator** gives or takes the administration (you cannot take your own, nor disable yourself).
 - **New project**: a project made on the server, with you as its owner. Open its page to add the members.

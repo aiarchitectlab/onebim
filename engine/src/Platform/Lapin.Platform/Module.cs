@@ -111,6 +111,97 @@ public interface IGeometryFilter
 }
 
 /// <summary>
+/// Quantities a module adds to another module's element (docs/plan-roof-panels.md §2.7: a roof's panels, accessories and
+/// fixings on the roof), worked out on every ask like the element's own: the sets come after its class's, so its schedules,
+/// formulas, IFC export and the estimate read them with the rest. Not asked for a reference or an external body.
+/// </summary>
+public interface IQuantityFilter
+{
+    IEnumerable<QuantitySet> Add(Entity entity, IModelView model);
+}
+
+/// <summary>
+/// Quantities of articles (docs/plan-roof-panels.md, stage S4): a set whose <see cref="QuantitySet.Part"/> is <see cref="Part"/>
+/// holds lines already counted in their article's unit — a quantity's name is the article's code (and, after <see cref="Variant"/>,
+/// what tells two lines of one code apart: the panels' length), its label the line's text, its value how many of the article's
+/// unit (pieces, boxes, rolls, m²). The estimate prices each by its code, whatever the element's type says.
+/// </summary>
+public static class ArticleQuantities
+{
+    public const string Part = "articles";
+    public const char Variant = '#';
+
+    /// <summary>A quantity's name for an article code and a variant.</summary>
+    public static string Name(string code, string? variant) => variant is { Length: > 0 } ? $"{code}{Variant}{variant}" : code;
+
+    /// <summary>The code and variant a quantity's name holds.</summary>
+    public static (string Code, string? Variant) Split(string name)
+    {
+        var i = name.IndexOf(Variant);
+        return i < 0 ? (name, null) : (name[..i], name[(i + 1)..]);
+    }
+}
+
+/// <summary>
+/// Quantities an element's author marked as its measures (a Studio part's parameters marked Length, Count, Area or Volume, R6 of
+/// docs/plan-forum-round-1126.md), worked out on every ask: a set of the whole element named <see cref="Set"/> (Lapin's own, never
+/// Qto_), each quantity named by its parameter's key. An article that measures the whole element by one of these measures reads
+/// the first of them before the element's own quantities (a fence of L = 20 m priced at 20 m, not by its volume); a count read
+/// from it is its value, not one an element.
+/// </summary>
+public static class AuthoredQuantities
+{
+    public const string Set = "Lapin_PartQuantities";
+
+    /// <summary>The measures a part's parameter may be marked as, and IFC's kind of quantity for each.</summary>
+    public static readonly (string Measure, string Kind)[] Measures = [("length", "LENGTH"), ("count", "COUNT"), ("area", "AREA"), ("volume", "VOLUME")];
+
+    /// <summary>IFC's kind of quantity for a measure; null when it is none of <see cref="Measures"/>.</summary>
+    public static string? KindOf(string? measure) => Measures.FirstOrDefault(x => x.Measure == measure).Kind;
+
+    /// <summary>Whether a set is one of these.</summary>
+    public static bool Is(QuantitySet s) => s.Name == Set && s.Part == null;
+
+    /// <summary>
+    /// The value an article's basis reads off such a set: a measure (length, count, area, volume, gross area, gross volume) its first
+    /// quantity of that kind, any other basis the quantity of that name; null when the set has none.
+    /// </summary>
+    public static double? Pick(QuantitySet s, string basis)
+    {
+        var kind = basis switch { "grossArea" => "AREA", "grossVolume" => "VOLUME", _ => KindOf(basis) };
+        if (kind != null) return s.Quantities.FirstOrDefault(q => q.Kind == kind)?.Value;
+        return basis is "weight" ? null : s.Quantities.FirstOrDefault(q => q.Name == basis)?.Value;
+    }
+}
+
+/// <summary>An article's price as the project's price lists give it: the list's row (its unit, its unit price in the list's currency, where it was taken from).</summary>
+public sealed record ArticlePrice(string Code, string Name, string Unit, double Price, string Currency, string List, bool Indicative,
+    string? Source = null, string? Url = null, string? Checked = null);
+
+/// <summary>
+/// The project's prices by article code (the cost module's price lists, in the order an estimate takes them), for a module
+/// that shows what its own lines cost (the roof panels' Cost tab). No service: the product has no cost module.
+/// </summary>
+public interface IArticlePrices
+{
+    ArticlePrice? Price(IModelView model, string code);
+}
+
+/// <summary>
+/// A price list a module ships as a template (docs/plan-roof-panels.md §2.7): indicative, with its date and sources on its
+/// rows, added to a project only when the user asks (Price lists → Templates). <see cref="Read"/> is the list as a
+/// <c>.lapinprices</c> file has it: <c>{format: "lapin-price-list", version: 1, name, currency, indicative: true, rows}</c>.
+/// </summary>
+public interface IPriceListTemplate
+{
+    string Id { get; }
+    string Name { get; }
+    /// <summary>What it is and where its prices come from, for the dialog.</summary>
+    string Note { get; }
+    JsonObject Read();
+}
+
+/// <summary>
 /// What the interface is told of an entity besides its attributes: derived, never stored, worked out each time the
 /// entity is sent (a roof window's frame on its slope, so its grips stand on its edges). A failure leaves the props as they are.
 /// </summary>
@@ -234,6 +325,8 @@ public interface ICommandContext : IEdit
     IQueryContext Query { get; }
     /// <summary>Where a result worked out in the background goes once ready (<see cref="IDeliveries"/>); null where there is no session.</summary>
     IDeliveries? Deliveries => null;
+    /// <summary>The bytes of the project's reference documents (docs/plan-cde-references.md): the project's file's, through the host; null where there is no session.</summary>
+    Cde.References.IReferenceFiles? ReferenceFiles => null;
 }
 
 public interface IQueryContext
@@ -267,6 +360,8 @@ public interface IQueryContext
     CancellationToken Cancellation => default;
     /// <summary>Where a result worked out in the background goes once ready (<see cref="IDeliveries"/>); null where there is no session.</summary>
     IDeliveries? Deliveries => null;
+    /// <summary>The bytes of the project's reference documents (docs/plan-cde-references.md): the project's file's, through the host; null where there is no session.</summary>
+    Cde.References.IReferenceFiles? ReferenceFiles => null;
     /// <summary>Something that went wrong beside a call that still went through (a module that could not draw on a sheet), for the reply to tell (<see cref="Session.TakeWarnings"/>).</summary>
     void Warn(string message) { }
 }
@@ -343,6 +438,12 @@ public sealed record GeometryPart
     /// <summary>The part's own properties (a roof timber member's role, section, grade and length), written to IFC as the set <see cref="PropertySet"/>.</summary>
     public IReadOnlyList<(string Name, string Value)>? Properties { get; init; }
     public string? PropertySet { get; init; }
+    /// <summary>The part's own numbers, written to IFC in its <see cref="PropertySet"/> beside <see cref="Properties"/> as measures (a roof panel's length and widths).</summary>
+    public IReadOnlyList<PartMeasure>? Measures { get; init; }
+    /// <summary>The part's own quantity sets, written to IFC on the part's element (a roof panel's Qto_CoveringBaseQuantities); never the element's quantities, so a takeoff counts them once.</summary>
+    public IReadOnlyList<QuantitySet>? Quantities { get; init; }
+    /// <summary>The group IFC assigns the part's element to (IfcGroup, IfcRelAssignsToGroup): a roof panel's roof plane.</summary>
+    public PartGroup? Group { get; init; }
     /// <summary>The type the part is an occurrence of (a wall's lintel made of a beam type, report #135): IFC types the part's element by it.</summary>
     public string? TypeId { get; init; }
     /// <summary>A part plans cut as any other although its class draws by its symbols there (a lift's shaft walls round its car's symbol).</summary>
@@ -390,6 +491,19 @@ public sealed record GeometryPart
     /// <summary>The part's render: a mesh drawn as one (shared vertices, smooth, crease edges), a solid tessellated face by face.</summary>
     public TriMesh Tessellate() => Mesh is { } m ? MeshShading.Smooth(m.Xyz, m.Tris) : Tessellator.Tessellate(Solid);
 }
+
+/// <summary>
+/// A number of a part's own for IFC: <see cref="Kind"/> LENGTH (m), AREA (m²), ANGLE (degrees, written in the file's radians),
+/// COUNT, or REAL.
+/// </summary>
+public sealed record PartMeasure(string Name, double Value, string Kind);
+
+/// <summary>
+/// A group of an element's parts in IFC (an IfcGroup the parts' elements are assigned to): its <see cref="Key"/> stable within the
+/// element (its GlobalId is derived from the element's and the key), its name, and its own property set.
+/// </summary>
+public sealed record PartGroup(string Key, string Name, string? Description = null, string? ObjectType = null, string? PropertySet = null,
+    IReadOnlyList<(string Name, string Value)>? Properties = null, IReadOnlyList<PartMeasure>? Measures = null);
 
 /// <summary>
 /// Where one copy of a part's <see cref="GeometryPart.Unit"/> stands (a

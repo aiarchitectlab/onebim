@@ -24,8 +24,12 @@ namespace Lapin.Ifc;
 /// <summary><paramref name="Voids"/>: the openings also as solid voids (IfcBuildingElementProxy PROVISIONFORVOID, decision 289), of the kinds asked, their sides moved by the offset; off by default.</summary>
 public sealed record IfcExportOptions(string Schema = "IFC4", string Detail = "group", string? Phase = null, string Geometry = "brep", double Tolerance = 0, IReadOnlySet<string>? Exclude = null,
     bool Voids = false, IReadOnlySet<string>? VoidKinds = null, double VoidOffset = 0, bool BonsaiStyles = false, bool Structural = false, bool TypePropertiesOnOccurrences = false, bool SpaceBrep = false,
-    bool AdvancedBrep = false)
+    bool AdvancedBrep = false, bool DerivedLoadBearing = false)
 {
+    // DerivedLoadBearing (docs/plan-structural-usage.md, the user's answer 4): Pset_…Common.LoadBearing also on the elements nothing
+    // says it of, from the views' rule (StructuralUsage.ForViews: a wall unless a partition, floors, roofs, columns, beams); off by
+    // default, on for a CDE issue and an IDS check. Off: written only where it is said (the Structural tick, a Pset value), and on
+    // columns, beams and footings (true), as before.
     // AdvancedBrep (docs/plan-studio-freeform.md §9, F2c): a body known exactly (IIfcExactBodies: a Studio cylinder, a revolution, a smooth
     // loft, a SubD's regular patches) written as an IfcAdvancedBrep on its exact surfaces instead of its facets. Off: every body as it was.
     // TypePropertiesOnOccurrences (issue #30, decision 667): the type's own properties (its property sets, not its instance defaults) also
@@ -672,7 +676,17 @@ public static partial class IfcExport
             var units = f.Add("IFCUNITASSIGNMENT", L(unitList));
             projectRef = f.Add("IFCPROJECT", Gid(project.Id), Null, S(project.Name), Null, Null, S(project.Str("longName")), S(project.Str("phase")), L(new[] { model }), units);
             // What the project itself holds that an import rebuilds: its location and its phases (the drafting standards and views stay in .lapin).
-            Define(projectRef, IntentOf(project, Gid(project.Id, IntentKey), null, only: ProjectIntent), Gid(project.Id, "intent-rel"));
+            // Its level datum's ±0.00 storey by the storey's GlobalId (decision 867), which an import finds again.
+            var intentProject = project;
+            if (project.Attrs[LevelDatum.Key] is System.Text.Json.Nodes.JsonObject ld && (string?)ld["zeroStorey"] is { } zs)
+            {
+                var pa = project.CloneAttrs();
+                var lo = (System.Text.Json.Nodes.JsonObject)ld.DeepClone();
+                lo["zeroStorey"] = GlobalIdOf(zs);
+                pa[LevelDatum.Key] = lo;
+                intentProject = project.With(attrs: pa);
+            }
+            Define(projectRef, IntentOf(intentProject, Gid(project.Id, IntentKey), null, only: ProjectIntent), Gid(project.Id, "intent-rel"));
             // The project's information and the user's own parameters of it (decision 340): Lapin's own set, never a Pset_.
             if (ProjectInformation() is { Count: > 0 } info)
                 Define(projectRef, f.Add("IFCPROPERTYSET", Gid(project.Id, ProjectInfoSetName), Null, S(ProjectInfoSetName), Null, L(info)), Gid(project.Id, ProjectInfoSetName + "-rel"));
@@ -696,7 +710,9 @@ public static partial class IfcExport
             refIdOf[siteRef] = siteId;
             var buildingPlace = Place(sitePlace, 0);
             var buildingId = building?.Id ?? project.Id;
-            buildingRef = f.Add("IFCBUILDING", building != null ? Gid(building.Id) : Gid(project.Id, "building"), Null, S(building?.Name ?? "Building"), Null, Null, buildingPlace, Null, Null, E("ELEMENT"), Null, Null, Null);
+            buildingRef = f.Add("IFCBUILDING", building != null ? Gid(building.Id) : Gid(project.Id, "building"), Null, S(building?.Name ?? "Building"), Null, Null, buildingPlace, Null, Null, E("ELEMENT"),
+                // ElevationOfRefHeight: the altitude of the model's 0 (decision 867), when the project has one.
+                Math.Abs(basePoint.Elevation) > 1e-12 ? R(basePoint.Elevation) : Null, Null, Null);
             f.Add("IFCRELAGGREGATES", SpatialGid(project.Id, IfcClass.RelAggregates, site?.Id ?? "", project.Id, "aggregates"), Null, Null, Null, projectRef, L(new[] { siteRef }));
             f.Add("IFCRELAGGREGATES", SpatialGid(siteId, IfcClass.RelAggregates, building?.Id ?? "", siteId, "aggregates/building"), Null, Null, Null, siteRef, L(new[] { buildingRef }));
 
@@ -1216,13 +1232,14 @@ public static partial class IfcExport
             if (parts.Count != 1 || Measure.Bounds(parts[0].Solid) is not { } box) return false;
             var w = b.Body;
             var y = Vec3.Cross(w.Axis, w.XDir);
-            var ends = new[] { w.Origin, w.Origin + w.Axis * w.Depth };
+            var sweep = w.Direction ?? w.Axis;
+            var ends = new[] { w.Origin, w.Origin + sweep * w.Depth };
             var corners = w.Profile.SelectMany(q => ends.Select(o => o + w.XDir * q.X + y * q.Y)).ToList();
             const double Tol = 1e-4;
             bool Near(double a, double c) => Math.Abs(a - c) <= Tol;
             if (!Near(corners.Min(c => c.X), box.Min.X) || !Near(corners.Max(c => c.X), box.Max.X) || !Near(corners.Min(c => c.Y), box.Min.Y)
                 || !Near(corners.Max(c => c.Y), box.Max.Y) || !Near(corners.Min(c => c.Z), box.Min.Z) || !Near(corners.Max(c => c.Z), box.Max.Z)) return false;
-            var volume = (Math.Abs(Polygon2.SignedArea(w.Profile)) - w.Holes.Sum(h => Math.Abs(Polygon2.SignedArea(h)))) * w.Depth;
+            var volume = (Math.Abs(Polygon2.SignedArea(w.Profile)) - w.Holes.Sum(h => Math.Abs(Polygon2.SignedArea(h)))) * w.Depth * Math.Abs(Vec3.Dot(sweep, w.Axis));
             return Math.Abs(volume - Measure.Volume(parts[0].Solid)) <= Math.Max(1e-9, volume * 1e-4);
         }
 
@@ -1254,6 +1271,12 @@ public static partial class IfcExport
             else profile = Arbitrary(null);
             var o = fr.Local(w.Origin);
             var position = f.Add("IFCAXIS2PLACEMENT3D", f.Add("IFCCARTESIANPOINT", L(new[] { R(o.X), R(o.Y), R(o.Z) })), Dir(fr.Turn(w.Axis)), Dir(fr.Turn(w.XDir)));
+            // Oblique (a leaning wall): its direction in the position's own axes (x its XDir, z its Axis).
+            if (w.Direction is { } d && Vec3.Cross(d, w.Axis).Length > 1e-9)
+            {
+                var yd = Vec3.Cross(w.Axis, w.XDir);
+                return f.Add("IFCEXTRUDEDAREASOLID", profile, position, f.Add("IFCDIRECTION", L(new[] { R(Vec3.Dot(d, w.XDir)), R(Vec3.Dot(d, yd)), R(Vec3.Dot(d, w.Axis)) })), R(w.Depth));
+            }
             return f.Add("IFCEXTRUDEDAREASOLID", profile, position, f.Add("IFCDIRECTION", "(0.,0.,1.)"), R(w.Depth));
         }
 
@@ -1598,8 +1621,9 @@ public static partial class IfcExport
         {
             if (materials.TryGetValue(id, out var r)) return r;
             var mat = m.Get(id);
-            // Its description (docs/plan-buildup-tags.md) as IfcMaterial.Description.
-            r = f.Add("IFCMATERIAL", S(mat?.Name ?? id), S(mat?.Str("description") is { Length: > 0 } d ? d : null), S(mat?.Str("category")));
+            // Its description (docs/plan-buildup-tags.md) as IfcMaterial.Description; its category, else the one its file gave (ifcCategory).
+            r = f.Add("IFCMATERIAL", S(mat?.Name ?? id), S(mat?.Str("description") is { Length: > 0 } d ? d : null),
+                S(mat?.Str("category") is { Length: > 0 } c ? c : mat?.Str("ifcCategory")));
             materials[id] = r;
             // Its Lapin id and attributes, so an import gives the material the same id and what refers to it (a column type, a zone) still finds it.
             if (mat != null) f.Add("IFCMATERIALPROPERTIES", S(IntentSetName), Null, L(IntentProperties(mat, null, [("LapinId", mat.Id)])), r);
@@ -1762,6 +1786,7 @@ public static partial class IfcExport
             // A roof's trusses: each an element assembly of its members (keys "truss:<n>:<role>:<i>"), under the roof.
             var trusses = new Dictionary<string, List<string>>();
             var panels = new Dictionary<string, List<string>>();
+            var groups = new Dictionary<string, (PartGroup Group, List<string> Members)>();
             var zones = (m.RelatingOf(e.Id, IfcClass.RelDefinesByType)?.Attrs["zones"] as JsonArray)?.OfType<JsonObject>().ToList() ?? [];
             for (var i = 0; i < parts.Count; i++)
             {
@@ -1777,8 +1802,18 @@ public static partial class IfcExport
                 // A part made of a type (a lintel of a beam type, report #135): typed by it, IfcBeamType LINTEL.
                 if (p.TypeId != null && m.Get(p.TypeId) is { } partType) TypeOf(partType, pk, r);
                 StandardSets(e, p, r, $"{e.Id}/{key}");
-                if (p.Properties is { Count: > 0 } own)
-                    Define(r, f.Add("IFCPROPERTYSET", Gid(e.Id, key + "/pset"), Null, S(p.PropertySet ?? "Lapin_Part"), Null, L(own.Select(x => Single(x.Name, Typed("IFCLABEL", S(x.Value)))).ToArray())), Gid(e.Id, key + "/pset-rel"));
+                if ((p.Properties?.Count ?? 0) + (p.Measures?.Count ?? 0) > 0)
+                    Define(r, f.Add("IFCPROPERTYSET", Gid(e.Id, key + "/pset"), Null, S(p.PropertySet ?? "Lapin_Part"), Null, L(PartProperties(p.Properties, p.Measures))), Gid(e.Id, key + "/pset-rel"));
+                // The part's own quantities (a roof panel's Qto_CoveringBaseQuantities), on its element only.
+                foreach (var set in p.Quantities ?? [])
+                    if (QuantityItems(set) is { Count: > 0 } q)
+                        Define(r, f.Add("IFCELEMENTQUANTITY", Gid(e.Id, key + "/qto/" + set.Name), Null, S(set.Name), Null, Null, L(q)), Gid(e.Id, key + "/qto-rel/" + set.Name));
+                // The group it is assigned to (a roof panel's plane): an IfcGroup per key, made once, its members in the parts' order.
+                if (p.Group is { } pg)
+                {
+                    if (!groups.TryGetValue(pg.Key, out var g)) groups[pg.Key] = g = (pg, []);
+                    g.Members.Add(r);
+                }
                 partRefs[(e.Id, key)] = r;
                 if (kind.Class == IfcClass.Roof && key.Split(':') is ["truss", var n, ..]) { if (!trusses.TryGetValue(n, out var members)) trusses[n] = members = []; members.Add(r); }
                 // A prefabricated timber-frame wall's members and boards (decision 245), by the panel they belong to.
@@ -1799,6 +1834,47 @@ public static partial class IfcExport
                 refs.Add(panel);
             }
             f.Add("IFCRELAGGREGATES", Gid(e.Id, "parts"), Null, Null, Null, parent, L(refs));
+            foreach (var (gkey, (pg, members)) in groups)
+            {
+                var group = f.Add("IFCGROUP", Gid(e.Id, "group:" + gkey), Null, S(pg.Name), S(pg.Description), S(pg.ObjectType));
+                f.Add("IFCRELASSIGNSTOGROUP", Gid(e.Id, "group-members:" + gkey), Null, Null, Null, L(members), Null, group);
+                if ((pg.Properties?.Count ?? 0) + (pg.Measures?.Count ?? 0) > 0)
+                    Define(group, f.Add("IFCPROPERTYSET", Gid(e.Id, "group:" + gkey + "/pset"), Null, S(pg.PropertySet ?? "Lapin_Group"), Null, L(PartProperties(pg.Properties, pg.Measures))), Gid(e.Id, "group:" + gkey + "/pset-rel"));
+            }
+        }
+
+        /// <summary>A part's (or a part group's) own properties: its texts as labels, its numbers as the measures they are (an angle in the file's radians).</summary>
+        string[] PartProperties(IReadOnlyList<(string Name, string Value)>? texts, IReadOnlyList<PartMeasure>? measures) =>
+        [
+            .. (texts ?? []).Select(x => Single(x.Name, Typed("IFCLABEL", S(x.Value)))),
+            .. (measures ?? []).Where(x => double.IsFinite(x.Value)).Select(x => Single(x.Name, x.Kind switch
+            {
+                "LENGTH" => Typed("IFCLENGTHMEASURE", R(x.Value)),
+                "AREA" => Typed("IFCAREAMEASURE", R(x.Value)),
+                "ANGLE" => Typed("IFCPLANEANGLEMEASURE", R(x.Value * Math.PI / 180)),
+                "COUNT" => Typed("IFCINTEGER", I((int)Math.Round(x.Value))),
+                _ => Typed("IFCREAL", R(x.Value)),
+            })),
+        ];
+
+        /// <summary>A quantity set's quantities as IFC's (a name met again numbered, as <see cref="Quantities"/> writes them).</summary>
+        List<string> QuantityItems(QuantitySet set)
+        {
+            var seen = new Dictionary<string, int>();
+            var q = new List<string>();
+            foreach (var x in set.Quantities.Where(x => double.IsFinite(x.Value)))
+            {
+                var n = seen[x.Name] = seen.GetValueOrDefault(x.Name) + 1;
+                var name = S(n == 1 ? x.Name : $"{x.Name} ({n})");
+                var cls = x.Kind switch
+                {
+                    "LENGTH" => "IFCQUANTITYLENGTH", "AREA" => "IFCQUANTITYAREA", "VOLUME" => "IFCQUANTITYVOLUME",
+                    "WEIGHT" => "IFCQUANTITYWEIGHT", "COUNT" => "IFCQUANTITYCOUNT", _ => null,
+                };
+                if (cls == null) continue;
+                q.Add(f.Add(cls, name, S(x.Label), Null, cls == "IFCQUANTITYCOUNT" ? I((int)Math.Round(x.Value)) : R(x.Value), Null));
+            }
+            return q;
         }
 
         /// <summary>What a part is in IFC: a lintel or ring beam a beam, a roof plane a roof slab, the timber members, the sole of a strip footing a footing; else a building element part named as Lapin names it.</summary>
@@ -1837,6 +1913,8 @@ public static partial class IfcExport
                 // A roof without framing: its deck (decision 329) and its covering, each an IfcSlab ROOF of its material.
                 (IfcClass.Roof, "covering") or (IfcClass.Roof, "deck") or (IfcClass.Roof, "dormer-roofs") => new(IfcClass.Slab, "ROOF", null),
                 (IfcClass.Roof, "roof-windows") => new(IfcClass.Window, "SKYLIGHT", null),
+                // A roof's panels (the roofpanels module, docs/plan-roof-panels.md §2.6): each a covering of the roof, in place of its covering slab.
+                (IfcClass.Roof, "panel") => new("IfcCovering", "ROOFING", null),
                 (IfcClass.Roof, "glass") => new("IfcPlate", "SHEET", null),
                 (IfcClass.Roof, "dormer-walls") => new(IfcClass.Wall, "NOTDEFINED", null),
                 (IfcClass.Roof, "timber" or "truss") => TimberKind(rest),
@@ -2088,7 +2166,11 @@ public static partial class IfcExport
             var common = new List<(string Name, string Value)>();
             // Its type's reference in the project (as Pset_…Common defines it, "type 'A-1'"): the type's mark (its own, else its category's rule's, decision 737), else its name (forum topic 177).
             if (type != null) common.Add(("Reference", Typed("IFCIDENTIFIER", S(MarkRules.TypeMark(m, type) is { Length: > 0 } typeMark ? typeMark : type.Name))));
-            if (kind.Class is IfcClass.Column or IfcClass.Beam or IfcClass.Footing) common.Add(("LoadBearing", Typed("IFCBOOLEAN", True)));
+            // LoadBearing: what the element or its type says (the Structural tick, a Pset value; the user's own value in the set still
+            // wins below), else true on columns, beams and footings as before, else the views' rule when asked (DerivedLoadBearing).
+            if (StructuralUsage.Classes.Contains(e.Class) && StructuralUsage.SaidOf(m, e) is { } said) common.Add(("LoadBearing", Typed("IFCBOOLEAN", said.Value ? True : False)));
+            else if (kind.Class is IfcClass.Column or IfcClass.Beam or IfcClass.Footing) common.Add(("LoadBearing", Typed("IFCBOOLEAN", True)));
+            else if (o.DerivedLoadBearing && StructuralUsage.Classes.Contains(e.Class)) common.Add(("LoadBearing", Typed("IFCBOOLEAN", StructuralUsage.ForViews(m, e).Effective ? True : False)));
             if (e.Class is IfcClass.Door or IfcClass.Window && type?.Attrs["spec"] is JsonObject spec && spec["isExternal"] is JsonValue ext && ext.TryGetValue<bool>(out var isExternal))
                 common.Add(("IsExternal", Typed("IFCBOOLEAN", isExternal ? True : False)));
             // A stair's numbers, as Pset_StairCommon names them: the whole stair's risers and treads, its riser and tread.
@@ -2318,7 +2400,7 @@ public static partial class IfcExport
         string IntentOf(Entity e, string gid, Kind? kind, IReadOnlyList<(string Name, string Value)>? extra = null, IReadOnlySet<string>? only = null) =>
             f.Add("IFCPROPERTYSET", gid, Null, S(IntentSetName), Null, L(IntentProperties(e, kind, extra, only)));
 
-        static readonly HashSet<string> ProjectIntent = ["location", "phases", "lengthUnit", "longName", "phase", "crs"];
+        static readonly HashSet<string> ProjectIntent = ["location", "phases", "lengthUnit", "longName", "phase", "crs", LevelDatum.Key];
 
         List<string> IntentProperties(Entity e, Kind? kind, IReadOnlyList<(string Name, string Value)>? extra = null, IReadOnlySet<string>? only = null)
         {
@@ -2361,20 +2443,7 @@ public static partial class IfcExport
             {
                 if (carried.Contains(set.Name)) continue;
                 var target = set.Part != null && grouped && partRefs.TryGetValue((e.Id, set.Part), out var pr) ? pr : entity;
-                var seen = new Dictionary<string, int>();
-                var q = new List<string>();
-                foreach (var x in set.Quantities.Where(x => double.IsFinite(x.Value)))
-                {
-                    var n = seen[x.Name] = seen.GetValueOrDefault(x.Name) + 1;
-                    var name = S(n == 1 ? x.Name : $"{x.Name} ({n})");
-                    var cls = x.Kind switch
-                    {
-                        "LENGTH" => "IFCQUANTITYLENGTH", "AREA" => "IFCQUANTITYAREA", "VOLUME" => "IFCQUANTITYVOLUME",
-                        "WEIGHT" => "IFCQUANTITYWEIGHT", "COUNT" => "IFCQUANTITYCOUNT", _ => null,
-                    };
-                    if (cls == null) continue;
-                    q.Add(f.Add(cls, name, S(x.Label), Null, cls == "IFCQUANTITYCOUNT" ? I((int)Math.Round(x.Value)) : R(x.Value), Null));
-                }
+                var q = QuantityItems(set);
                 if (q.Count == 0) continue;
                 var key = set.Part != null ? $"{set.Name}/{set.Part}" : set.Name;
                 var description = target == entity && set.Part != null ? set.PartName ?? set.Part : null;

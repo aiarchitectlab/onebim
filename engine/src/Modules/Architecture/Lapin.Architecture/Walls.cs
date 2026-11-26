@@ -12,7 +12,7 @@ namespace Lapin.Architecture;
 /// type's layers, laid by the wall's own IfcMaterialLayerSetUsage with the
 /// axis on the core. A wall without layers keeps its own thickness, centred.
 /// </summary>
-public static class Walls
+public static partial class Walls
 {
     public const double DefaultHeight = 3.0;
     public const double DefaultThickness = 0.25;
@@ -108,7 +108,11 @@ public static class Walls
         bool ExtendDown = false, bool ExtendUp = false);
 
     /// <summary>The wall's section, first layer to last; one centred band for a wall without layers.</summary>
-    public static IReadOnlyList<Band> Section(IModelView m, Entity wall)
+    /// <remarks>While a level is in force (<see cref="WallLean.At"/>), a leaning wall's bands as they are at that height.</remarks>
+    public static IReadOnlyList<Band> Section(IModelView m, Entity wall) => WallLean.Sectioned(m, wall, SectionPlumb(m, wall));
+
+    /// <summary>The wall's section as its layers lay it, whatever its lean.</summary>
+    public static IReadOnlyList<Band> SectionPlumb(IModelView m, Entity wall)
     {
         if (LayerSets.BandsOf(m, wall.Id) is { } bands) return bands.Select(b => new Band(b.From, b.To, b.Material, b.Name, b.Core, b.Index, b.Z0, b.Z1, b.Parts, b.Rank, b.ExtendDown, b.ExtendUp)).ToList();
         var t = wall.NumOrNull("thickness") ?? DefaultThickness;
@@ -142,7 +146,8 @@ public static class Walls
         var end = End(wall);
         if ((end - start).Length < MinLength || PathCurve.Of(wall) is { IsArc: true }) return null;
         var paths = services?.Get<IPathElements>();
-        var ends = Joins.WithOwnEnds(paths != null ? Joins.EndsOf(m, wall, paths, problems) : new (Vec2 Point, EndCut Cut)?[2], wall, Frame(wall, m));
+        var joined = paths != null ? Joins.EndsOf(m, wall, paths, problems) : new (Vec2 Point, EndCut Cut)?[2];
+        var ends = Joins.WithOwnEnds(joined, wall, Frame(wall, m));
         if (ends[0] is { } s) start = s.Point;
         if (ends[1] is { } e) end = e.Point;
         var startCut = ends[0]?.Cut ?? EndCut.Square;
@@ -161,9 +166,11 @@ public static class Walls
         Func<Entity, int?> ranked = x => cutOrder?.PriorityOf(x, m);
         var corners = paths != null ? LayerCorners(m, wall, paths, start, dir, length, bands, ranked) : new Func<Band, (double From, double To)>?[2];
         var crossings = paths != null ? LayerCrossings(m, wall, paths, start, dir, bands, ranked) : _ => [];
-        double BaseReach(int end, Band b, bool atFrom) =>
-            corners[end] is { } f ? (atFrom ? f(b).From : f(b).To) : At(end == 0 ? startCut : endCut, atFrom ? b.From : b.To) + (ends[end] == null ? LayerEnd(wall, b.Index, end, atFrom) : 0);
         var extents = LayerExtents.Effective(wall, m);
+        // A finish wrapped round the free ends (report #192): the other layers stop its thickness short there.
+        var wrap = WallEndWraps.Of(m, wall, bands, joined, corners, extents, length, (k, y) => k == 0 ? -At(startCut, y) : length + At(endCut, y), P);
+        double BaseReach(int end, Band b, bool atFrom) =>
+            corners[end] is { } f ? (atFrom ? f(b).From : f(b).To) : At(end == 0 ? startCut : endCut, atFrom ? b.From : b.To) + (ends[end] == null ? LayerEnd(wall, b.Index, end, atFrom) : 0) - (wrap?.Short(end, b) ?? 0);
         // A layer's own extent short of an end (forum topic 89); one past it is a piece of its own (ExtentPieces).
         double Reach(int end, Band b, bool atFrom) => BaseReach(end, b, atFrom) + LayerExtents.Short(extents, b.Index, end == 0 ? LayerExtents.Start : LayerExtents.End);
         var fills = paths != null ? new[] { NodeFill(m, wall, 0, ranked), NodeFill(m, wall, 1, ranked) } : new (int Band, Vec2[] Insert)?[2];
@@ -174,7 +181,7 @@ public static class Walls
                 P(-Reach(0, band, true), band.From), P(length + Reach(1, band, true), band.From),
                 P(length + Reach(1, band, false), band.To), P(-Reach(0, band, false), band.To),
             ];
-            return Pieces(WithFill(whole, band, fills), crossings(band), start, dir, length);
+            return Pieces(WithFill(whole, band, fills, wrap), [.. crossings(band).Select(g => g.Lines)], start, dir, length);
         }
         return new Layout(start, end, dir, length, z, HeightOf(m, wall), bands, Footprints, BaseReach);
     }
@@ -268,9 +275,16 @@ public static class Walls
         var problems = new List<string>();
         if (WallTop.Problem(m, wall) is { } topProblem) problems.Add(topProblem);
         if (WallTops.Problem(m, wall, services) is { } attachProblem) problems.Add(attachProblem);
+        // A leaning wall, or one joined to a leaning wall: lofted between its layouts at its base and its top (plan-wall-lean-taper, L1).
+        // One that has a lean stage 1 cannot build stands plumb and says why.
+        // A tapered wall (L2) likewise, one face plumb; one it cannot build keeps its thickness and says why.
+        if (WallLean.Problem(m, wall, services) is { } leanProblem) problems.Add(leanProblem);
+        if (WallTaper.Problem(m, wall, services) is { } taperProblem) problems.Add(taperProblem);
+        if (WallLean.Touches(m, wall) && LeanGeometry(wall, m, services, problems) is { } leaning) return leaning;
         var paths = services?.Get<IPathElements>();
         // Its ends where its joins put them; a free end cut at its own angle (startAngle, endAngle).
-        var ends = Joins.WithOwnEnds(paths != null ? Joins.EndsOf(m, wall, paths, problems) : new (Vec2 Point, EndCut Cut)?[2], wall, Frame(wall, m));
+        var joinedEnds = paths != null ? Joins.EndsOf(m, wall, paths, problems) : new (Vec2 Point, EndCut Cut)?[2];
+        var ends = Joins.WithOwnEnds(joinedEnds, wall, Frame(wall, m));
         if (ends[0] is { } s) start = s.Point;
         if (ends[1] is { } e) end = e.Point;
         var startCut = ends[0]?.Cut ?? EndCut.Square;
@@ -298,8 +312,10 @@ public static class Walls
         // A layer's own extents short of the wall's edges (forum topic 89): at its ends, over its base, under its top. Those past
         // them are pieces of their own (ExtentPieces), added after the cut priorities, which would take them back.
         var extents = LayerExtents.Effective(wall, m);
+        // A finish wrapped round the free ends (report #192): it caps each, the other layers stop its thickness short.
+        var wrap = WallEndWraps.Of(m, wall, bands, joinedEnds, corners, extents, length, (k, y) => k == 0 ? -At(startCut, y) : length + At(endCut, y), P);
         double Reach(int end, Band b, bool atFrom) =>
-            (corners[end] is { } f ? (atFrom ? f(b).From : f(b).To) : At(end == 0 ? startCut : endCut, atFrom ? b.From : b.To) + (ends[end] == null ? LayerEnd(wall, b.Index, end, atFrom) : 0))
+            (corners[end] is { } f ? (atFrom ? f(b).From : f(b).To) : At(end == 0 ? startCut : endCut, atFrom ? b.From : b.To) + (ends[end] == null ? LayerEnd(wall, b.Index, end, atFrom) : 0) - (wrap?.Short(end, b) ?? 0))
             + LayerExtents.Short(extents, b.Index, end == 0 ? LayerExtents.Start : LayerExtents.End);
 
         var zones = TypeOf(m, wall.Id) is { } type ? WallZones.Bands(WallZones.Of(type), height) : [];
@@ -336,12 +352,13 @@ public static class Walls
             }
             if (Measure.Volume(box) > 1e-9) lintelBoxes.Add((r.Piece.Lintel, r.Piece.Piece, box));
         }
-        GeometryPart Cut(GeometryPart part, double z0, double z1, bool isCore = false)
+        GeometryPart Cut(GeometryPart part, double z0, double z1, bool isCore = false, IReadOnlyList<(Solid Body, double Z0, double Z1)>? gapBodies = null)
         {
             if (booleans == null) return part;
             var reach = cutters.Where(c => c.o.Sill < z1 - 1e-9 && c.o.Sill + c.o.Height > z0 + 1e-9).Select(c => c.Box!)
                 .Concat(isCore ? lintelBoxes.Where(b => b.Lintel.Z0 < z1 - 1e-9 && b.Lintel.Z1 > z0 + 1e-9).Select(b => b.Box) : [])
                 .Concat(isCore ? intoCore.Where(b => b.Z0 - z < z1 - 1e-9 && b.Z1 - z > z0 + 1e-9).Select(b => b.Box) : [])
+                .Concat((gapBodies ?? []).Where(g => g.Z0 < z1 - 1e-9 && g.Z1 > z0 + 1e-9).Select(g => g.Body))
                 .ToList();
             if (reach.Count == 0) return part;
             try { return booleans.Difference(part.Solid, reach, part.Solid.Tag) is { } cut ? part with { Solid = cut } : part; }
@@ -367,13 +384,18 @@ public static class Walls
                 P(-Reach(0, band, true) - past0, band.From), P(length + Reach(1, band, true) + past1, band.From),
                 P(length + Reach(1, band, false) + past1, band.To), P(-Reach(0, band, false) - past0, band.To),
             ];
-            var planPieces = Pieces(WithFill(planWhole, band, fills), crossings(band), start, dir, length);
+            // A wall meeting this one lower than it (forum topic 268) interrupts the band only up to its top: the plan as the cut
+            // finds it, the body in one piece over it with the gap taken out under it (the whole height without the boolean library).
+            var crossing = crossings(band);
+            var planCut = PlanCutAbove(m, wall);
+            var planPieces = Pieces(WithFill(planWhole, band, fills, wrap), [.. crossing.Where(g => g.At(planCut)).Select(g => g.Lines)], start, dir, length);
+            List<(Solid Body, double Z0, double Z1)> gapBodies = booleans == null ? [] : [.. crossing.Where(g => !g.Whole)
+                .Select(g => (Body: GapBody(g, band, start, dir, length, z, built), g.Z0, g.Z1)).Where(g => g.Body != null).Select(g => (g.Body!, g.Z0, g.Z1))];
             // The band in the pieces the walls meeting this one leave of it (one, when none interrupts it).
-            var bandPieces = Pieces(WithFill(whole, band, fills), crossings(band), start, dir, length);
+            var bandPieces = Pieces(WithFill(whole, band, fills, wrap), [.. crossing.Where(g => g.Whole || booleans == null).Select(g => g.Lines)], start, dir, length);
             for (var pi = 0; pi < bandPieces.Count; pi++)
             {
                 var footprint = bandPieces[pi];
-                var planFootprint = planPieces.Count == bandPieces.Count ? planPieces[pi] : footprint;
                 // The core of a zoned wall is its zones, bottom to top; every other layer runs the whole height.
                 // Under a roof a layer going up to it follows it, its top extent moving the roof's cut (stage 3).
                 var (below, above) = HeightExtents(extents, band, height, roofTop != null);
@@ -385,12 +407,12 @@ public static class Walls
                         // The extents go with the first zone down and the last one up.
                         var (zz0, zz1) = (zb.Z0 - (zi == 0 ? below : 0), zb.Z1 + (zi == zones.Count - 1 && built <= height + 1e-9 ? above : 0));
                         if (zz1 - zz0 > 1e-6 && Prism.ExtrudeFootprint(footprint, z + zz0, zz1 - zz0, zb.Zone.Name) is { } piece)
-                            parts.Add(Cut(new GeometryPart(zb.Zone.Name, Materials.ColorOf(m, zb.Zone.Material), piece, zb.Zone.Material, "zone:" + zb.Zone.Key), zz0, zz1, isCore: true));
+                            parts.Add(Cut(new GeometryPart(zb.Zone.Name, Materials.ColorOf(m, zb.Zone.Material), piece, zb.Zone.Material, "zone:" + zb.Zone.Key), zz0, zz1, isCore: true, gapBodies));
                     }
                     // A gable rising over the storey: the masonry goes on above the ring beam.
                     if (built > height + 1e-9 && (zones.LastOrDefault(zb => zb.Zone.Role == "masonry") ?? zones[^1]).Zone is var gz
                         && Prism.ExtrudeFootprint(footprint, z + height, built + above - height, "gable") is { } gable)
-                        parts.Add(Cut(new GeometryPart($"Gable ({gz.Name})", Materials.ColorOf(m, gz.Material), gable, gz.Material, "zone:gable"), height, built + above, isCore: true));
+                        parts.Add(Cut(new GeometryPart($"Gable ({gz.Name})", Materials.ColorOf(m, gz.Material), gable, gz.Material, "zone:gable"), height, built + above, isCore: true, gapBodies));
                 }
                 // A layer of its own height (report #44): from its bottom to its top over the wall's base, never above the wall.
                 else if (LayerSpan(band, built, below, above) is var (lz0, lz1))
@@ -398,8 +420,11 @@ public static class Walls
                     // Its pieces in height (decision 264), each in its own material; one, of the layer's, for most layers.
                     foreach (var h in HeightPieces(m, band, lz0, lz1))
                         if (Prism.ExtrudeFootprint(footprint, z + h.Z0, h.Z1 - h.Z0, h.Name) is { } solid)
-                            parts.Add(Cut(new GeometryPart(h.Name, Materials.ColorOf(m, h.Material), solid, h.Material, $"layer:{band.Index}"), h.Z0, h.Z1, isCore: band.Core));
+                            parts.Add(Cut(new GeometryPart(h.Name, Materials.ColorOf(m, h.Material), solid, h.Material, $"layer:{band.Index}"), h.Z0, h.Z1, isCore: band.Core, gapBodies));
                 }
+            }
+            foreach (var planFootprint in planPieces)
+            {
                 // In plan, the band between the gaps the openings leave at the cut.
                 var x0 = planFootprint.Min(q => Vec2.Dot(q - start, dir));
                 var x1 = planFootprint.Max(q => Vec2.Dot(q - start, dir));
@@ -895,16 +920,22 @@ public static class Walls
         return (pool.OrderByDescending(b => b.To - b.From).First().Index, insert.ToArray());
     }
 
-    /// <summary>A band's outline (start From, end From, end To, start To) with a node's gap put in at either end (<see cref="NodeFill"/>).</summary>
-    static Vec2[] WithFill(Vec2[] whole, Band band, (int Band, Vec2[] Insert)?[] fills)
+    /// <summary>
+    /// A band's outline (start From, end From, end To, start To) with a node's gap put in at either end (<see cref="NodeFill"/>),
+    /// and the wrapping band's turned round the free ends it wraps (<see cref="WallEndWraps"/>).
+    /// </summary>
+    static Vec2[] WithFill(Vec2[] whole, Band band, (int Band, Vec2[] Insert)?[] fills, WallEndWraps.Wrapping? wrap = null)
     {
         if (fills[0] is not { } f0 || f0.Band != band.Index) f0 = default;
         if (fills[1] is not { } f1 || f1.Band != band.Index) f1 = default;
-        if (f0.Insert == null && f1.Insert == null) return whole;
-        var o = new List<Vec2> { whole[0], whole[1] };
+        var wrapped = wrap != null && wrap.Band == band.Index;
+        if (f0.Insert == null && f1.Insert == null && !wrapped) return whole;
+        var c = wrapped ? wrap!.Corners(whole, band) : [.. whole.Select(p => new List<Vec2> { p })];
+        var o = new List<Vec2>(c[0]);
+        o.AddRange(c[1]);
         if (f1.Insert != null) o.AddRange(f1.Insert);
-        o.Add(whole[2]);
-        o.Add(whole[3]);
+        o.AddRange(c[2]);
+        o.AddRange(c[3]);
         if (f0.Insert != null) o.AddRange(f0.Insert);
         // No point twice in a row (a band that is the whole core starts and ends the gap at its own corners).
         var clean = new List<Vec2>();
@@ -1008,15 +1039,20 @@ public static class Walls
     /// stops on (none when it gets through), mine interrupted where they pass. Per band, the pairs of lines
     /// between which nothing of it is built; none for a wall nothing meets so. Only straight walls interrupt.
     /// </summary>
-    static Func<Band, List<(Cutter A, Cutter B)>> LayerCrossings(IModelView m, Entity wall, IPathElements paths, Vec2 start, Vec2 dir, IReadOnlyList<Band> bands, Func<Entity, int?> ranked)
+    static Func<Band, List<Crossing>> LayerCrossings(IModelView m, Entity wall, IPathElements paths, Vec2 start, Vec2 dir, IReadOnlyList<Band> bands, Func<Entity, int?> ranked)
     {
-        var gaps = new Dictionary<int, List<(Cutter A, Cutter B)>>();
-        void Gap(Band b, Cutter a, Cutter c) { if (!gaps.TryGetValue(b.Index, out var l)) gaps[b.Index] = l = []; l.Add((a, c)); }
+        var gaps = new Dictionary<int, List<Crossing>>();
+        // The heights over my base the gap goes through: the whole wall, unless the other stands lower (forum topic 268).
+        var (z0, z1) = (double.NegativeInfinity, double.PositiveInfinity);
+        void Gap(Band b, Cutter a, Cutter c) { if (!gaps.TryGetValue(b.Index, out var l)) gaps[b.Index] = l = []; l.Add(new Crossing(a, c, z0, z1)); }
         var left = dir.Perp;
         const double eps = 1e-9;
         var nodes = new List<Vec2>();
+        var myBase = Spatial.Base(m, wall);
+        var myTop = myBase + HeightOf(m, wall);
         foreach (var r in Joins.Of(m, wall.Id))
         {
+            (z0, z1) = (double.NegativeInfinity, double.PositiveInfinity);
             var join = Joins.Compute(m, r, paths, out _);
             if (join == null || join.Kind is not (JoinKind.T or JoinKind.X)) continue;
             var side = r.Relating == wall.Id ? join.A : join.B;
@@ -1039,6 +1075,11 @@ public static class Walls
             if (Math.Abs(Vec2.Cross(dir, od)) < 1e-6) continue;
             var theirBands = Section(m, other);
             Cutter Theirs(double y) => new(os + od.Perp * y, od);
+            // A wall lower than mine (a parapet ending on a storey-high wall) or standing higher interrupts my layers only over its own height.
+            var theirBase = Spatial.Base(m, other);
+            var theirTop = theirBase + HeightOf(m, other);
+            if (theirBase > myBase + 1e-6) z0 = theirBase - myBase;
+            if (theirTop < myTop - 1e-6) z1 = theirTop - myBase;
             var elements = Math.Sign((ranked(wall) ?? 0) - (ranked(other) ?? 0));
             var through = join.Kind == JoinKind.T || CoreThrough(bands, theirBands, elements, true, side.RunsThrough) == true;
             if (through)
@@ -1078,6 +1119,37 @@ public static class Walls
             }
         }
         return band => gaps.TryGetValue(band.Index, out var l) ? l : [];
+    }
+
+    /// <summary>A gap in a layer between two lines of the plan, over the heights (over the wall's base) it goes through: all of them by default.</summary>
+    readonly record struct Crossing(Cutter A, Cutter B, double Z0, double Z1)
+    {
+        public bool Whole => double.IsNegativeInfinity(Z0) && double.IsPositiveInfinity(Z1);
+        public bool At(double z) => z >= Z0 - 1e-9 && z <= Z1 + 1e-9;
+        public (Cutter A, Cutter B) Lines => (A, B);
+    }
+
+    /// <summary>
+    /// What a gap takes out of a band where it does not go through the wall's whole height: the plan's region between its two
+    /// lines (across the band and a little past its faces), from its bottom to its top; taken out of the band's body by the
+    /// boolean library, so the layer stays one body over and under it.
+    /// </summary>
+    static Solid? GapBody(Crossing g, Band band, Vec2 start, Vec2 dir, double length, double z, double built)
+    {
+        var left = dir.Perp;
+        Vec2 P(double x, double y) => start + dir * x + left * y;
+        var far = length + 10;
+        IReadOnlyList<Vec2> region = [P(-10, band.From - 0.01), P(far, band.From - 0.01), P(far, band.To + 0.01), P(-10, band.To + 0.01)];
+        var mid = start + left * ((band.From + band.To) / 2);
+        var (behind, ahead) = (mid - dir * (length + 20), mid + dir * (2 * length + 20));
+        static double Side(Cutter c, Vec2 q) => Vec2.Cross(c.Dir, q - c.Point);
+        double Along(Cutter c) => Vec2.Cross(c.Point - mid, c.Dir) / Vec2.Cross(dir, c.Dir);
+        var (first, second) = Along(g.A) <= Along(g.B) ? (g.A, g.B) : (g.B, g.A);
+        var (sa, sb) = (Math.Sign(Side(first, behind)), Math.Sign(Side(second, ahead)));
+        region = Polygon2.ClipHalf(Polygon2.ClipHalf(region, q => -Side(first, q) * sa), q => -Side(second, q) * sb);
+        if (region.Count < 3 || Math.Abs(Polygon2.SignedArea(region)) < 1e-8) return null;
+        var (lo, hi) = (double.IsNegativeInfinity(g.Z0) ? -100 : g.Z0, double.IsPositiveInfinity(g.Z1) ? built + 100 : g.Z1);
+        return hi - lo > 1e-6 ? Prism.ExtrudeFootprint(region, z + lo, hi - lo, "gap") : null;
     }
 
     /// <summary>
@@ -1180,6 +1252,8 @@ public static class Walls
         var problems = new List<string>();
         if (WallTop.Problem(m, wall) is { } topProblem) problems.Add(topProblem);
         if (WallTops.Problem(m, wall, services) is { } attachProblem) problems.Add(attachProblem);
+        if (WallLean.Problem(m, wall, services) is { } leanProblem) problems.Add(leanProblem);
+        if (WallTaper.Problem(m, wall, services) is { } taperProblem) problems.Add(taperProblem);
         var paths = services?.Get<IPathElements>();
         var ends = paths != null ? Joins.EndsOf(m, wall, paths, problems) : new (Vec2 Point, EndCut Cut)?[2];
         var length = c.Length;
@@ -1353,9 +1427,13 @@ public static class Walls
         var bands = Section(m, wall);
         double y0 = bands.Min(b => b.From), y1 = bands.Max(b => b.To);
         var z = Spatial.Base(m, wall);
+        // A tapered wall's is its section lofted from its base to its top.
+        if (WallTaper.Of(m, wall) is { } taper) return WallTaper.Envelope(taper, start, end, z);
         var c = PathCurve.Of(wall);
         IReadOnlyList<Vec2> fp = c.IsArc ? c.Band(_ => 0, _ => c.Length, y0, y1) : [start + left * y0, end + left * y0, end + left * y1, start + left * y1];
-        return Prism.ExtrudeFootprint(fp, z, HeightOf(m, wall), "wall");
+        var body = Prism.ExtrudeFootprint(fp, z, HeightOf(m, wall), "wall");
+        // A leaning wall's leans with it.
+        return body != null && WallLean.Of(m, wall) is { } lean ? WallLean.Mapped(body, WallLean.Map(lean, start, (end - start).Normalized(), z)) : body;
     }
 
     /// <summary>
@@ -1444,11 +1522,16 @@ public static class Walls
         var height = HeightOf(m, wall);
         var bands = Section(m, wall);
         var width = bands.Max(b => b.To) - bands.Min(b => b.From);
+        // A tapered wall's width is its mean thickness (IFC's "nominal or average"), each layer's its normal one, the tapering layer's its mean.
+        var taper = WallTaper.Of(m, wall);
+        if (taper != null) width = taper.MeanThickness;
         // A layer interrupted by a wall crossing it is several parts of one key: measured together.
         var volumes = geometry.Parts.GroupBy(p => p.Key ?? p.Name).ToDictionary(g => g.Key, g => g.Sum(p => Measure.Volume(p.Solid)));
         var net = volumes.Values.Sum();
         // Gross as built (audit 22.11.2026): up to the top the roofs give it (a gable included), not the eave height alone.
         var grossSide = length * MeanTop(m, wall, height, width);
+        // A leaning wall's faces are longer than its height by 1/cosθ (its height stays vertical, its width the normal one).
+        if (WallLean.Of(m, wall) is { } lean) grossSide /= lean.Cos;
         yield return new QuantitySet("Qto_WallBaseQuantities",
         [
             new("Length", length, "LENGTH"),
@@ -1483,7 +1566,7 @@ public static class Walls
         {
             if (band.Core && zones.Count > 0) continue;
             if (!volumes.TryGetValue($"layer:{band.Index}", out var v)) continue;
-            var t = band.To - band.From;
+            var t = taper != null && bands.ToList().IndexOf(band) is var bi and >= 0 ? taper.Width(bi) : band.To - band.From;
             // A layer of several materials in its height (decision 264): a set per material, its own pieces measured.
             var byMaterial = geometry.Parts.Where(p => p.Key == $"layer:{band.Index}").GroupBy(p => p.Material).ToList();
             foreach (var g in byMaterial)

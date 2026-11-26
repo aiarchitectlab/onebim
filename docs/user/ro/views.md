@@ -121,6 +121,8 @@ Cu **Alignment** *view* modelul continuă de la o față la alta; cu *layer* st�
 
 Până alegi una, hașura de fațadă a unui material vine **după nume**, ca hașura lui de secțiune, iar **Gestionare → Materials** arată care (*după nume (BRICK)*): cărămida și zidăria BRICK, piatra STONE, lemnul BOARDS, placările metalice VERTICAL, țigla, șindrila și ardezia HORIZONTAL, plăcile ceramice TILES, pietrișul și pământul ca în secțiuni. Izolația, membranele, tencuiala, vopseaua și betonul nu primesc niciuna: BATT-ul izolației e o hașură de secțiune, nu se propune niciodată pentru o suprafață (aleasă de mână, se desenează). Alege **none** ca să nu se deseneze nimic. O secțiune în trepte, curbă sau după un element hașurează fiecare bucată a ei între capetele bucății și îi desenează la fel umbrele de soare. **Surface hatches** din stilul vederii (**Vedere → View settings**, **Gestionare → View styles**) le oprește pentru vederi întregi: pornit în Architectural, oprit în Structural, MEP și Coordination. Planurile își păstrează hașurile lor de secțiune și de plan. Învelitoarea unui acoperiș se hașurează după materialul ei, deci un acoperiș de țiglă își arată asizele pe pantele pe care vederea le vede și niciuna pe cele întoarse.
 
+Planurile hașurează la fel plăcile pe care le văd: fața de sus a unei plăci de sub planul de secționare ia modelul de suprafață al stratului ei de sus, sub pereți și ce taie planul, pe layerul FLOOR-HATCH. **Hașurile suprafeței planșeelor** din stilul vederii le opresc pentru vederi întregi: pornite în Architectural, oprite în Structural, MEP și Coordination, și oprite în fiecare stil al unui proiect făcut înainte. Vezi [Plăci](floors-roofs.md).
+
 ![Fațada de sud, cu cărămida aparentă hașurată după numele ei](shots/elevation-surface-hatch.webp)
 
 ![O secțiune în trepte care hașurează zidul de grădină văzut de ultima ei bucată](shots/section-developed-surface-hatch.webp)
@@ -134,6 +136,14 @@ Până alegi una, hașura de fațadă a unui material vine **după nume**, ca ha
 Dublu clic pe **3D** deschide vederea 3D. Trage cu butonul stâng ca să te rotești în jurul modelului. Planul-cheie din dreapta sus arată de unde privești. **Plan**, **Persp** și **Încadrează** schimbă camera. Ca să păstrezi o cameră, duplică vederea 3D.
 
 Rotița mouse-ului face zoom spre punctul modelului de sub cursor, care rămâne pe loc pe ecran; zoomul se oprește chiar înainte de punct și nu trece niciodată prin el. O tragere cu butonul stâng rotește vederea în jurul mijlocului elementelor selectate, care rămâne pe loc pe ecran, ca să le vezi din toate părțile; fără nimic selectat se rotește în jurul punctului modelului de sub cursor de unde începe tragerea, iar în jurul mijlocului vederii dacă sub cursor nu e nimic. **Vedere → Zoom la cursor** și **Vedere → Rotire în jurul selecției** le opresc pe fiecare (rotița face atunci zoom spre mijlocul vederii, iar vederea se rotește în jurul mijlocului ei), la fel și casetele din proprietățile unei vederi 3D. Alegerea se păstrează pe acest calculator.
+
+### Un mouse 3D (3Dconnexion SpaceMouse)
+
+Lapin nu citește încă mouse-urile 3D: nu are intrare pentru cele șase axe ale dispozitivului, deci nu poate roti sau deplasa vederea cu el. Ce merge azi vine din driverul **3DxWare**, care face dispozitivul să se poarte ca o rotiță de mouse și ca o tastatură.
+
+- **Împingerea și tragerea** ajung în Lapin ca rotiri ale rotiței mouse-ului, deci fac zoom. Lapin limitează cât poate mări o rafală de evenimente de rotiță, așa că o împingere puternică nu aruncă vederea peste model. Înclinarea, răsucirea și alunecarea laterală nu fac nimic în Lapin.
+- **Butoanele.** În setările 3DxWare poți da unui buton o apăsare de tastă. Tastele Lapin pentru vedere sunt: <kbd>+</kbd> și <kbd>-</kbd> (zoom înainte și înapoi), <kbd>Shift</kbd> <kbd>Z</kbd> (zoom pe selecție) și literele <kbd>ZE</kbd> (încadrează tot, ca butonul **Fit**; sunt două litere tastate, deci butonul trebuie să le trimită una după alta și merge doar cât timp nici un câmp sau instrument nu așteaptă text). Pentru **Sus (Top)**, **Față (Front)** sau o vedere izometrică nu există încă o tastă: le alegi cu butonul **PLAN** sau cu pozițiile busolei din planul-cheie. Plimbarea se pornește din meniul clic dreapta al unei camere, **Walk in 3D** (în plimbare, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>, <kbd>Shift</kbd> și <kbd>Space</kbd> sunt tastele ei).
+- **Încă neacceptate:** rotirea, deplasarea și înclinarea din dispozitiv, butoanele lui proprii și setările de sensibilitate sau axe. Așteaptă un tester cu dispozitiv: dacă ai un SpaceMouse, scrie-ne pe forum (subiectul 261) sistemul de operare, modelul și versiunea 3DxWare.
 
 ### Raze X, sau o vedere transparentă
 

@@ -5,8 +5,9 @@
  */
 
 import { useDialogLayer } from './shell/Dialog';
+import { create } from 'zustand';
 import { Fragment, lazy, Suspense, useEffect, useRef, useState } from 'react';
-import { AppWindow, Bot, Box, Columns2, Ruler, FolderTree, Layers, ListTree, PanelLeftOpen, PanelRightOpen, Rows2, SlidersHorizontal, X } from 'lucide-react';
+import { AppWindow, Bot, Box, Columns2, Footprints, Ruler, FolderTree, Layers, ListTree, PanelLeftOpen, PanelRightOpen, Rows2, SlidersHorizontal, Volume2, X } from 'lucide-react';
 import { beginPanelDrag, DockOverlay, FloatingPanel, useKeepFloatsInWindow } from './shell/PanelDock';
 import { closeOverlay, columns, panelsOn, setPanelWidth, setStackRatio, type PanelId, type Side, showOverlay, showPropsTab, syncToolPropsTab, togglePanel, usePanels, type PanelTab } from './app/panels';
 import { assistantAvailable } from './assistant/available';
@@ -19,14 +20,20 @@ import { PaneContext } from './app/pane';
 import { openViewWindow } from './app/windows';
 import { beginTabDrag, DROP_LABELS, tabToWindow, useTabDrag } from './app/tabDrag';
 import { openContextMenu, type MenuItem } from './shell/ContextMenu';
-import { t as tr } from './i18n';
+import { t as tr, useLang } from './i18n';
+import { brand } from './platform/brand';
+import { installTruncationTitles } from './shell/truncTitles';
 import { resolveTheme, setPrefs, usePrefs } from './app/prefs';
 import { CursorCoords } from './shell/CursorCoords';
 import { NavStyleMenu } from './shell/NavStyleMenu';
 import { CdeServerStatus } from './shell/CdeStart';
+import { ReferencesStatus } from './shell/ReferencesStatus';
 import { watchLocation } from './app/location';
 import { useShortcuts } from './app/keys';
-import { useSession } from './engine/session';
+import { useXrayPeekKeys } from './app/xrayPeek';
+import { activeStorey, useSession } from './engine/session';
+import { useWalk } from './viewport/walk';
+import { toggleQuickWalk } from './app/quickWalk';
 import { SectionIcon } from './icons';
 import { unitLabel, useStandards } from './engine/unitsStore';
 import { openStandards } from './modules/core/standardsTab';
@@ -58,6 +65,13 @@ import { connect } from './engine/session';
 import { AskBox } from './shell/AskBox';
 import { setBrowserFindHooks, useBrowserFind, viewIdOfTab, viewSheetItems } from './shell/browserFind';
 import { openPlaceOnSheet, PlaceOnSheetDialog } from './shell/PlaceOnSheetDialog';
+import { PartBoundary } from './shell/PartBoundary';
+import { OnboardingMissions } from './shell/OnboardingMissions';
+import { useOnboarding } from './app/onboarding';
+import { PieMenu, usePiePointer } from './shell/PieMenu';
+import { HealthRadar } from './shell/HealthRadar';
+import { BuildReplay } from './shell/BuildReplay';
+import { toggleTactileSounds } from './app/sounds';
 
 // Find in project browser (forum topic 207): the browser unfolded (a floating one is always open), the view selected, and
 // the browser asked to show its row; Place on sheet… opens its picker.
@@ -112,6 +126,8 @@ function StatusBar() {
   const elements = useSession((s) => s.render.size);
   const doc = useSession((s) => s.doc);
   const parts = useInterface((s) => s.parts);
+  const soundsOn = usePrefs((p) => p.tactileSounds);
+  const healthOn = usePrefs((p) => p.healthRadar);
   const facts = useHudFacts();
   const merged = parts.commandLine === 'status';
   return (
@@ -123,8 +139,14 @@ function StatusBar() {
       {parts.hud === 'status' && <span className="status-hud">{facts.level} <span className="accent">{facts.elevation}</span> · {facts.view}</span>}
       <CursorCoords />
       <NavStyleMenu />
+      {healthOn && <HealthRadar />}
+      {/* Shown only while the sounds are on (Preferences → General → Flow extras): a click mutes them. */}
+      {soundsOn && <button type="button" className="status-link sound-toggle" data-testid="sound-toggle"
+        title="Tactile sounds on: click to mute" aria-label="Mute tactile sounds"
+        onClick={toggleTactileSounds}><Volume2 size={12} /></button>}
       <span className="status-file" title={`${projectTitle(doc?.path)}${doc?.dirty ? ' · unsaved' : ''}`}>{projectTitle(doc?.path)}{doc?.dirty ? ' · unsaved' : ''}</span>
       <CdeServerStatus />
+      <ReferencesStatus />
       <span>{elements} elements</span>
       <button type="button" className="status-link" title="The project's units: change them in Drafting standards → Project" onClick={() => openStandards('project')}>Units: {unitLabel(units) || units}</button>
       {!merged && <><span className="grow" /><span className="mods" title={`${productInfo.name} · ${modules.map((m) => m.id).join(' · ')}`}>{productInfo.name} · {modules.map((m) => m.id).join(' · ')}</span></>}
@@ -228,9 +250,35 @@ function PaneTabs({ i }: { i: number }) {
   );
 }
 
-/** 3D, Section and Measure in one click, before the view tabs (a tester's request, decision 458). */
+/** Whether the split open is the one the Plan + 3D button opened: only that one it closes, and only for it it is lit. */
+const useQuickSplit = create<{ on: boolean }>(() => ({ on: false }));
+useUi.subscribe((s) => { if (s.panes.length < 2 && useQuickSplit.getState().on) useQuickSplit.setState({ on: false }); });
+
+/** 1-click live Plan + 3D split view; a second click closes it. A split the user made otherwise is left alone. */
+function togglePlan3dSplit(): void {
+  const ui = useUi.getState();
+  if (ui.panes.length >= 2) {
+    if (useQuickSplit.getState().on) { closePane(1); useQuickSplit.setState({ on: false }); }
+    return;
+  }
+  const storeyId = ui.storeyId ?? activeStorey()?.id ?? null;
+  splitPane('row');
+  openTab(0, { view: 'plan', storeyId, planViewId: ui.planViewId, drawingViewId: null, sheetId: null, scheduleId: null, view3dId: null });
+  openTab(1, { view: '3d', storeyId: null, planViewId: null, drawingViewId: null, sheetId: null, scheduleId: null, view3dId: ui.view3dId });
+  useQuickSplit.setState({ on: true });
+}
+
+/** 3D, Section, Measure, Walk and Plan+3D in one click, before the view tabs (decision 458; plan-ux-game-like.md). */
 function QuickViews() {
   const tool = useUi((s) => s.tool);
+  const walking = useWalk((s) => s.start !== null);
+  const split = useUi((s) => s.panes.length >= 2);
+  const ours = useQuickSplit((s) => s.on);
+  const splitOn = split && ours;
+  const role = useUi((s) => s.windowRole);
+  const missionsOpen = useOnboarding((s) => s.open);
+  // The missions that teach Walk and Plan + 3D show the buttons while they are open.
+  const extras = usePrefs((p) => p.quickWalkSplit) || missionsOpen;
   const quick: { id: string; icon: ToolDef['icon']; hint: string }[] = [
     { id: 'view.3d', icon: Box, hint: '3D' },
     { id: 'view.section', icon: SectionIcon, hint: 'Section' },
@@ -246,6 +294,13 @@ function QuickViews() {
             title={def.shortcut ? `${tr(hint)} (${def.shortcut})` : tr(hint)} onClick={() => activate(def)}><Icon size={14} /></button>
         );
       })}
+      {/* A Flow extra (Preferences → General): off, the quick views are as they were. */}
+      {extras && <button type="button" className={`icon mini${walking ? ' on' : ''}`} data-testid="quick-view.walk" aria-label={tr('Walk in 3D')}
+        title={tr('Walk in 3D (WASD, F to fly)')} onClick={toggleQuickWalk}><Footprints size={14} /></button>}
+      {extras && role === 'main' && !isGuest() && (
+        <button type="button" className={`icon mini${splitOn ? ' on' : ''}`} data-testid="quick-view.split" aria-label={tr('Plan + 3D')} disabled={split && !ours}
+          title={splitOn ? tr('Close split view') : tr('Plan + 3D live split view')} onClick={togglePlan3dSplit}><Columns2 size={14} /></button>
+      )}
     </div>
   );
 }
@@ -280,7 +335,7 @@ function PaneBody({ i }: { i: number }) {
           {active && !isTableView(view) && <ViewportHud />}
           {active && !isTableView(view) && <SelectionCard />}
           {active && !isTableView(view) && <TabHoldList />}
-          {active && !isTableView(view) && overlays().map((Overlay, k) => <Overlay key={k} />)}
+          {active && !isTableView(view) && overlays().map((Overlay, k) => <PartBoundary key={k} part={Overlay.displayName ?? Overlay.name ?? 'Overlay'} overlay><Overlay /></PartBoundary>)}
           {active && error && <div className="error" role="alert" onClick={() => useSession.setState({ error: null })}>{error}</div>}
           {active && <Notice />}
         </div>
@@ -488,10 +543,13 @@ function Workspace() {
       <DockOverlay />
       <StatusBar />
       <TabDragOverlay />
-      {Dialog && <Dialog />}
+      {Dialog && <PartBoundary part={`Dialog ${open}`} overlay onClose={() => useUi.setState({ dialog: null })} resetKey={open}><Dialog /></PartBoundary>}
       <GuestBar />
       <PresenceReporter />
       <AskBox />
+      <PartBoundary part="Missions" overlay><OnboardingMissions /></PartBoundary>
+      <PartBoundary part="Radial menu" overlay><PieMenu /></PartBoundary>
+      <PartBoundary part="Build replay" overlay><BuildReplay /></PartBoundary>
       {backgrounds().map((B, i) => <B key={i} />)}
     </div>
   );
@@ -504,8 +562,11 @@ function ViewWindow() {
   return (
     <div className="workspace view-window">
       <main className="views"><PaneBody i={0} /></main>
-      {Dialog && <Dialog />}
+      {Dialog && <PartBoundary part={`Dialog ${open}`} overlay onClose={() => useUi.setState({ dialog: null })} resetKey={open}><Dialog /></PartBoundary>}
       <AskBox />
+      <PartBoundary part="Missions" overlay><OnboardingMissions /></PartBoundary>
+      <PartBoundary part="Radial menu" overlay><PieMenu /></PartBoundary>
+      <PartBoundary part="Build replay" overlay><BuildReplay /></PartBoundary>
       {backgrounds().map((B, i) => <B key={i} />)}
     </div>
   );
@@ -515,8 +576,10 @@ export function App() {
   const screen = useUi((s) => s.screen);
   const theme = useUi((s) => s.theme);
   useShortcuts();
+  useXrayPeekKeys();
+  usePiePointer();
   useDialogLayer();
-  useEffect(() => { watchLocation(); }, []);
+  useEffect(() => { watchLocation(); installTruncationTitles(); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; }, [theme]);
   // The theme chosen is kept for the next start (a tester's report: dark came back light every time); a system choice follows the system.
   useEffect(() => { const p = usePrefs.getState(); if (p.theme !== 'system' && p.theme !== theme) setPrefs({ theme }); }, [theme]);
@@ -530,6 +593,14 @@ export function App() {
     return () => mq?.removeEventListener?.('change', apply);
   }, [themeChoice]);
   const role = useUi((s) => s.windowRole);
+  // The window's title names the project, with a dot while it holds unsaved changes (forum topic 257): "Name • — Lapin".
+  const doc = useSession((s) => s.doc);
+  const lang = useLang((s) => s.lang);
+  useEffect(() => {
+    const title = screen === 'start' || !doc ? brand.name : `${doc.path ? projectTitle(doc.path) : tr('New project')}${doc.dirty ? ' •' : ''} — ${brand.name}`;
+    document.title = title;
+    if (isDesktop()) void import('@tauri-apps/api/window').then((w) => w.getCurrentWindow().setTitle(title)).catch(() => undefined);
+  }, [screen, doc, doc?.path, doc?.dirty, lang]);
   if (screen === 'join') return <JoinGate onJoin={() => void connect()} />;
   return <>{screen === 'start' ? <StartScreen /> : role === 'view' ? <ViewWindow /> : <Workspace />}<EngineNotice /><BusyOverlay /><ContextMenuHost /></>;
 }

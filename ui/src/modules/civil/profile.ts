@@ -18,6 +18,17 @@ export interface ProfilePoint {
 
 export type Series = [number, number | null][];
 
+/** The engine leaves `existing` and `design` out when there is no terrain under the line: both are then empty series, so every plot can draw and read them. */
+export function withGround<T extends { existing?: Series; design?: Series }>(r: T): T & { existing: Series; design: Series } {
+  return { ...r, existing: Array.isArray(r.existing) ? r.existing : [], design: Array.isArray(r.design) ? r.design : [] };
+}
+
+/** The engine's answer to `civil.profile` as the panel keeps it: its grounds read as empty when it left them out, null for what is no profile. */
+export function readProfile(r: unknown): ProfileData | null {
+  const o = r as (Omit<ProfileData, 'existing' | 'design'> & { existing?: Series; design?: Series }) | null | undefined;
+  return o && typeof o === 'object' && Array.isArray(o.points) && Array.isArray(o.line) && Array.isArray(o.path) ? withGround(o) : null;
+}
+
 export interface ProfileData {
   kind: 'featureLine' | 'hardscape' | 'corridor';
   id: string; name: string; start: number; length: number; closed: boolean;

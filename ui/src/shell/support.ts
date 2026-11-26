@@ -1,5 +1,6 @@
 /** What the help menu reports with and links to: the app's last errors, the community and the site. */
 
+import { create } from 'zustand';
 import { notify } from '../app/store';
 import { engine, engineInBrowser, useSession } from '../engine/session';
 import { type Lang, useLang } from '../i18n';
@@ -35,7 +36,7 @@ export function installRecentErrors(): void {
 /** What the help menu links to: the guide, the forum (Lapin's users and fans, docs/plan-forum.md), the community on Skool (courses), the site, the source. */
 export const LINKS = { guide: 'https://lapinbim.com/docs/', forum: 'https://forum.lapinbim.com', community: 'https://www.skool.com/bubblebim-club-1376/about', site: 'https://lapinbim.com', source: 'https://github.com/Ciuntuc-BIM-Studio/lapin' } as const;
 
-/** The languages the user guide is written in (scripts/user-docs/languages.mjs); an interface language not among them (Lao) opens it in English. */
+/** The languages the user guide is written in (scripts/user-docs/languages.mjs); an interface language not among them (Lao, Chinese, Greek, Swedish, Thai) opens it in English. */
 const GUIDED: readonly Lang[] = ['en', 'ro', 'es', 'de', 'fr', 'da', 'it', 'pl', 'pt'];
 const guided = (lang: Lang): Lang => (GUIDED.includes(lang) ? lang : 'en');
 
@@ -90,6 +91,13 @@ export const openForumTopic = (question = '') => {
   if (engineInBrowser) { window.open(forumTopicUrl(title, body), '_blank', 'noopener'); return; }
   void engine.call('support.open', { link: 'forumTopic', title, body }).catch(() => notify('The link could not be opened.'));
 };
+
+/** What a report starts with: a question Ask Lapin could not answer, or a part of the window that stopped (PartBoundary). */
+export interface ReportStart { kind: 'bug' | 'idea' | 'question'; title: string; description: string }
+
+/** A report asked for from outside the help menu (a part that stopped offers one): the help menu opens its form with it. */
+export const useReportRequest = create<{ start: ReportStart | null }>(() => ({ start: null }));
+export const askReport = (start: ReportStart): void => useReportRequest.setState({ start });
 
 /** Where the web build posts reports: the Lapin server it is served from. */
 export const FEEDBACK_URL: string = import.meta.env.VITE_FEEDBACK_URL ?? '/api/feedback';

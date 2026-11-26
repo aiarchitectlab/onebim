@@ -1,11 +1,11 @@
 /**
  * The interface's language (English, Romanian, Spanish, German, French,
- * Danish, Italian, Polish, Brazilian Portuguese, Lao, Simplified Chinese or Thai). The interface is
+ * Danish, Italian, Polish, Brazilian Portuguese, Lao, Simplified Chinese, Greek, Swedish or Thai). The interface is
  * written in English; in another language a translator walks what it shows
  * (texts, titles, placeholders) and puts each phrase it knows into that
  * language, keeping the English to put back. Drawings (SVG) and what the user
  * types are left as they are. Each language is one file (`ro.ts`, `es.ts`,
- * `de.ts`, `fr.ts`, `da.ts`, `it.ts`, `pl.ts`, `pt.ts`, `lo.ts`, `zh.ts`):
+ * `de.ts`, `fr.ts`, `da.ts`, `it.ts`, `pl.ts`, `pt.ts`, `lo.ts`, `zh.ts`, `el.ts`, `sv.ts`, `th.ts`):
  * its phrase list and its patterns; a phrase not in it stays English. A
  * language is loaded when it is chosen (`loadLanguage`), so the app carries
  * only the one it shows; main.tsx loads the stored one before the first draw.
@@ -36,6 +36,8 @@ const LOADERS = {
   pt: () => import('./pt').then((m) => ({ dict: m.PT, patterns: m.PT_PATTERNS })),
   lo: () => import('./lo').then((m) => ({ dict: m.LO, patterns: m.LO_PATTERNS })),
   zh: () => import('./zh').then((m) => ({ dict: m.ZH, patterns: m.ZH_PATTERNS })),
+  el: () => import('./el').then((m) => ({ dict: m.EL, patterns: m.EL_PATTERNS })),
+  sv: () => import('./sv').then((m) => ({ dict: m.SV, patterns: m.SV_PATTERNS })),
   th: () => import('./th').then((m) => ({ dict: m.TH, patterns: m.TH_PATTERNS })),
 } satisfies Record<string, () => Promise<Language>>;
 
@@ -58,7 +60,6 @@ export async function loadAllLanguages(): Promise<void> {
 /** The languages offered, each named in itself. */
 export const LANGUAGES: { id: Lang; name: string }[] = [
   { id: 'en', name: 'English' },
-  { id: 'th', name: 'ภาษาไทย' },
   { id: 'ro', name: 'Română' },
   { id: 'es', name: 'Español' },
   { id: 'de', name: 'Deutsch' },
@@ -69,6 +70,9 @@ export const LANGUAGES: { id: Lang; name: string }[] = [
   { id: 'pt', name: 'Português' },
   { id: 'lo', name: 'ພາສາລາວ' },
   { id: 'zh', name: '简体中文' },
+  { id: 'el', name: 'Ελληνικά' },
+  { id: 'sv', name: 'Svenska' },
+  { id: 'th', name: 'ไทย' },
 ];
 
 const isLang = (x: unknown): x is Lang => LANGUAGES.some((l) => l.id === x);

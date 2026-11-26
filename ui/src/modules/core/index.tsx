@@ -6,7 +6,7 @@ import { StoreySection } from './StoreySection';
 import { toggleDrafts3d, toggleDragMove3d, toggleDxf3d, toggleDrillSelect, toggleGrid, toggleOrbitSelection, toggleThinLines, toggleZoomToCursor, useDisplay } from '../../app/display';
 import { measure } from './measure';
 import { calibrateTool } from './cloudCalibrate';
-import { Aperture, AlignStartVertical, ArrowLeftRight, CornerDownRight, CopyPlus, Slash, Scale, Braces, Tags, Pin, PinOff, PackageOpen, AppWindow, Boxes, ListTree, ArrowRightLeft, Bot, Box, BoxSelect, Cable, ClipboardCheck, Cloud, CloudFog, Compass, Copy, CopyCheck, Eye, EyeOff, ScanEye, ListFilter, FileStack, FileText, Filter, FlipHorizontal2, Focus, FolderOpen, Frame, Gauge, Grid3x3, Group, Hash, History, Info, Keyboard, Library, Layers, Layers3, LayoutGrid, Link2, MapPin, MessageSquare, MessageSquareText, Minus, MousePointer2, Move, Orbit, Palette, PanelBottomClose, PanelsTopLeft, PenLine, PenTool, PencilRuler, Pipette, RotateCw, Ruler, Scissors, Send, Shapes, SlidersHorizontal, Square, Table2, SquareDashed, Star, SquareMinus, SquareSplitHorizontal, SunMedium, Trash2, Ungroup, Wand2, ZoomIn, Building2, ListChecks } from 'lucide-react';
+import { Aperture, AlignStartVertical, Columns3, Columns3Cog, ArrowLeftRight, CornerDownRight, CopyPlus, Slash, Scale, Braces, Tags, Pin, PinOff, Printer, PackageOpen, AppWindow, Boxes, ListTree, ArrowRightLeft, Bot, Box, BoxSelect, Cable, ClipboardCheck, Cloud, CloudFog, Compass, Copy, CopyCheck, Eye, EyeOff, ScanEye, ListFilter, FileStack, FileText, Filter, FlipHorizontal2, Focus, FolderOpen, Frame, Gauge, Grid3x3, Group, Hash, History, Info, Keyboard, Library, Layers, Layers3, LayoutGrid, Link2, MapPin, MessageSquare, MessageSquareText, Minus, MousePointer2, Move, Orbit, Palette, PanelBottomClose, PanelsTopLeft, PenLine, PenTool, PencilRuler, Pipette, RotateCw, Ruler, Scissors, Send, Shapes, SlidersHorizontal, Square, Table2, SquareDashed, Star, SquareMinus, SquareSplitHorizontal, SunMedium, Trash2, Ungroup, Wand2, ZoomIn, Building2, ListChecks, FileCheck2 } from 'lucide-react';
 import { openTempDimProperties, TEMP_DIM_DIALOG } from '../../viewport/tempDimProps';
 import { AngleDims } from '../../viewport/AngleTempDims';
 import { CopyToStoreysIcon, ElevationIcon, MoveToStoreyIcon, ProfileIcon, SectionIcon } from '../../icons';
@@ -42,6 +42,8 @@ import { hasModule } from '../../platform/brand';
 import { openDocuments } from './documents/documents';
 import { convertToNative } from './convertTools';
 import { pinSelection } from './pinTools';
+import { StructuralSection } from './StructuralSection';
+import { markSelection, STRUCTURAL_CLASSES, STRUCTURAL_TYPES } from './structural';
 import { MatchOptions, matchProperties } from './matchTool';
 import { arraySelection } from './arrayTool';
 import { GroupSection } from './GroupSection';
@@ -78,6 +80,7 @@ import { MATERIAL_IMPORT } from './materialData';
 import { FieldsInspectorDialog } from '../../shell/FieldsInspector';
 // A section profile's board on the shared sketch canvas (audit S11 stage 2): registered at once, so a project reopened with one open shows it.
 import './profileLibraries/profileBoard';
+import { ReferenceModelBand } from './references/ReferenceModelBand';
 
 // Fetched the first time each is opened (platform/lazyPart.tsx).
 const ProfileLibrariesDialog = lazyPart(() => import('./profileLibraries/ProfileLibrariesDialog').then((m) => m.ProfileLibrariesDialog), { title: 'Profile libraries' });
@@ -116,6 +119,8 @@ const ExportMeshDialog = lazyPart(() => import('./ExportMeshDialog').then((m) =>
 // Lapin for the browser (decision 482): the project as one .html, a viewer and the package.
 const ExportHtmlDialog = lazyPart(() => import('./ExportHtmlDialog').then((m) => m.ExportHtmlDialog), { title: 'Lapin for the browser' });
 const ProjectFolderDialog = lazyPart(() => import('./cde/ProjectFolderDialog').then((m) => m.ProjectFolderDialog), { title: 'Project folder' });
+const PublishDialog = lazyPart(() => import('./publish/PublishDialog').then((m) => m.PublishDialog), { title: 'Publish' });
+const ReferencesDialog = lazyPart(() => import('./references/ReferencesDialog').then((m) => m.ReferencesDialog), { title: 'Reference documents' });
 const IssueDialog = lazyPart(() => import('./cde/IssueDialog').then((m) => m.IssueDialog), { title: 'Issue' });
 const CheckDialog = lazyPart(() => import('./cde/CheckDialog').then((m) => m.CheckDialog), { title: 'Check' });
 // IDS 1.0 (docs/ids.md): the project's .ids files run over the model.
@@ -199,7 +204,7 @@ const butDiscipline = (cls: string) => () => (useSession.getState().info?.nodeTy
 const viewFields = (node: NodeDto) => butDiscipline('LapinView')().filter((k) => viewShowsField(node.props.kind, k));
 
 /** What the core keeps running while the workspace is open: the 3D's visibility and storeys shown, the links' looks. */
-function CoreBackground() { return <><Visibility3D /><Storeys3DLooks /><LinksLook /><LinkedProjectsWatch /><LibraryImportHost /></>; }
+function CoreBackground() { return <><Visibility3D /><Storeys3DLooks /><LinksLook /><LinkedProjectsWatch /><LibraryImportHost /><ReferenceModelBand /></>; }
 
 /** Manage → Clash check…: the openings checked against MEP (a tab of Clash detection when the product has it, else a window of its own). */
 const openingsCheck: ToolDef = {
@@ -231,27 +236,32 @@ const core: LapinModule = {
       // parallel; floors and ceilings trimmed or split by a line. The command line's TRIMEXTEND, SPLITELEMENT and OFFSET.
       { id: 'modify.trimExtend', label: 'Trim/Extend elements', icon: Scissors, run: () => void startCommand('TRIMEXTEND') },
       { id: 'modify.split', label: 'Split element', icon: SquareSplitHorizontal, run: () => void startCommand('SPLITELEMENT') },
-      { id: 'modify.offset', label: 'Offset element', icon: CopyPlus, run: () => void startCommand('OFFSET') },
+      { id: 'modify.offset', label: 'Offset element', alsoCalled: ['Offset'], icon: CopyPlus, run: () => void startCommand('OFFSET') },
       { id: 'modify.delete', label: 'Delete', alsoCalled: ['Erase'], icon: Trash2, run: () => void startCommand('ERASE') },
       // Pinned where it is, as Revit pins (decision 449): not moved, turned, mirrored nor deleted until unpinned.
       { id: 'modify.pin', label: 'Pin', icon: Pin, run: () => void pinSelection(true) },
       { id: 'modify.unpin', label: 'Unpin', icon: PinOff, shortcut: 'UP', run: () => void pinSelection(false) },
+      // The Structural tick on the selection (docs/plan-structural-usage.md): said load-bearing, or said not.
+      { id: 'modify.structural', label: 'Structural', icon: Columns3, run: () => void markSelection(true) },
+      { id: 'modify.notStructural', label: 'Not structural', icon: Columns3Cog, run: () => void markSelection(false) },
       { id: 'modify.similar', label: 'Create similar', icon: CopyCheck, shortcut: 'CS', enabled: canCreateSimilar, run: createSimilar },
       { id: 'modify.match', label: 'Match properties', icon: Pipette, shortcut: 'MA', run: () => void startCommand('MATCHPROP') },
       { id: 'modify.moveToStorey', label: 'Move to storey', icon: MoveToStoreyIcon, run: () => useUi.setState({ dialog: 'moveToStorey' }) },
       // ArchiCAD's copy to stories (a tester's wish): the selection onto several storeys at once; COPYSTOREY on the command line.
       { id: 'modify.copyToStoreys', label: 'Copy to storeys', icon: CopyToStoreysIcon, run: () => useUi.setState({ dialog: 'copyToStoreys' }) },
-      // Groups (docs/groups.md), with Revit's keys.
+      // Imported references made Lapin elements, or Studio solids (decision 214).
+      { id: 'modify.convertToNative', label: 'Convert to native', icon: Wand2, shortcut: 'NV', run: () => void convertToNative() },
+    ] },
+    // The group tools in a panel of their own (a tester's wish, forum topic 257); their ids stay the ones the shortcuts and My tools know.
+    groups: { label: 'Group', tools: [
       { id: 'modify.group', label: 'Create group', icon: Group, shortcut: 'GP', run: () => void groupSelection() },
+    ], small: [
       { id: 'modify.component', label: 'Make component', icon: Boxes, shortcut: 'CK', run: () => void makeComponent() },
       { id: 'modify.unit', label: 'Make apartment type', icon: Building2, shortcut: 'CU', run: () => void makeUnit() },
-      // Detail sets of a component (forum #224): 2D drafting every instance draws, shown per view.
       { id: 'modify.detailSet', label: 'Add to detail set', icon: PenLine, shortcut: 'DS', run: () => void addToDetailSet() },
       { id: 'modify.ungroup', label: 'Ungroup', icon: Ungroup, shortcut: 'UG', run: () => void ungroupSelection() },
       { id: 'modify.editGroup', label: 'Edit group', icon: PencilRuler, shortcut: 'EG', run: editSelectedGroup },
       { id: 'modify.removeFromGroup', label: 'Remove from group', icon: SquareMinus, run: () => void removeFromGroup() },
-      // Imported references made Lapin elements, or Studio solids (decision 214).
-      { id: 'modify.convertToNative', label: 'Convert to native', icon: Wand2, shortcut: 'NV', run: () => void convertToNative() },
     ] },
   },
   tabs: [{
@@ -316,9 +326,13 @@ const core: LapinModule = {
       // The project folder as a CDE (docs/plan-cde.md): the folder and its naming, the pre-issue checks, the issue.
       { label: 'Issue', tools: [
         { id: 'manage.projectFolder', label: 'Project folder', icon: FolderOpen, run: () => useUi.setState({ dialog: 'projectFolder' }) },
+        // The documents the project receives (certificates, permits, studies, consultants' models), with their folders and validity (docs/plan-cde-references.md).
+        { id: 'manage.references', label: 'Reference documents…', icon: FileCheck2, run: () => useUi.setState({ dialog: 'references' }) },
         { id: 'manage.check', label: 'Check', icon: ClipboardCheck, run: () => useUi.setState({ dialog: 'cdeCheck' }) },
         // Information requirements as buildingSMART IDS 1.0 files, checked on the model (docs/ids.md).
         { id: 'manage.ids', label: 'IDS…', icon: ListChecks, run: () => useUi.setState({ dialog: 'ids' }) },
+        // Publish sets: named choices of sheets and views exported again in one step, as PDF and DXF (forum topic 225).
+        { id: 'manage.publish', label: 'Publish…', icon: Printer, run: () => useUi.setState({ dialog: 'publish' }) },
         { id: 'manage.issue', label: 'Issue…', icon: Send, run: () => useUi.setState({ dialog: 'cdeIssue' }) },
         // The remarks on the model, exchanged as BCF (docs/plan-cde.md, stage 2).
         { id: 'manage.remarks', label: 'Model remarks…', icon: MessageSquareText, run: () => useUi.setState({ dialog: 'remarks' }) },
@@ -460,7 +474,7 @@ const core: LapinModule = {
   },
   references: { LapinView: (n) => [...sectionRefs(n), ...sectionFarLine(n)] },
   placeSources: corePlaceSources,
-  dialogs: { insetPick: InsetPickDialog, placeCatalog: PlaceCatalogDialog, components: ComponentsDialog, importIfc: ImportIfcDialog, materials: MaterialsDialog, standards: StandardsDialog, materialStandards: MaterialStandardsDialog, materialGraphicsSets: MaterialGraphicsSetsDialog, hatchPatterns: HatchPatternsDialog, visibility: VisibilityDialog, viewRange: ViewRangeDialog, objectStyles: ObjectStylesDialog, location: LocationDialog, cutOrder: CutOrderDialog, moveToStorey: MoveToStoreyDialog, copyToStoreys: CopyToStoreysDialog, newLevels: NewLevelsDialog, shopDrawing: ShopDrawingDialog, browserSets: BrowserSetsDialog, links: LinksDialog, versions: VersionsDialog, remote: RemoteDialog, remoteSave: SaveToServerDialog, remoteClone: OpenFromServerDialog, cdeAdmin: CdeAdminDialog, mapTypes: MapTypesDialog, fieldAliases: FieldAliasesDialog, markRules: MarkRulesDialog, typePacks: TypePacksDialog, projectTypes: ProjectTypesDialog, planStoreys: PlanStoreysDialog, viewSettings: ViewSettingsDialog, viewStyles: ViewStylesDialog, exportMesh: ExportMeshDialog, exportHtml: ExportHtmlDialog, projectFolder: ProjectFolderDialog, cdeIssue: IssueDialog, documents: DocumentsDialog, documentTemplates: TemplatesDialog, titleBlocks: TitleBlocksDialog, symbols: SymbolsDialog, rules: RulesDialog, classifications: ClassificationsDialog, importTable: ImportTableDialog, saveSymbol: SaveSymbolDialog, saveHatch: SaveHatchDialog, projectInfo: ProjectInfoDialog, cdeCheck: CheckDialog, ids: IdsDialog, remarks: RemarksDialog, cdeRemarks: SheetRemarksDialog, displayQuality: DisplayQualityDialog, render: RenderDialog, [TEMP_DIM_DIALOG]: TempDimPropertiesDialog, sun: SunDialog, exportExchange: ExchangeExportDialog, exportJg: JgExportDialog, sections: SectionsDialog, coordination: CoordinationDialog, profiles: ProfilesDialog, profileLibraries: ProfileLibrariesDialog, quickSelect: QuickSelectDialog, fieldsInspector: FieldsInspectorDialog, elementGraphics: ElementGraphicsDialog, thermalSettings: ThermalSettingsDialog },
+  dialogs: { insetPick: InsetPickDialog, placeCatalog: PlaceCatalogDialog, components: ComponentsDialog, importIfc: ImportIfcDialog, materials: MaterialsDialog, standards: StandardsDialog, materialStandards: MaterialStandardsDialog, materialGraphicsSets: MaterialGraphicsSetsDialog, hatchPatterns: HatchPatternsDialog, visibility: VisibilityDialog, viewRange: ViewRangeDialog, objectStyles: ObjectStylesDialog, location: LocationDialog, cutOrder: CutOrderDialog, moveToStorey: MoveToStoreyDialog, copyToStoreys: CopyToStoreysDialog, newLevels: NewLevelsDialog, shopDrawing: ShopDrawingDialog, browserSets: BrowserSetsDialog, links: LinksDialog, versions: VersionsDialog, remote: RemoteDialog, remoteSave: SaveToServerDialog, remoteClone: OpenFromServerDialog, cdeAdmin: CdeAdminDialog, mapTypes: MapTypesDialog, fieldAliases: FieldAliasesDialog, markRules: MarkRulesDialog, typePacks: TypePacksDialog, projectTypes: ProjectTypesDialog, planStoreys: PlanStoreysDialog, viewSettings: ViewSettingsDialog, viewStyles: ViewStylesDialog, exportMesh: ExportMeshDialog, exportHtml: ExportHtmlDialog, projectFolder: ProjectFolderDialog, references: ReferencesDialog, cdeIssue: IssueDialog, publish: PublishDialog, documents: DocumentsDialog, documentTemplates: TemplatesDialog, titleBlocks: TitleBlocksDialog, symbols: SymbolsDialog, rules: RulesDialog, classifications: ClassificationsDialog, importTable: ImportTableDialog, saveSymbol: SaveSymbolDialog, saveHatch: SaveHatchDialog, projectInfo: ProjectInfoDialog, cdeCheck: CheckDialog, ids: IdsDialog, remarks: RemarksDialog, cdeRemarks: SheetRemarksDialog, displayQuality: DisplayQualityDialog, render: RenderDialog, [TEMP_DIM_DIALOG]: TempDimPropertiesDialog, sun: SunDialog, exportExchange: ExchangeExportDialog, exportJg: JgExportDialog, sections: SectionsDialog, coordination: CoordinationDialog, profiles: ProfilesDialog, profileLibraries: ProfileLibrariesDialog, quickSelect: QuickSelectDialog, fieldsInspector: FieldsInspectorDialog, elementGraphics: ElementGraphicsDialog, thermalSettings: ThermalSettingsDialog },
   background: CoreBackground,
   // Angular temporary dimensions (decision 738): the angle a straight wall or beam selected makes where it meets another, and the segment's while one is drawn.
   planOverlays: [AngleDims],
@@ -472,6 +486,8 @@ const core: LapinModule = {
     { id: 'thermal', label: 'Thermal', classes: THERMAL_CLASSES, component: ThermalSection },
     { id: 'array', label: 'Array', classes: ['*'], shows: (n) => arrayOf(n, useSession.getState().nodes) !== null, component: ArraySection },
     // Each end joining automatically or not (the forum's topic #50, decision 546).
+    // Structural (load-bearing), ticked, cleared or by rule (docs/plan-structural-usage.md, decision 866).
+    { id: 'structural', label: 'Structural', classes: [...STRUCTURAL_CLASSES, ...STRUCTURAL_TYPES], component: StructuralSection },
     { id: 'autoJoin', label: 'Joins', classes: ['IfcWall', 'IfcBeam', 'IfcFooting'], shows: (n) => isPathElement(n.props), component: AutoJoinSection },
     { id: 'titleBlock', label: 'Title block', classes: ['LapinSheet'], component: SheetSection, fieldKeys: butDiscipline('LapinSheet') },
     { id: 'storeyLevels', label: 'Levels', classes: ['IfcBuildingStorey'], component: StoreySection, replacesFields: () => true },

@@ -92,6 +92,8 @@ Click an element to select it; <kbd>Shift</kbd>-click adds to the selection. To 
 
 ## Copying and moving
 
+A drafted line's end dragged with <kbd>Ctrl</kbd> (<kbd>⌘</kbd> on a Mac) held stays on the line's own angle, as a wall's end does ([Walls](walls.md#keep-its-angle-while-you-stretch)).
+
 To copy, select the element and type <kbd>CO</kbd>. Click a base point, then a second point. Lapin keeps copying until you press <kbd>Enter</kbd> or <kbd>Esc</kbd>. **Move** (<kbd>M</kbd>) works the same way.
 
 While you move or copy, a marker stays on the base point and a dashed line runs from it to the mouse, with a faded outline of what you move left where it was until you click or press <kbd>Esc</kbd>. The line and the marker change colour with the snap: green on a snapped point, blue when ortho or polar tracking holds the direction, the accent colour on a tracking line, grey when free. Next to the mouse, Lapin shows how far you have moved: Δx, Δy, the distance and the angle, in the project's units. You can type the distance and the angle there, as when you draw. In the Compact interface, these values are in the status line. Dragging a grip shows the same, and so does dragging a selected element itself, from the point where you pressed; press <kbd>Esc</kbd> before you let go and the element stays where it was.
@@ -112,7 +114,7 @@ A grid axis moves, copies, rotates and mirrors on its own, or together with othe
 
 ### In sections and elevations
 
-**Move** (<kbd>M</kbd>), **Copy** (<kbd>CO</kbd>) and dragging a selected element work in a section or an elevation too, in the view's plane. Along the view, the element moves in plan along the section's line; up or down, it rises or drops by its offset from its level (a wall's or column's base offset, a beam's top offset, a floor's offset). While you drag, its **Offset from level** in the properties follows. A door or a window still slides along its wall, and lines drafted on the view move in the view. **Mirror** there takes a vertical line and mirrors the elements across the plane through it, square to the view. Elements do not **Rotate** in a section or an elevation, as that would tip them over: turn them in a plan or in 3D. Drafted lines rotate and mirror any way. A pinned element stays where it is.
+**Move** (<kbd>M</kbd>), **Copy** (<kbd>CO</kbd>) and dragging a selected element work in a section or an elevation too, in the view's plane. Along the view, the element moves in plan along the section's line; up or down, it rises or drops by its offset from its level (a wall's or column's base offset, a beam's top offset, a floor's offset). While you drag, its **Offset from level** in the properties follows (a beam's **Top offset (from the level above)**). A door or a window still slides along its wall, and lines drafted on the view move in the view. **Mirror** there takes a vertical line and mirrors the elements across the plane through it, square to the view. Elements do not **Rotate** in a section or an elevation, as that would tip them over: turn them in a plan or in 3D. Drafted lines rotate and mirror any way. A pinned element stays where it is.
 
 ![A beam dragged up in the south elevation: its ghost where it was, the offset at the mouse and its offset from the level following in the properties](shots/section-drag.webp)
 
@@ -144,7 +146,7 @@ Every length the command line asks for is in the project's unit, and the prompt 
 
 ### Tracing over a PDF or an image
 
-**File → Import PDF or image…**, or **Draft → PDF or image**, brings a drawing in to trace over: a scanned plan, a photo of a facade, a PDF from another office. It goes into the plan, section or elevation in front, under its drawing.
+**File → Import → Import PDF or image…**, or **Draft → PDF or image**, brings a drawing in to trace over: a scanned plan, a photo of a facade, a PDF from another office. It goes into the plan, section or elevation in front, under its drawing.
 
 - **A PDF**: choose the **Page** and the scale its drawing was made to (**Drawn at 1:**). A paper millimetre then measures that many millimetres here, so a 1:100 plan comes in at its true size. The page's lines come in as drafting you can snap to, edit and trace, and its pictures (a scan inside the PDF) as images under them. Either can be left out. The page comes in as one group named after the file, so **Move**, **Rotate** and **Scale** take it whole; double-click it to work on its parts.
 - **An image** (PNG or JPEG): give its **Width**; its height follows its pixels. It need not be right: the next step sets it exactly.
@@ -185,7 +187,7 @@ The **Annotate** tab has the dimensions, text, grid axes, levels and tags. A dim
 
 ![A text's properties: its style, alignment, angle and width](shots/text-properties.webp)
 
-A **Leader note** (Annotate → Text) is a text with an arrow: click where the arrow points, then where the text goes, and type it. A **Revision cloud** (Draft → Fill, or REVCLOUD) draws a rectangle or a polygon as scallops; **Revision cloud** in the properties of a closed polyline or circle turns it into one or back. A **Scale bar** (Annotate → Sheets) is drawn at the view's scale. A **North arrow** (Annotate → Sheets) is placed with a click on its middle, on a plan or on a sheet's paper; on a sheet it points as its viewport lays out the plan, a rotated plan too. On a view, a north arrow or a scale bar stands *by itself* (arrow right of the drawing's top, bar under its bottom left, following the drawing) until you move it by its grip; **Put it back by itself** in its properties returns it. The arrow has a **Size** (mm, 14 by default) and a **Marker symbol**; the bar a **Look**, **Length**, **Divisions** and **Scale**. They work on every view and on sheets, where a legend of the views and live fields in texts join them (see Sheets).
+A **Leader note** (Annotate → Text) is a text with an arrow: click where the arrow points, then where the text goes, and type it. A **Revision cloud** (Draft → Draw, or REVCLOUD) draws a rectangle or a polygon as scallops; **Revision cloud** in the properties of a closed polyline or circle turns it into one or back. A **Scale bar** (Annotate → Sheets) is drawn at the view's scale. A **North arrow** (Annotate → Sheets) is placed with a click on its middle, on a plan or on a sheet's paper; on a sheet it points as its viewport lays out the plan, a rotated plan too. On a view, a north arrow or a scale bar stands *by itself* (arrow right of the drawing's top, bar under its bottom left, following the drawing) until you move it by its grip; **Put it back by itself** in its properties returns it. The arrow has a **Size** (mm, 14 by default) and a **Marker symbol**; the bar a **Look**, **Length**, **Divisions** and **Scale**. They work on every view and on sheets, where a legend of the views and live fields in texts join them (see Sheets).
 
 ### The Dimension tool
 

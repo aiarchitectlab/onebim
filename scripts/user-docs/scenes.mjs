@@ -678,6 +678,9 @@ export const scenes = [
     id: 'start',
     async run(t) {
       await t.start();
+      // The workspace and the language are one-line choices (forum topic 257); the edition's modules are in Help → About.
+      t.expect(await t.page.locator('.start [data-field=workspace-select] select').count() === 1, 'the start screen has one Workspace choice');
+      t.expect(await t.page.locator('.start-foot .start-lang select option').count() >= 10, 'the start screen has one Language choice');
       await t.shot('start-screen', { clip: { x: 0, y: 0, width: 1440, height: 640 } });
       // A template (decision 261): the apartment block starts with its six levels, in the Architecture workspace.
       await t.page.locator('[data-template=block]').click();
@@ -1726,12 +1729,10 @@ export const scenes = [
       t.expect(await width.count() === 1 && await t.page.locator('aside.props [data-field=joinery-height]').count() === 1, 'a door\'s width and height are fields of its own');
       await width.fill('950');
       await width.press('Enter');
-      await t.wait(400);
-      const sized = (await t.nodes()).find((n) => n.id === door.id);
-      t.expect(Math.abs((sized?.props.width ?? 0) - 0.95) < 1e-6, `the door 950 wide of its own (${sized?.props.width})`);
+      // Polled, not waited for: a machine at work on other scenes answers late.
+      await t.until(async () => Math.abs(((await t.nodes()).find((n) => n.id === door.id)?.props.width ?? 0) - 0.95) < 1e-6, 'the door 950 wide of its own');
       await t.page.locator('aside.props [data-action=joinery-type-size]').click();
-      await t.wait(400);
-      t.expect((await t.nodes()).find((n) => n.id === door.id)?.props.width == null, 'Type\'s size gives its own width up');
+      await t.until(async () => (await t.nodes()).find((n) => n.id === door.id)?.props.width == null, 'Type\'s size gives its own width up');
       await t.tool('architecture.joineryTypes');
       // The 3D preview under the drawings (report #108), drawn once the engine's meshes come.
       t.expect(await t.page.locator('[data-testid=joinery-preview-3d] canvas').count() === 1, 'the configurator shows its 3D preview');
@@ -1817,6 +1818,59 @@ export const scenes = [
       await t.page.evaluate(async () => (await import('/src/viewport/camera.ts')).useCamera.getState().api?.orbitTo({ azimuth: -2.3, pitch: -0.25, distance: 22, target: { x: 4, y: 4, z: 2 } }, false));
       await t.wait(1500);
       await t.shot('wall-profile-3d', { of: '[data-testid=view3d]', pad: 0 });
+    },
+  },
+  {
+    // Leaning walls (in-app report #191, plan-wall-lean-taper L1): two walls joined at a corner, both selected, 10° typed in Lean in
+    // their properties (one undo step, the batter shown beside it); both lean, their corner on their faces' planes, the door leaning
+    // with its wall. Seen in 3D.
+    id: 'wall-lean',
+    touches: ['architecture'],
+    async run(t) {
+      await t.fresh();
+      const s = await t.storey();
+      const a = (await t.cmd('architecture.addWall', { storeyId: s, x1: 0, y1: 0, x2: 8, y2: 0, height: 3 })).id;
+      const b = (await t.cmd('architecture.addWall', { storeyId: s, x1: 8, y1: 0, x2: 8, y2: 6, height: 3 })).id;
+      await t.cmd('architecture.addDoor', { wallId: a, x: 3, y: 0 });
+      await t.ui({ view: 'plan', keyPlan: false, selection: a, selected: [a, b] });
+      await t.wait(800);
+      const field = t.page.locator('[data-field=wall-lean]');
+      await field.fill('10');
+      await field.press('Enter');
+      await t.until(async () => (await t.nodes()).filter((n) => n.id === a || n.id === b).every((n) => n.props.lean === 10), 'both selected walls lean 10°');
+      t.expect((await t.page.locator('[data-testid=wall-lean-from]').count()) === 1, 'Lean from shows once the walls lean');
+      await t.shot('wall-lean-properties', { of: 'aside.props', pad: 0, maxHeight: 620 });
+      await open3d(t);
+      await t.page.evaluate(async () => (await import('/src/viewport/camera.ts')).useCamera.getState().api?.orbitTo({ azimuth: -2.4, pitch: -0.3, distance: 16, target: { x: 5, y: 2, z: 1.5 } }, false));
+      await t.wait(1500);
+      await t.shot('wall-lean-3d', { of: '[data-testid=view3d]', pad: 0 });
+    },
+  },
+  {
+    // Tapered walls (in-app report #191, plan-wall-lean-taper L2): a 500 mm concrete wall joined at a corner to a plumb one, 300 mm typed
+    // in Thickness at top in its properties; its exterior (first layer's) face stays plumb, the core tapers, the corner follows the
+    // faces. Seen in 3D.
+    id: 'wall-taper',
+    touches: ['architecture'],
+    async run(t) {
+      await t.fresh();
+      const s = await t.storey();
+      const type = (await t.cmd('architecture.createWallType', { name: 'Retaining wall 500', layers: [{ material: 'Concrete', thickness: 0.5, core: true }] })).id;
+      const a = (await t.cmd('architecture.addWall', { storeyId: s, typeId: type, x1: 0, y1: 0, x2: 8, y2: 0, height: 3 })).id;
+      await t.cmd('architecture.addWall', { storeyId: s, typeId: type, x1: 8, y1: 0, x2: 8, y2: 6, height: 3 });
+      await t.ui({ view: 'plan', keyPlan: false, selection: a, selected: [a] });
+      await t.wait(800);
+      const field = t.page.locator('[data-field=wall-thickness-top]');
+      await field.fill('300');
+      await field.press('Enter');
+      await t.until(async () => (await t.nodes()).some((n) => n.id === a && Math.abs(Number(n.props.thicknessTop) - 0.3) < 1e-9), 'the wall is 300 mm at its top');
+      t.expect((await t.page.locator('[data-testid=wall-plumb-face]').count()) === 1, 'Face that stays plumb shows once the wall tapers');
+      t.expect((await t.page.locator('[data-testid=wall-taper-layer]').count()) === 1, 'Layer that tapers shows once the wall tapers');
+      await t.shot('wall-taper-properties', { of: 'aside.props', pad: 0, maxHeight: 620 });
+      await open3d(t);
+      await t.page.evaluate(async () => (await import('/src/viewport/camera.ts')).useCamera.getState().api?.orbitTo({ azimuth: -2.4, pitch: -0.35, distance: 16, target: { x: 5, y: 2, z: 1.5 } }, false));
+      await t.wait(1500);
+      await t.shot('wall-taper-3d', { of: '[data-testid=view3d]', pad: 0 });
     },
   },
   {
@@ -2452,6 +2506,166 @@ export const scenes = [
     },
   },
   {
+    // Roof panel layout (docs/plan-roof-panels.md, S2): an L-shaped house under a hip roof covered in Bilka Balcanic from the
+    // roof's Panels section; Panel layout… shows the panels in plan with the hip offcuts reused in the valley pieces (orange),
+    // and the 3D view the panels as the covering, each a profiled sheet. S3: the takeoff's tables (accessories, fixings,
+    // battens and membrane) and a roof window cut out of the panels with its flashing kit. S4: the Cost tab, the Bilka – Dedeman
+    // template added from it, each line priced. S5: the Rainwater and Flat sheet tabs, the Panels section's rainwater fields.
+    id: 'roof-panels',
+    touches: ['architecture', 'roofpanels', 'cost'],
+    async run(t) {
+      await t.fresh();
+      const s = await t.storey();
+      const outline = [[0, 0], [12, 0], [12, 6], [6, 6], [6, 11], [0, 11]];
+      for (let i = 0; i < outline.length; i++) {
+        const [a, b] = [outline[i], outline[(i + 1) % outline.length]];
+        await t.cmd('architecture.addWall', { storeyId: s, x1: a[0], y1: a[1], x2: b[0], y2: b[1] });
+      }
+      await t.cmd('architecture.addSlab', { storeyId: s, points: outline });
+      const roof = await t.cmd('architecture.addRoof', { storeyId: s, points: outline });
+      await t.cmd('architecture.updateRoof', { id: roof.id, attrs: { shape: 'hip', pitch: 35, overhang: 0.5, covering: 'Metal sheet' } });
+      await t.wait(800);
+      await select(t, roof.id);
+      await t.wait(800);
+      // The Panels section: a profile picked, one undo step; what to buy and the offcuts reused come with it.
+      const pick = t.page.locator('[data-testid=roof-panels-profile]');
+      t.expect(await pick.count() === 1, 'the roof\'s properties have a Panels section with its profile');
+      await pick.selectOption('bilka-balcanic');
+      await t.until(async () => (await t.nodes()).find((n) => n.id === roof.id)?.props?.panels?.profile === 'bilka-balcanic', 'the roof names Bilka Balcanic');
+      await t.until(async () => await t.page.locator('[data-testid=roof-panels-summary]').count() === 1, 'the section shows what to buy');
+      const summary = await t.page.locator('[data-testid=roof-panels-summary]').innerText();
+      t.expect(summary.includes('2230 mm') && summary.includes('× 53'), `the section lists the panels to buy (${summary.replace(/\s+/g, ' ')})`);
+      await t.page.locator('[data-testid=roof-panels-section]').scrollIntoViewIfNeeded();
+      await t.shot('roof-panels-section', { of: '[data-testid=roof-panels-section]', pad: 6 });
+      // Panel layout…: the roof in plan, every panel by its length, the offcuts in orange, a panel's code on hover.
+      await t.page.locator('[data-testid=roof-panels-open]').click();
+      const dialog = t.page.locator('[data-testid=roof-panel-layout]');
+      await t.until(async () => await dialog.locator('[data-panel]').count() > 50, 'the layout draws the panels');
+      t.expect(await dialog.locator('[data-panel][fill="#e07b39"]').count() === 5, 'five valley pieces are offcuts reused, in orange');
+      t.expect(await dialog.locator('[data-testid=roof-panels-offcuts] tbody tr').count() === 5, 'the offcuts table lists the five, each with its donor');
+      const reused = dialog.locator('[data-panel][fill="#e07b39"]').first();
+      const box = await reused.boundingBox();
+      if (box) await t.page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await t.wait(300);
+      const hover = await dialog.locator('[data-testid=roof-panels-hover]').innerText();
+      t.expect(/A0\d-\d\d-\d\d/.test(hover) && hover.includes('Cut from'), `hovering a panel names it and its donor (${hover})`);
+      await t.shot('roof-panel-layout', { of: '.dialog', pad: 0 });
+      await dialog.locator('[data-action=roof-panels-flat]').click();
+      await t.wait(500);
+      await t.shot('roof-panel-layout-flat', { of: '[data-testid=roof-panels-drawing]', pad: 4 });
+      // S3, the takeoff: the accessories counted on the edges as the Panotaj Bilka app does, the fixings, battens and membrane.
+      const takeoff = dialog.locator('[data-testid=roof-panels-takeoff]');
+      t.expect(await takeoff.count() === 1, 'the dialog has the takeoff\'s tables');
+      const qty = async (code) => (await dialog.locator(`tr[data-item="${code}"] td.num`).first().innerText()).trim();
+      t.expect(await qty('hip-large') === '15' && await qty('valley') === '3' && await qty('batten') === '165', `the takeoff counts the app's hip caps, valley and battens (${await qty('hip-large')}, ${await qty('valley')}, ${await qty('batten')})`);
+      await takeoff.scrollIntoViewIfNeeded();
+      await t.shot('roof-panels-takeoff', { of: '[data-testid=roof-panel-layout] [data-testid=roof-panels-takeoff-items]', pad: 4 });
+      // S4, the cost: no price list yet, so the Cost tab offers the Bilka – Dedeman template (added only when asked); with it, each
+      // line priced with its source, the lines cut from flat sheet and the ridge joints apart, the subtotal of the priced lines.
+      t.expect((await t.nodes()).every((n) => n.type !== 'LapinPriceList'), 'no price list is loaded by itself');
+      await dialog.locator('[data-action=roof-panels-cost]').click();
+      await t.until(async () => await dialog.locator('[data-testid=roof-panels-cost-empty]').count() === 1, 'the Cost tab says no list prices the lines');
+      await dialog.locator('[data-action=roof-panels-add-template]').click();
+      await t.until(async () => (await t.nodes()).some((n) => n.type === 'LapinPriceList'), 'the template is in the project');
+      await t.until(async () => (await dialog.locator('[data-testid=roof-panels-cost-subtotal]').innerText()).includes('RON'), 'the Cost tab has a subtotal');
+      const subtotal = (await dialog.locator('[data-testid=roof-panels-cost-subtotal]').innerText()).replace(/\s+/g, ' ');
+      t.expect(subtotal.includes('27 747.95'), `the subtotal is the Panotaj Bilka app's whole priced subtotal on this roof (${subtotal})`);
+      t.expect(await dialog.locator('tr[data-cost="hip-large"]').innerText().then((x) => x.replace(/\s+/g, ' ').includes('1 195.95') && x.includes('Dedeman')), 'a line has its amount and its source');
+      t.expect(await dialog.locator('[data-testid=roof-panels-indicative]').count() === 1, 'the table says the prices are indicative');
+      t.expect(await dialog.locator('[data-testid=roof-panels-cost-sheet] tr').count() === 1, 'the ridge nodes, cut from flat sheet, are apart');
+      await t.shot('roof-panels-cost', { of: '[data-testid=roof-panel-layout]', pad: 0 });
+      // S5, the rainwater system: Auto takes 150/100 on this 153 m² roof, eight downpipes (two on each long slope, one on the
+      // others), the app's lines; the model's gutters are still 125 mm, said.
+      await dialog.locator('[data-action=roof-panels-drainage]').click();
+      await t.until(async () => await dialog.locator('[data-testid=roof-panels-drainage-runs] tbody tr[data-run]').count() === 6, 'the Rainwater tab lists the six slopes');
+      t.expect((await dialog.locator('[data-testid=roof-panels-drainage-selected]').innerText()).trim() === '150/100', 'Auto counts the 150/100 system above 100 m²');
+      t.expect((await dialog.locator('tr[data-item="gutter-150"] td.num').first().innerText()).trim() === '15', 'fifteen 4 m gutters, as the app counts them');
+      t.expect((await dialog.locator('tr[data-item="outlet-150"] td.num').first().innerText()).trim() === '8', 'eight outlets, one a downpipe');
+      await t.shot('roof-panels-drainage', { of: '[data-testid=roof-panel-layout]', pad: 0 });
+      // The flat sheet: the three ridge nodes and the valley head laid whole on two 2000 × 1250 sheets, each drawn; the four combinations listed.
+      await dialog.locator('[data-action=roof-panels-sheets]').click();
+      await t.until(async () => await dialog.locator('[data-testid=roof-panels-sheet]').count() === 2, 'two sheets drawn');
+      t.expect(await dialog.locator('[data-testid=roof-panels-sheet] [data-piece]').count() === 4, 'four pieces on them');
+      t.expect(await dialog.locator('[data-testid=roof-panels-sheet-combinations] tbody tr').count() === 4, 'the four combinations of ridge cap and system');
+      await t.shot('roof-panels-sheets', { of: '[data-testid=roof-panel-layout]', pad: 0 });
+      // The Panels section's rainwater fields: Auto asked sizes the roof's own gutters and downpipes, one undo step.
+      await t.ui({ dialog: null });
+      await t.wait(400);
+      const system = t.page.locator('[data-testid=roof-panels-drainage-system]');
+      t.expect(await system.count() === 1, 'the Panels section has the rainwater system');
+      t.expect(await t.page.locator('[data-action=roof-panels-apply-drainage]').count() === 1, 'it offers to size the gutters to the system');
+      await t.page.locator('[data-action=roof-panels-apply-drainage]').click();
+      await t.until(async () => (await t.nodes()).find((n) => n.id === roof.id)?.props?.gutterWidth === 0.15, 'the roof\'s gutters take 150 mm');
+      await t.wait(600);
+      await t.page.locator('[data-testid=roof-panels-drainage]').scrollIntoViewIfNeeded();
+      await t.shot('roof-panels-drainage-section', { of: '[data-testid=roof-panels-drainage]', pad: 6 });
+      // A roof window on the south slope: the panels are cut round it, its edges get the window's flashing kit.
+      await t.ui({ dialog: null });
+      await t.cmd('architecture.addRoofOpening', { roofId: roof.id, x: 3.5, y: 1.6 });
+      await t.wait(800);
+      await select(t, roof.id);
+      await t.wait(600);
+      await t.page.locator('[data-testid=roof-panels-open]').click();
+      await t.until(async () => await dialog.locator('[data-hole=window]').count() === 1, 'the layout draws the roof window cut out');
+      await t.until(async () => await dialog.locator('tr[data-item="window-kit"]').count() === 1, 'the takeoff lists the window\'s flashing kit');
+      t.expect(await t.page.locator('[data-testid=roof-panels-warnings]').count() === 0, 'no warning that the window is not cut out');
+      await t.shot('roof-panels-window', { of: '[data-testid=roof-panels-drawing]', pad: 4 });
+      await t.ui({ dialog: null, selection: null, selected: [] });
+      // The panels as the covering in 3D: a part each, profiled, the reused ones orange.
+      await open3d(t);
+      await t.shot('roof-panels-3d', { of: 'canvas', pad: 0 });
+      // In the Diagram display (pastel) the panels take the roofs' colour as any covering does.
+      const profile = (p) => t.page.evaluate(async (x) => (await import('/src/viewport/render3d.ts')).setRenderProfile(x), p);
+      try {
+        await profile('diagram');
+        await t.page.evaluate(async () => (await import('/src/viewport/diagram.ts')).setDiagram({ variant: 'pastel' }));
+        await t.wait(1500);
+        await t.shot('roof-panels-3d-diagram', { of: 'canvas', pad: 0 });
+      } finally {
+        await t.page.evaluate(async () => (await import('/src/viewport/diagram.ts')).setDiagram({ variant: 'white' }));
+        await profile('drawing');
+      }
+      // S7, the project's own profiles: Profiles… lists Lapin's (read-only) and the project's; Duplicate to edit makes a copy in the
+      // project, which keeps the original's article codes; the roof takes the copy and lays, counts and prices the same.
+      await select(t, roof.id);
+      await t.wait(600);
+      await t.page.locator('[data-testid=roof-panels-profiles]').click();
+      const profiles = t.page.locator('[data-dialog=roofPanelProfiles]');
+      await t.until(async () => await profiles.locator('[data-panel-profile=bilka-balcanic]').count() === 1, 'the profiles dialog lists Lapin\'s profiles');
+      await profiles.locator('[data-panel-profile=bilka-balcanic]').click();
+      t.expect(await profiles.locator('[data-testid=panel-profile-builtin]').count() === 1, 'a built-in profile is shown read-only');
+      await profiles.locator('[data-action=panel-profile-duplicate]').click();
+      await t.until(async () => await profiles.locator('[data-testid=panel-profile-editor]').count() === 1, 'the copy opens in the editor');
+      t.expect(await profiles.locator('[data-panel-profile=bilka-balcanic-copy]').count() === 1, 'the copy is listed under this project\'s');
+      t.expect((await profiles.locator('[data-field=pp-article]').inputValue()).startsWith('bilka-balcanic/'), 'the copy keeps the original\'s article codes');
+      await t.shot('roof-panel-profiles', { of: '[data-dialog=roofPanelProfiles]', pad: 0 });
+      await t.ui({ dialog: null });
+      await t.wait(400);
+      const shipped = (await t.page.locator('[data-testid=roof-panels-summary] .roof-panels-buy').innerText()).replace(/\s+/g, ' ');
+      await t.page.locator('[data-testid=roof-panels-profile]').selectOption('bilka-balcanic-copy');
+      await t.until(async () => (await t.nodes()).find((n) => n.id === roof.id)?.props?.panels?.profile === 'bilka-balcanic-copy', 'the roof names the project\'s copy');
+      await t.until(async () => (await t.page.locator('[data-testid=roof-panels-summary] .roof-panels-buy').innerText()).replace(/\s+/g, ' ') === shipped, `the copy buys the same panels (${shipped})`);
+      // A slope left without panels and a slope's phase fixed, in Panel layout's Per roof plane table; each one undo step.
+      await t.page.locator('[data-testid=roof-panels-open]').click();
+      await t.until(async () => await dialog.locator('[data-testid=roof-panels-faces] tr[data-face]').count() === 6, 'the table lists the six roof planes');
+      const before = await dialog.locator('[data-panel]').count();
+      await dialog.locator('[data-testid=roof-panels-faces] tr[data-face="A06"] [data-field=face-laid]').click();
+      await t.until(async () => (await t.nodes()).find((n) => n.id === roof.id)?.props?.panels?.faces?.A06?.skip === true, 'the roof keeps the slope without panels');
+      await t.until(async () => await dialog.locator('[data-panel]').count() < before, 'the slope\'s panels are gone from the layout');
+      t.expect(await dialog.locator('[data-face-outline="A06"][fill^="url"]').count() === 1, 'the slope without panels is hatched');
+      await dialog.locator('[data-testid=roof-panels-faces] tr[data-face="A01"] [data-action=face-phase-fix]').click();
+      await t.until(async () => typeof (await t.nodes()).find((n) => n.id === roof.id)?.props?.panels?.faces?.A01?.phase === 'number', 'the first slope\'s phase is fixed');
+      await t.wait(400);
+      await t.shot('roof-panels-slope-exceptions', { of: '[data-testid=roof-panel-layout]', pad: 0 });
+      await t.ui({ dialog: null, selection: null, selected: [] });
+      await open3d(t);
+      // From the west, looking east: the slope without panels (A06) in front, its plain covering beside the panels.
+      await t.page.evaluate(async () => (await import('/src/viewport/camera.ts')).useCamera.getState().api?.orbitTo({ azimuth: 0.35, pitch: -0.55, distance: 30, target: { x: 5, y: 5.5, z: 3 } }, false));
+      await t.wait(1500);
+      await t.shot('roof-panels-3d-slope-without', { of: 'canvas', pad: 0 });
+    },
+  },
+  {
     id: 'floors-roofs',
     async run(t) {
       await t.fresh();
@@ -2470,6 +2684,8 @@ export const scenes = [
       t.expect(isFramed, `the house's roof is framed (${roof.props?.shape}, ${roof.props?.structure})`);
       t.expect(await t.page.locator('aside.props dt[title=deckThickness]').count() === 0, 'a framed roof hides the deck fields');
       t.expect(await t.page.locator('aside.props dt[title=rafterSpacing]').count() > 0, 'a framed roof shows its rafters');
+      // Each beam's section with its tick to lay it flat (forum round 26.11.2026, R1).
+      t.expect(await t.page.locator('aside.props dt[title=plateFlat]').count() > 0, 'a framed roof shows the wall plate\'s lay-flat tick');
       await t.shot('roof-properties', { of: 'aside.props', pad: 0, maxHeight: 700 });
       t.expect((await t.nodes()).some((n) => n.type === 'IfcSlab'), 'a floor in the house');
       // The roof configurator (decision 231): the Swedish truss style picked, its framing seen in the section, applied.
@@ -2494,7 +2710,7 @@ export const scenes = [
       for (const l of answers) t.page.on('dialog', l);
       const project = (await t.nodes()).find((n) => n.type === 'IfcProject');
       t.expect(project?.props?.roofStyles?.[0]?.label === 'Our truss roof', `the roof saved as a project style (${project?.props?.roofStyles?.[0]?.label})`);
-      t.expect(await conf.locator('.roof-own').count() === 1, 'the configurator lists the project style');
+      t.expect(await conf.locator('.roof-own', { hasText: 'Our truss roof' }).count() === 1, 'the configurator lists the project style');
       // The downpipes made elements of their own (decision 235), each tied to its gutter.
       await t.cmd('architecture.makeDownpipes', { id: roof.id });
       await t.wait(800);
@@ -3546,6 +3762,8 @@ export const scenes = [
       const plaster = (await t.nodes()).find((n) => n.type === 'IfcMaterial' && n.name === 'Tencuială de var').id;
       t.expect(await t.page.locator(`[data-testid=map-materials] tr[data-material="${plaster}"] [data-testid=map-code]`).inputValue() === 'TEN01', 'the plaster suggested by its material');
       await t.page.locator(`[data-testid=map-materials] tr[data-material="${plaster}"] input[type=checkbox]`).check();
+      // "× Duration" (R7): beside the measure, by the price's unit unless chosen.
+      t.expect(await t.page.locator(`[data-testid=map-types] tr[data-type="${type}"] [data-testid=map-time]`).inputValue() === 'auto', 'the × Duration column, by the price\'s unit');
       await t.shot('map-articles', { of: '[data-testid=map-articles]', pad: 0 });
       await t.page.locator('[data-testid=map-apply]').click();
       await t.wait(800);
@@ -5212,6 +5430,8 @@ export const scenes = [
       await t.tool('architecture.wallTypes');
       await t.wait(600);
       t.expect(await t.page.locator('.dialog [data-testid=type-sweep]').count() === 1, 'the type lists its sweep');
+      // Forum topic 268: the row turns its profile upside down too (Flip).
+      t.expect(await t.page.locator('.dialog [data-field=type-sweep-flip]').count() === 1, 'the row has its Flip');
       await t.shot('wall-type-sweeps', { of: '.dialog', pad: 0 });
       await t.ui({ dialog: null });
     },
@@ -5278,6 +5498,47 @@ export const scenes = [
       await t.wait(400);
       t.expect((await rule.locator('select[data-field=lintel-product]').inputValue()) === `type:${kp7.id}`, 'the rule takes the beam type');
       await t.shot('lintel-beam-type', { of: '.dialog .lintel-rule', pad: 8 });
+      await t.ui({ dialog: null });
+    },
+  },
+  {
+    // Forum topic 259: a floor seen from above hatched on the plan by its top layer's surface pattern, under the walls, its
+    // opening left out; the view style's Floor surface hatches beside Floor finish hatches.
+    id: 'floor-plan-hatch',
+    touches: ['architecture'],
+    async run(t) {
+      await t.fresh();
+      const s = await t.storey();
+      const outline = [[0, 0], [12, 0], [12, 8], [0, 8]];
+      for (let i = 0; i < 4; i++) {
+        const [a, b] = [outline[i], outline[(i + 1) % 4]];
+        await t.cmd('architecture.addWall', { storeyId: s, x1: a[0], y1: a[1], x2: b[0], y2: b[1] });
+      }
+      const inner = (await t.cmd('architecture.addWall', { storeyId: s, x1: 7, y1: 0, x2: 7, y2: 8 })).id;
+      const outer = (await t.nodes()).filter((n) => n.type === 'IfcWall' && n.id !== inner);
+      await t.cmd('architecture.addDoor', { wallId: inner, x: 7, y: 2 });
+      await t.cmd('architecture.addDoor', { wallId: outer[0].id, x: 3, y: 0 });
+      await t.cmd('architecture.addWindow', { wallId: outer[2].id, x: 3.5, y: 8 });
+      await t.cmd('architecture.addWindow', { wallId: outer[2].id, x: 9.5, y: 8 });
+      const type = (await t.cmd('architecture.createSlabType', {
+        name: 'Oak parquet on screed',
+        layers: [{ material: 'Oak parquet', thickness: 0.02 }, { material: 'Screed', thickness: 0.05 }, { material: 'Reinforced concrete', thickness: 0.15, core: true }],
+      })).id;
+      const slab = (await t.cmd('architecture.addSlab', { storeyId: s, points: outline, typeId: type })).id;
+      // A stair well: the floor's opening, not hatched.
+      await t.cmd('architecture.addSlabOpening', { slabId: slab, points: [[9, 4.5], [11.5, 4.5], [11.5, 7.5], [9, 7.5]] });
+      const parquet = (await t.nodes()).find((n) => n.type === 'IfcMaterial' && n.name === 'Oak parquet');
+      t.expect(parquet, 'the parquet material');
+      await t.cmd('material.update', { id: parquet.id, elevation: { hatch: 'BOARDS_150' } });
+      const plan = await t.cmd('view.create', { kind: 'plan', storeyId: s, name: 'Floor plan' });
+      await t.ui({ planViewId: plan.id, keyPlan: false });
+      await t.wait(1200);
+      await t.fit();
+      await t.shot('floor-plan-hatch', { of: '[data-testid=plan]', pad: 0 });
+      // The switch in View settings, ticked in the Architectural style.
+      await t.ui({ dialog: 'viewSettings' });
+      await t.wait(800);
+      t.expect(await t.page.locator('.dialog input[data-testid=view-floor-hatch]').isChecked(), 'the plan hatches its floors');
       await t.ui({ dialog: null });
     },
   },
@@ -6081,6 +6342,53 @@ export const scenes = [
       await t.fit();
       await t.wait(800);
       await t.shot('column-layers-plan', { of: '[data-testid=plan]', pad: 0 });
+    },
+  },
+  {
+    // Decision 866 (forum topic 256, docs/plan-structural-usage.md): the Structural (load-bearing) tick in Properties, the Structure
+    // tab's Structural wall and floor, and a Structure plan drawing what is not structural halftone.
+    id: 'structural-usage',
+    touches: ['core', 'architecture', 'structure'],
+    async run(t) {
+      await t.fresh();
+      const { storey, walls } = await house(t, { roof: false });
+      // The inner wall a partition: its tick cleared; the outer ones by rule.
+      await t.cmd('element.setStructural', { ids: [walls.inner], value: false });
+      await t.cmd('element.setStructural', { ids: [walls[0]], value: true });
+      await t.ui({ view: 'plan', selection: null, selected: [] });
+      await t.wait(600);
+      await select(t, walls[0]);
+      await t.until(async () => (await t.page.locator('[data-testid=structural]').count()) === 1, 'Properties shows the Structural tick');
+      t.expect(await t.page.locator('[data-testid=structural-source]').first().innerText() === 'set on this element', 'the tick says it is set on the wall');
+      await t.wait(400);
+      await t.page.locator('[data-testid=structural]').scrollIntoViewIfNeeded();
+      await t.shot('structural-usage-properties', { of: '[data-testid=structural]', pad: 8 });
+      await select(t, walls[1]);
+      await t.until(async () => (await t.page.locator('[data-testid=structural-source]').count()) >= 1 && (await t.page.locator('[data-testid=structural-source]').first().innerText()).startsWith('by rule'), 'an unset wall shows the rule');
+      await t.ui({ selection: null, selected: [] });
+      // The Structure tab: Structural wall and Structural floor, their walls and floors ticked as drawn.
+      await t.button('Structure', { exact: true });
+      await t.tool('structure.wall');
+      t.expect(await t.page.locator('[data-testid=draw-structural]').count() === 1, 'Structural wall offers its tick in the bar');
+      t.expect(await t.page.locator('[data-testid=draw-structural]').isChecked(), 'ticked by default');
+      await t.wait(400);
+      await t.shot('structural-usage-wall-tool', { of: '.cad-prompt', pad: 4 });
+      await t.keys('Escape');
+      // A Structure plan drawing the others halftone: the partition grey under the bearing walls.
+      const plan = (await t.cmd('view.create', { kind: 'plan', storeyId: storey, discipline: 'Structure', name: 'Structure' })).id;
+      await t.cmd('view.setStyle', { id: plan, halftoneOthers: true });
+      await t.ui({ view: 'plan', planViewId: plan, keyPlan: false });
+      await t.wait(1200);
+      await t.fit();
+      await t.wait(800);
+      await t.shot('structural-usage-plan', { of: '[data-testid=plan]', pad: 0 });
+      await t.ui({ planViewId: null });
+      // The tick in a type dialog: on the wall type itself, one undo step (half-ticked while the rule decides).
+      await t.ui({ dialog: 'wallTypes' });
+      await t.page.waitForSelector('[data-testid=type-structural]', { timeout: 10_000 });
+      await t.page.locator('[data-action=type-structural]').click();
+      await t.until(async () => (await t.nodes()).some((n) => n.type === 'IfcWallType' && n.props.loadBearing === true), 'the Wall types tick sets the type structural');
+      await t.ui({ dialog: null });
     },
   },
   {
@@ -7770,6 +8078,7 @@ export const scenes = [
       await t.call('share.stop');
       // The host shares from the File menu: a link for the browser, a code for the desktop.
       await t.button('File', { exact: true });
+      await t.sub('Collaborate');
       await t.page.getByRole('menuitem', { name: 'Share session…' }).click();
       await t.page.locator('.share-dialog input').first().fill('Ionuț');
       await t.page.locator('.share-dialog .btn.primary').click();
@@ -7809,6 +8118,7 @@ export const scenes = [
       }
       // Joining from Lapin: the link or the code, and one's name.
       await t.button('File', { exact: true });
+      await t.sub('Collaborate');
       await t.page.getByRole('menuitem', { name: 'Join session…' }).click();
       await t.shot('join-dialog', { of: '.dialog', pad: 0 });
       await t.ui({ dialog: null });
@@ -7859,6 +8169,55 @@ export const scenes = [
       await t.wait(1000);
       const after = (await t.nodes()).filter((n) => n.type === 'IfcBuildingStorey').length;
       t.expect(after === before + 4, `four levels made (${before} → ${after})`);
+    },
+  },
+  {
+    // Levels relative or absolute (decision 867, report #190): a survey at 650.37 brought in makes its datum the project's altitude;
+    // the site plan in altitudes draws its contours at round ones; a section writes +0.00 (+650.37); Manage → Location → Levels.
+    id: 'level-datums',
+    touches: ['core', 'civil', 'architecture'],
+    async run(t) {
+      const { page } = t;
+      await t.fresh();
+      const s = await t.storey();
+      await t.cmd('storey.create', { name: 'First floor', elevation: 3, height: 3 });
+      for (const [x1, y1, x2, y2] of [[10, 8, 22, 8], [22, 8, 22, 18], [22, 18, 10, 18], [10, 18, 10, 8]]) await t.cmd('architecture.addWall', { storeyId: s, x1, y1, x2, y2 });
+      const rows = [];
+      for (let x = 0; x <= 40; x += 5) for (let y = 0; y <= 30; y += 5) rows.push(`${x} ${y} ${(650.37 + 0.05 * x + 0.02 * y).toFixed(3)}`);
+      const made = await t.cmd('civil.addTerrain', { text: rows.join('\n'), datum: 650.37, storeyId: s, interval: 0.5, majorEvery: 2, name: 'Survey' });
+      t.expect(typeof made?.note === 'string', 'the survey says it took its datum as the project\'s altitude');
+      const datum = await t.call('doc.query', { name: 'project.levelDatum', args: {} });
+      t.expect(Math.abs((datum?.altitude ?? 0) - 650.37) < 1e-6, `the project's altitude is the terrain's datum (${datum?.altitude})`);
+      // The site plan in altitudes: contours at 650.50, 651.00…
+      await t.cmd('project.levelDatum', { mode: 'absolute' });
+      await t.button('Site', { exact: true });
+      await t.ui({ keyPlan: false });
+      await t.fit();
+      await t.wait(1200);
+      await t.shot('level-datum-site', { of: '[data-testid=plan]', pad: 0 });
+      // A spot level written as an altitude over a relative view: its terrain's Written as.
+      await t.cmd('project.levelDatum', { mode: null });
+      await t.cmd('civil.addSpot', { id: made.id, x: 20, y: 15 });
+      await t.cmd('civil.setSpotDatum', { id: made.id, all: true, datum: 'absolute' });
+      await select(t, made.id);
+      await t.until(async () => (await page.locator('[data-field=spot-level-datum]').count()) === 1, 'the terrain\'s properties offer the spot levels\' Written as');
+      t.expect(await page.locator('[data-field=spot-level-datum]').inputValue() === 'absolute', 'the spot levels are written as altitudes');
+      await t.ui({ selection: null, selected: [] });
+      // A section across the house: both, +0.00 (+650.37).
+      await t.cmd('project.levelDatum', { mode: 'both' });
+      const view = (await t.cmd('view.create', { kind: 'section', start: [16, 4], end: [16, 22], name: 'Section A' })).id;
+      await t.ui({ view: 'drawing', drawingViewId: view, selection: null, selected: [], keyPlan: false });
+      await t.wait(1500);
+      await t.fit();
+      await t.wait(800);
+      const texts = JSON.stringify(await t.call('doc.query', { name: 'view.drawing', args: { id: view } }));
+      t.expect(texts.includes('+0.00 (+650.37)'), 'the section writes the level and its altitude');
+      await t.shot('level-datum-section', { of: '[data-testid=drawing]', pad: 0 });
+      await t.ui({ dialog: 'location' });
+      await t.wait(1000);
+      t.expect(await page.locator('[data-field=level-datum]').count() === 1, 'Manage → Location has its Levels block');
+      await t.shot('level-datum', { of: '[data-field=level-datum]', pad: 6 });
+      await t.ui({ dialog: null, keyPlan: true });
     },
   },
   {
@@ -9322,7 +9681,8 @@ export const scenes = [
       t.expect(/point/i.test(asks), `the command line asks for the next point (it says: ${asks.replace(/\s+/g, ' ').slice(0, 120)})`);
       await t.shot('command-line', { clip: { x: 250, y: 120, width: 860, height: 730 } });
       await t.keys('Escape', 'Escape');
-      // Rectangle: the box by the cursor switches to width and height with Space (the mode is remembered), Tab goes to the height.
+      // Rectangle: the box by the cursor opens on width and height (report #173), Space switches it to length and angle and back
+      // (the mode is remembered per tool), Tab goes to the height.
       await t.page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       await t.page.keyboard.type('REC'); await t.page.keyboard.press('Enter');
       const [rx, ry] = await t.planPoint(2, 2);
@@ -9330,10 +9690,16 @@ export const scenes = [
       const [sx, sy] = await t.planPoint(4, 3.2);
       await t.page.mouse.move(sx, sy, { steps: 6 });
       await t.wait(300);
+      const boxLabel = (text) => t.page.locator('.live-box .live-label', { hasText: new RegExp(`^${text}$`) }).count();
+      t.expect(await boxLabel('W') === 1 && await boxLabel('H') === 1, 'a rectangle\'s box by the cursor opens on width and height');
       await t.page.keyboard.press(' ');
+      await t.wait(200);
+      t.expect(await boxLabel('L') === 1 && await boxLabel('W') === 0, 'Space switches the box to length and angle');
+      await t.page.keyboard.press(' ');
+      await t.wait(200);
       await t.page.keyboard.type('2000'); await t.page.keyboard.press('Tab'); await t.page.keyboard.type('-1500');
       await t.wait(300);
-      t.expect(await t.page.locator('.live-box .live-label', { hasText: 'W' }).count() === 1, 'Space turns the box by the cursor into width and height');
+      t.expect(await boxLabel('W') === 1, 'Space again turns the box back into width and height');
       await t.shot('rectangle-box', { clip: { x: 250, y: 120, width: 860, height: 730 } });
       await t.keys('Escape', 'Escape');
       // Move the inner wall (decision 165): from its middle (snapped), partway across the room with ortho on.
@@ -9432,7 +9798,8 @@ export const scenes = [
         return p;
       };
       const offset = () => page.evaluate(() => {
-        const dt = [...document.querySelectorAll('aside.props dt')].find((x) => x.textContent?.trim() === 'Offset from level');
+        // A beam's offset is from the level above, and says so (forum topic 190).
+        const dt = [...document.querySelectorAll('aside.props dt')].find((x) => ['Offset from level', 'Top offset (from the level above)'].includes(x.textContent?.trim() ?? ''));
         const input = dt?.nextElementSibling?.querySelector('input');
         return input ? input.value : null;
       });
@@ -11825,6 +12192,7 @@ export const scenes = [
       await t.fresh();
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       await t.button('File', { exact: true });
+      await t.sub('Import');
       const chooser = t.page.waitForEvent('filechooser', { timeout: 10_000 });
       await t.page.getByRole('menuitem', { name: 'Import IFC…' }).click();
       await (await chooser).setFiles(file);
@@ -11852,6 +12220,7 @@ export const scenes = [
       await t.fresh();
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       await t.button('File', { exact: true });
+      await t.sub('Import');
       const chooser2d = t.page.waitForEvent('filechooser', { timeout: 10_000 });
       await t.page.getByRole('menuitem', { name: 'Import IFC…' }).click();
       await (await chooser2d).setFiles(file2d);
@@ -11886,6 +12255,7 @@ export const scenes = [
       await t.fresh();
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       await t.button('File', { exact: true });
+      await t.sub('Import');
       const chooser = t.page.waitForEvent('filechooser', { timeout: 10_000 });
       await t.page.getByRole('menuitem', { name: 'Import Fragments…' }).click();
       await (await chooser).setFiles(file);
@@ -11919,6 +12289,7 @@ export const scenes = [
       await t.fresh();
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       await t.button('File', { exact: true });
+      await t.sub('Import');
       const chooser = t.page.waitForEvent('filechooser', { timeout: 10_000 });
       await t.page.getByRole('menuitem', { name: 'Import BIM Open Schema…' }).click();
       await (await chooser).setFiles(file);
@@ -11949,6 +12320,7 @@ export const scenes = [
       await t.cmd('steel.addHall', { storeyId: await t.storey(), attrs: { secondary: false } });
       await t.wait(2000);
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: 'Export IFC, Fragments or BOS…' }).click();
       const exchange = t.page.locator('[aria-label="Export IFC, Fragments or BOS"]');
       await exchange.locator('[data-discipline]').first().waitFor({ timeout: 20_000 });
@@ -11969,6 +12341,7 @@ export const scenes = [
       await t.fresh();
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       await t.button('File', { exact: true });
+      await t.sub('Import');
       const chooser = t.page.waitForEvent('filechooser', { timeout: 10_000 });
       await t.page.getByRole('menuitem', { name: 'Import SDNF…' }).click();
       await (await chooser).setFiles(file);
@@ -11999,7 +12372,7 @@ export const scenes = [
       const block = (await t.cmd('studio.primitive', { shape: 'box', at: [1, 0.6], storeyId: s, width: 1, length: 0.8, height: 0.9 })).id;
       await t.ui({ keyPlan: false, selected: [floor, block], selection: block });
       await t.wait(400);
-      // Modify → Make component, named in its box.
+      // Group → Make component, named in its box.
       await t.tool('modify.component');
       await t.page.locator('.ask-box input').first().fill('Planter bay');
       await t.page.locator('.ask-box .btn.primary').click();
@@ -12108,6 +12481,7 @@ export const scenes = [
       await t.page.evaluate(() => { delete window.showOpenFilePicker; });
       for (const [x, turned] of [['0', '0'], ['24000', '90']]) {
         await t.button('File', { exact: true });
+        await t.sub('Import');
         const chooser = t.page.waitForEvent('filechooser', { timeout: 10_000 });
         await t.page.getByRole('menuitem', { name: 'Link Lapin project…' }).click();
         await (await chooser).setFiles(file);
@@ -12160,8 +12534,11 @@ export const scenes = [
       await t.cmd('view.setStoreys', { id: '3d', mode: 'some', ids: [ground], cut: 1.2 });
       await open3d(t);
       await t.button('File', { exact: true });
-      await t.shot('file-menu', { of: '[role=menu]', pad: 6 });
+      // The menu with its Import submenu open (Open recent, Import, Export and Collaborate are submenus).
+      await t.sub('Import');
+      await t.shot('file-menu', { clip: { x: 0, y: 0, width: 760, height: 640 } });
       // IFC and Fragments exported alike, chosen as an import is.
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: 'Export IFC, Fragments or BOS…' }).click();
       const exchange = t.page.locator('[aria-label="Export IFC, Fragments or BOS"]');
       await exchange.locator('[data-discipline]').first().waitFor({ timeout: 20_000 });
@@ -12169,6 +12546,7 @@ export const scenes = [
       await exchange.getByRole('button', { name: 'Cancel' }).click();
       await t.wait(300);
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: /Export 3D/ }).click();
       await t.wait(500);
       const dialog = t.page.locator('[aria-label="Export 3D"]');
@@ -12181,6 +12559,7 @@ export const scenes = [
       await dialog.getByRole('button', { name: 'Cancel' }).click();
       // Export IFC: face sets, simplified within 2 mm.
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: 'Export IFC, Fragments or BOS…' }).click();
       const ifc = t.page.locator('[aria-label="Export IFC, Fragments or BOS"]');
       await ifc.locator('[data-discipline]').first().waitFor({ timeout: 20_000 });
@@ -12204,6 +12583,7 @@ export const scenes = [
       await house(t, { roof: false });
       t.expect((await t.call('doc.query', { name: 'speckle.accounts', args: {} }))?.length === 0, 'no account is held before one signs in');
       await t.button('File', { exact: true });
+      await t.sub('Collaborate');
       await t.page.locator('[data-menu=speckle-send]').click();
       const dialog = t.page.locator('[aria-label="Send to Speckle"]');
       await dialog.locator('input.speckle-token').waitFor({ timeout: 20_000 });
@@ -12237,6 +12617,7 @@ export const scenes = [
 
       // File → Lapin for the browser (.html)…: the drawings ticked, the 3D model, the estimate and the project in it.
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.locator('[data-menu=export-html]').click();
       const dialog = t.page.locator('[aria-label="Lapin for the browser"]');
       await dialog.locator('[data-testid=html-export-size]').waitFor({ timeout: 60_000 });
@@ -12330,6 +12711,7 @@ export const scenes = [
       const ipe = await t.cmd('structure.createBeamType', { section: 'IPE 300', material: 'Steel' });
       await t.cmd('structure.addBeam', { storeyId: gf, x1: 0, y1: 2.5, x2: 6, y2: 2.5, typeId: ipe.id });
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: 'Export JG Structures (JSON)…' }).click();
       const dialog = t.page.locator('[aria-label="Export JG Structures"]');
       await dialog.locator('.jg-counts').waitFor({ timeout: 20_000 });
@@ -12338,7 +12720,8 @@ export const scenes = [
       // The steel beam splits the edge beams it frames into and the floor it crosses; the wall is one more shell.
       t.expect(report.counts.frames === 11 && report.counts.shells === 3, `four columns, four beams (two split), the steel beam, the floor in two and the wall (${report.counts.frames} frames, ${report.counts.shells} shells)`);
       t.expect(report.counts.supports === 4, `the column and wall feet stand on footings (${report.counts.supports})`);
-      t.expect(report.missing.some((m) => m.name === 'Steel' && m.fields.includes('elastic_modulus')), 'a steel without a grade has no E: said, not guessed');
+      // E is the same for every structural steel (EN 1993-1-1 §3.2.6, report #189); its yield strength is the grade's, so it is said missing, not guessed.
+      t.expect(report.missing.some((m) => m.name === 'Steel' && m.fields.includes('yield_strength') && !m.fields.includes('elastic_modulus')), 'a steel without a grade has E but no fy: said, not guessed');
       t.expect(await dialog.locator('.jg-warn').count() === 1, 'the report says the file is valid but analysis still needs values');
       t.expect(await dialog.locator('[data-testid=jg-footings]').inputValue() === 'fixed', 'feet on footings are fixed by default');
       const pinned = await t.call('doc.query', { name: 'jg.preview', args: { footings: 'pinned' } });
@@ -12815,7 +13198,7 @@ export const scenes = [
         await t.wait(600);
         await t.shot('python-panel');
         // One Undo takes the whole run away.
-        await t.page.locator('.undo-btn').first().click();
+        await t.page.locator('.qa-btn[aria-label="Undo"]').click();
         await t.until(async () => (await walls()) === 0, 'one Undo takes the four walls away');
         await t.shot('python-undo', { of: '[data-panel=script]', pad: 0 });
         await t.page.evaluate(async () => (await import('/src/app/prefs.ts')).setPrefs({ developerExtras: false }));
@@ -12957,7 +13340,7 @@ export const scenes = [
         await t.wait(600);
         await t.shot('python-tools-walls');
         // One Undo takes the four walls away.
-        await page.locator('.undo-btn').first().click();
+        await page.locator('.qa-btn[aria-label="Undo"]').click();
         await t.until(async () => (await walls()) === 0, 'one Undo takes the four walls away');
 
         // Decision 528: a second script, run once, registers a panel of its own with a menu (a pulldown of two tools) and a
@@ -13040,7 +13423,9 @@ export const scenes = [
       await t.wait(300);
       await t.shot('help-menu', { clip: { x: 1100, y: 0, width: 340, height: 400 } });
       t.expect(await t.page.getByRole('menuitem', { name: 'Forum', exact: true }).count() === 1 && await t.page.getByRole('menuitem', { name: 'Ask on the forum…' }).count() === 1, 'the help menu opens the forum and a new topic on it');
-      t.expect((await t.page.locator('.menu-langs button').allTextContents()).join(' ') === 'English Română Español Deutsch Français Dansk Italiano Polski Português ພາສາລາວ 简体中文', 'the help menu offers the interface in English, Romanian, Spanish, German, French, Danish, Italian, Polish, Portuguese, Lao and Simplified Chinese');
+      await t.page.locator('[data-menu-sub="Language"]').click();
+      await t.wait(200);
+      t.expect((await t.page.locator('.menu-langs button').allTextContents()).join(' ') === 'English Română Español Deutsch Français Dansk Italiano Polski Português ພາສາລາວ 简体中文 Ελληνικά Svenska ไทย', 'the help menu offers the interface in English, Romanian, Spanish, German, French, Danish, Italian, Polish, Portuguese, Lao, Simplified Chinese, Greek, Swedish and Thai');
       await t.page.getByRole('menuitem', { name: 'About Lapin…' }).click();
       await t.wait(200);
       t.expect(await t.page.getByText('Helpware', { exact: true }).count() > 0, 'About Lapin says what helpware means');
@@ -13468,7 +13853,8 @@ export const scenes = [
       const issued = await t.page.locator('[data-testid=cde-issued]').innerText();
       t.expect(issued.includes('Issue 1 · P01 S2 · Shared') && issued.includes('HOUSE-CBS-ZZ-00-DR-A-0101_S2_P01.pdf'), 'the dialog shows the issue as issued, its own names');
       t.expect(!issued.includes('0002'), 'not the next issue\'s names');
-      t.expect(!(await t.page.locator('.panel-title', { hasText: 'House' }).first().innerText()).includes('•'), 'the project is saved after the issue');
+      // The window's title names the project, with a dot while it holds unsaved changes (forum topic 257).
+      t.expect(/House/.test(await t.page.title()) && !(await t.page.title()).includes('•'), `the project is saved after the issue (${await t.page.title()})`);
       await t.shot('cde-issued', { of: '.dialog', pad: 0 });
       await t.button('Done', { exact: true });
       await t.tool('manage.projectFolder');
@@ -13487,6 +13873,38 @@ export const scenes = [
       t.expect(await t.page.locator('[data-field=issue-target] option[value=""]').count() === 1, 'a new issue stays a choice');
       await t.shot('cde-reissue', { of: '.dialog', pad: 0 });
       await t.page.locator('.dialog-head button[title=Close]').click();
+    },
+  },
+  {
+    // Publish sets (forum topic 225): Manage → Publish…, a set kept in the project (a plan, a section and two sheets), opened in the
+    // dialog from its picker. Export is not clicked (it opens the system's folder picker).
+    id: 'publish-sets',
+    async run(t) {
+      await t.fresh();
+      await house(t);
+      const storey = await t.storey();
+      const plan = await t.cmd('view.create', { kind: 'plan', storeyId: storey, name: 'Ground floor plan', scale: 100 });
+      const section = await t.cmd('view.create', { kind: 'section', name: 'A-A', start: [5, -0.6], end: [5, 0.8], depth: 1, scale: 50 });
+      const first = await t.cmd('sheet.create', { name: 'Ground floor plan', number: 'A-101', paper: 'A3' });
+      await t.cmd('sheet.addViewport', { id: first.id, viewId: plan.id, x: 150, y: 120 });
+      const second = await t.cmd('sheet.create', { name: 'Sections', number: 'A-201', paper: 'A3' });
+      await t.cmd('sheet.addViewport', { id: second.id, viewId: section.id, x: 150, y: 120 });
+      await t.cmd('publish.setSet', { name: 'Building permit', sheets: [first.id, second.id], views: [plan.id], formats: { pdf: true, combined: true, dxf: false } });
+      await t.tool('manage.publish');
+      await t.page.waitForSelector('[data-testid=publish-dialog]', { timeout: 10_000 });
+      const picker = t.page.locator('select[data-field=publish-set]');
+      const value = await picker.locator('option', { hasText: 'Building permit' }).getAttribute('value');
+      await picker.selectOption(value);
+      await t.wait(400);
+      t.expect(await t.page.locator(`[data-field="publish-sheet-${first.id}"]`).isChecked(), 'the set\'s first sheet is ticked');
+      t.expect(await t.page.locator(`[data-field="publish-sheet-${second.id}"]`).isChecked(), 'the set\'s second sheet is ticked');
+      t.expect(await t.page.locator(`[data-field="publish-view-${plan.id}"]`).isChecked(), 'the set\'s view is ticked');
+      t.expect(!(await t.page.locator(`[data-field="publish-view-${section.id}"]`).isChecked()), 'the section is not in the set');
+      // Three items as a PDF each, plus the combined one: 4 files.
+      t.expect((await t.page.locator('[data-field=publish-count] [data-no-i18n]').innerText()).trim() === '4', 'the count line reads 4 files');
+      await t.shot('publish-sets', { of: '.dialog', pad: 0 });
+      await t.page.locator('.dialog-head button[title=Close]').click();
+      await t.wait(300);
     },
   },
   {
@@ -13877,6 +14295,35 @@ export const scenes = [
       t.expect(await page.locator('aside.props [data-field=rebar-set]').count() === 1, 'a set has its property section');
       await t.shot('rebar-set-properties', { of: 'aside.props [data-field=rebar-set]', pad: 6 });
       await t.ui({ selection: null, selected: [], keyPlan: true });
+    },
+  },
+  {
+    // The project's notation (decision 864): the UK's preset (H12, the spacing after a dash) on a section's bars, and the
+    // Notation block of Rebar settings with its preset, its texts and their examples.
+    id: 'rebar-notation',
+    touches: ['rebar', 'structure', 'architecture'],
+    async run(t) {
+      const { page } = t;
+      await t.fresh();
+      const view = (await t.cmd('view.create', { kind: 'section', start: [0, 0], end: [6, 0], name: 'Notation' })).id;
+      await t.cmd('rebar.add', { viewId: view, shape: 'straight', at: [0.5, 0.6], params: { length: 4 }, diameter: 0.016, count: 3, label: { at: [1.5, 0.9] } });
+      await t.cmd('rebar.addRun', { viewId: view, start: [0.5, 0.2], end: [4.5, 0.2], step: 0.2, params: { a: 0.3, b: 0.5 } });
+      await t.cmd('notation.set', { domain: 'rebar', preset: 'uk' });
+      const described = await t.call('doc.query', { name: 'notation.describe', args: { domain: 'rebar' } });
+      t.expect(described?.[0]?.preset === 'uk', 'the preset is the project\'s');
+      await t.ui({ view: 'drawing', drawingViewId: view, selection: null, selected: [], keyPlan: false });
+      await t.wait(1500);
+      await t.fit();
+      await t.wait(800);
+      await t.shot('rebar-notation-drawing', { of: '[data-testid=drawing]', pad: 0 });
+      await t.ui({ dialog: 'rebarSettings' });
+      await t.wait(1000);
+      t.expect(await page.locator('[data-field=notation-rebar]').count() === 1, 'Rebar settings has its Notation block');
+      // The dialog scrolls: in a language with longer texts the block starts below the window.
+      await page.locator('[data-field=notation-rebar]').scrollIntoViewIfNeeded();
+      await t.wait(300);
+      await t.shot('rebar-notation', { of: '[data-field=notation-rebar]', pad: 6 });
+      await t.ui({ dialog: null, keyPlan: true });
     },
   },
   {
@@ -16111,6 +16558,103 @@ export const scenes = [
     },
   },
   {
+    // Loads in a rule pack (docs/plan-national-packs.md N1): a copy of Lapin's pack with a set of factors of the user's (an example,
+    // the values typed as a user would: 6.10a and 6.10b, γd by safety class, ψ of snow by s0,k); the pack's country, edition and
+    // sources; the Loads tab shows the set; the project takes it with safety class 2 and its combinations carry γd.
+    id: 'rules-loads',
+    touches: ['core', 'analysis'],
+    async run(t) {
+      await t.fresh();
+      const { page } = t;
+      const listed = await t.call('doc.query', { name: 'rules.list', args: {} });
+      const builtin = listed.items.find((i) => i.builtin);
+      const mine = (await t.cmd('rules.create', { from: builtin.id, name: 'Sweden (example)', activate: true })).id;
+      await t.cmd('rules.update', { id: mine, country: 'SE', edition: 'Example: the edition you follow', language: 'sv', sources: ['The regulation you read the values from'] });
+      const pack = await t.call('doc.query', { name: 'rules.get', args: { id: mine } });
+      const loads = structuredClone(pack.sections.loads);
+      loads.sets['se-example'] = {
+        ...loads.sets.en, label: 'Sweden, example (your values)', expression: '6.10ab', xi: 0.89,
+        safetyClasses: { 1: 0.83, 2: 0.91, 3: 1 },
+        snowPsi: [{ from: 0, psi: { 0: 0.6, 1: 0.3, 2: 0.1 } }, { from: 2, psi: { 0: 0.7, 1: 0.4, 2: 0.2 } }],
+      };
+      await t.cmd('rules.update', { id: mine, section: 'loads', values: loads });
+      await t.cmd('analysis.setCombinationOptions', { set: 'se-example', safetyClass: '2' });
+      const options = (await t.call('doc.query', { name: 'analysis.combinations', args: {} })).options;
+      t.expect(options.gammaD === 0.91 && options.expression === '6.10ab', 'the project takes the pack\'s set with γd 0.91');
+      await t.button('Manage', { exact: true });
+      await t.tool('manage.rules');
+      await page.waitForSelector('[data-dialog=rules]', { timeout: 10_000 });
+      await page.locator(`[data-rules-pack="${mine}"]`).click();
+      await page.locator('[data-rules-section=loads]').click();
+      await t.until(async () => (await page.locator('[data-testid=rules-loads]').count()) === 1, 'the Loads tab is shown');
+      await page.locator('[data-load-set="se-example"]').click();
+      await t.until(async () => (await page.locator('[data-testid=rules-safety-classes] tbody tr').count()) === 3, 'the set\'s three safety classes are listed');
+      t.expect(await page.locator('[data-testid=rules-meta]').count() === 1, 'the pack\'s country, edition and sources are shown');
+      await t.wait(500);
+      await t.shot('rules-loads', { of: '[data-dialog=rules]', pad: 8 });
+      await t.ui({ dialog: null });
+    },
+  },
+  {
+    // Climate and accessibility in rule packs (docs/plan-national-packs.md N2, N3): regions with sk and vb,0, picked in Loads →
+    // Snow and wind; a door's, a corridor's, the turning circle's limits and ramps checked, the check's findings.
+    id: 'rules-climate-access',
+    touches: ['core', 'analysis', 'architecture'],
+    async run(t) {
+      await t.fresh();
+      const { page } = t;
+      const s = await t.storey();
+      const listed = await t.call('doc.query', { name: 'rules.list', args: {} });
+      const builtin = listed.items.find((i) => i.builtin);
+      const mine = (await t.cmd('rules.create', { from: builtin.id, name: 'Sweden (example)', activate: true })).id;
+      await t.cmd('rules.update', {
+        id: mine, section: 'climate',
+        values: { regionLabel: 'Kommun', regions: [{ name: 'Kiruna', sk: 5.5, vb0: 22 }, { name: 'Luleå', sk: 3.5, vb0: 23 }, { name: 'Malmö', sk: 1.0, vb0: 26 }, { name: 'Stockholm', sk: 2.0, vb0: 24 }] },
+      });
+      await t.cmd('rules.update', { id: mine, section: 'accessibility', values: { doorClearWidth: 0.8, corridorWidth: 1.3, turningDiameter: 1.5, checkRamps: true } });
+      // A door of 900 (780 clear) and a corridor 1.0 m wide, for the check.
+      const wall = (await t.cmd('architecture.addWall', { storeyId: s, x1: 0, y1: -3, x2: 6, y2: -3 })).id;
+      await t.cmd('architecture.addDoor', { wallId: wall, along: 1.5 });
+      await t.cmd('architecture.addRoom', { storeyId: s, points: [[0, 0], [6, 0], [6, 1], [0, 1]], name: 'Corridor', function: 'Circulation' });
+      await t.button('Manage', { exact: true });
+      await t.tool('manage.rules');
+      await page.waitForSelector('[data-dialog=rules]', { timeout: 10_000 });
+      await page.locator(`[data-rules-pack="${mine}"]`).click();
+      await page.locator('[data-rules-section=climate]').click();
+      await t.until(async () => (await page.locator('[data-testid=rules-regions] tbody tr').count()) === 4, 'the four regions are listed');
+      await t.wait(400);
+      await t.shot('rules-climate', { of: '[data-dialog=rules]', pad: 8 });
+      await page.locator('[data-rules-section=accessibility]').click();
+      await t.until(async () => (await page.locator('[data-testid=rules-accessibility]').count()) === 1, 'the Accessibility tab is shown');
+      await page.locator('[data-field=rules-check]').click();
+      await t.until(async () => (await page.locator('[data-testid=rules-findings] li').count()) >= 2, 'the check lists the narrow door and corridor');
+      await t.wait(400);
+      await t.shot('rules-accessibility', { of: '[data-dialog=rules]', pad: 8 });
+      await t.ui({ dialog: null });
+      // Loads → Snow and wind: the region picked fills s0,k and qb.
+      await t.tool('analysis.cases');
+      const dialog = page.locator('.dialog');
+      await dialog.getByRole('tab', { name: 'Snow and wind' }).click();
+      await t.until(async () => (await dialog.locator('[data-testid=climate-region]').count()) === 1, 'the tab offers the pack\'s regions');
+      // Typed until the button takes it (the tab may draw again as the climate is read).
+      const picked = async () => (await t.call('doc.query', { name: 'analysis.climate', args: {} }))?.region === 'Luleå';
+      await t.until(async () => {
+        if (await picked()) return true;
+        await dialog.locator('[data-testid=climate-region]').fill('Luleå');
+        await t.wait(150);
+        if (await dialog.locator('[data-testid=climate-region-apply]').isEnabled()) await dialog.locator('[data-testid=climate-region-apply]').click({ timeout: 2000 }).catch(() => {});
+        return picked();
+      }, 'the region typed is one of the pack\'s, and used');
+      await t.until(async () => (await t.call('doc.query', { name: 'analysis.climate', args: {} }))?.region === 'Luleå', 'the site takes Luleå\'s values');
+      const climate = await t.call('doc.query', { name: 'analysis.climate', args: {} });
+      t.expect(climate.snow?.s0k === 3.5 && Math.abs(climate.wind?.qb - 0.3306) < 1e-4, `s0,k 3.5 and qb 0.3306 from the region (${climate.snow?.s0k}, ${climate.wind?.qb})`);
+      await t.until(async () => (await dialog.locator('[data-testid=climate-region-current]').count()) === 1, 'the tab says the values are the region\'s');
+      await t.wait(400);
+      await t.shot('loads-climate-region', { of: '.dialog', pad: 0 });
+      await t.ui({ dialog: null });
+    },
+  },
+  {
     // Classifications (docs/plan-user-extensibility.md §7.3): a system with items, a code on a wall in Properties, the office's keynotes, a shared parameter.
     id: 'classifications',
     touches: ['core'],
@@ -17037,6 +17581,7 @@ export const scenes = [
       await t.ui({ dialog: null });
       await t.wait(300);
       await t.button('File', { exact: true });
+      await t.sub('Export');
       await t.page.getByRole('menuitem', { name: 'Export IFC, Fragments or BOS…' }).click();
       const exchange = t.page.locator('[aria-label="Export IFC, Fragments or BOS"]');
       const option = exchange.locator('[data-testid=export-type-properties]');
@@ -17298,6 +17843,22 @@ export const scenes = [
       await dialog2.locator('[data-testid=hp-save]').click().catch(async () => { await dialog2.getByRole('button', { name: 'Make pattern' }).click(); });
       await t.wait(1000);
       await t.shot('hatch-patterns-family', { of: '.dialog', pad: 0 });
+      // Forum 275: a project pattern opens to edit, a built-in one is fixed and is the start of a new one (Duplicate), and a project
+      // pattern is deleted from the list (the confirm is accepted by the runner).
+      await dialog2.locator('[data-pattern=DIAGONAL-5]').click();
+      await t.until(async () => await dialog2.locator('[data-testid=hp-edit-note]').count() === 1, 'a project pattern opens to edit');
+      t.expect(await dialog2.locator('[data-testid=hp-delete]').count() === 1, 'a project pattern has Delete');
+      await dialog2.locator('[data-pattern=BRICK]').click();
+      await t.until(async () => await dialog2.locator('[data-testid=hp-builtin-note]').count() === 1, 'a built-in pattern says it is fixed');
+      await dialog2.locator('[data-testid=hp-duplicate]').click();
+      await t.until(async () => await dialog2.locator('[data-testid=hp-from-note]').count() === 1, 'Duplicate starts a new pattern from it');
+      t.expect(await dialog2.locator('[data-field=hp-name]').inputValue() === 'BRICK-COPY', 'the copy takes a free name');
+      await t.wait(800);
+      await t.shot('hatch-patterns-start-from', { of: '.dialog', pad: 0 });
+      await dialog2.locator('[data-testid=hp-save]').click();
+      await t.until(async () => await dialog2.locator('[data-pattern=BRICK-COPY]').count() === 1, 'the copy is made');
+      await dialog2.locator('li:has([data-pattern=DIAGONAL-5]) [data-testid=hp-row-delete]').click();
+      await t.until(async () => await dialog2.locator('[data-pattern=DIAGONAL-5]').count() === 0, 'the pattern is deleted from the list');
       await t.page.locator('.dialog button[title="Close"]').first().click();
       await t.wait(400);
       await t.ui({ dialog: 'preferences' });
@@ -17412,7 +17973,181 @@ export const scenes = [
       await t.shot('precision-measure-section', { clip: { x: 200, y: 120, width: 1200, height: 760 } });
     },
   },
+  {
+    // An end grip kept on the element's own angle (forum topic 260, decision 865): Ctrl/⌘ while dragging, the change in length typed.
+    id: 'grip-angle-lock',
+    touches: ['core', 'architecture'],
+    async run(t) {
+      await t.fresh();
+      const page = t.page;
+      const s = await t.storey();
+      const a = (37 * Math.PI) / 180;
+      const wall = (await t.cmd('architecture.addWall', { storeyId: s, x1: 0, y1: 0, x2: 4 * Math.cos(a), y2: 4 * Math.sin(a) })).id;
+      // The key plan's thumbnail would sit over the wall's end once it is fitted.
+      await t.ui({ keyPlan: false });
+      await t.fit();
+      await select(t, wall);
+      await t.wait(800);
+      const g = await page.locator('[data-testid=plan] [data-grip="end"]').first().boundingBox();
+      t.expect(g, 'the wall\'s end shows its grip');
+      const [gx, gy] = [g.x + g.width / 2, g.y + g.height / 2];
+      const [tx, ty] = await t.planPoint(4.6, 1.2);
+      await page.mouse.move(gx, gy);
+      await page.mouse.down();
+      await page.mouse.move((gx + tx) / 2, (gy + ty) / 2, { steps: 4 });
+      await page.mouse.move(tx, ty, { steps: 4 });
+      await t.wait(300);
+      t.expect(await page.locator('[data-testid=angle-lock-hint]').count() > 0, 'the live box says Ctrl/⌘ keeps the angle');
+      // The change in length typed: 1500 mm longer, on the side of the cursor (typed before the key: Ctrl+digit is a shortcut; what is typed stays).
+      for (const k of ['1', '5', '0', '0']) await page.keyboard.press(k);
+      await page.keyboard.down('Control');
+      await page.mouse.move(tx + 2, ty - 2, { steps: 2 });
+      await t.wait(300);
+      t.expect(await page.locator('[data-testid=angle-lock]').count() > 0, 'the live box shows the angle is kept');
+      await t.shot('grip-angle-lock', { clip: { x: 250, y: 120, width: 1190, height: 700 } });
+      await page.keyboard.press('Enter');
+      await t.wait(300);
+      await page.mouse.up();
+      await page.keyboard.up('Control');
+      await t.wait(800);
+      const w = (await t.nodes()).find((n) => n.id === wall);
+      const [x2, y2] = [w.props.x2 ?? w.props.end?.[0], w.props.y2 ?? w.props.end?.[1]];
+      if (x2 != null) {
+        t.expect(Math.abs(Math.atan2(y2, x2) - a) < 1e-6, `the wall keeps its 37° (${(Math.atan2(y2, x2) * 180 / Math.PI).toFixed(3)}°)`);
+        t.expect(Math.abs(Math.hypot(x2, y2) - 5.5) < 1e-3, `the wall is 1500 mm longer (${Math.hypot(x2, y2).toFixed(3)} m)`);
+      }
+    },
+  },
+  {
+    // Reference documents (docs/plan-cde-references.md, stage R2): Manage → Reference documents… with the urbanism certificate dropped in as a
+    // PDF, Suggest reading its number, date, issuer and validity from the text, the certificate's checklist of permits (one answered by a
+    // permit, one asked for, one still missing), and the status bar's counter for a permit about to expire.
+    id: 'reference-documents',
+    async run(t) {
+      const day = (n) => new Date(Date.now() + n * 86_400_000).toISOString().slice(0, 10);
+      const dotted = (iso) => iso.split('-').reverse().join('.');
+      await t.fresh();
+      await t.tool('manage.references');
+      await t.page.waitForSelector('[data-testid=refs]', { timeout: 15_000 });
+      t.expect(await t.page.locator('[data-testid=refs-tree] .refs-folder').count() > 8, 'the folder tree shows its folders');
+      t.expect(await t.page.locator('[data-folder=issued-sheets].derived').count() === 1, 'the issued drawings folder is derived, greyed');
+      // The certificate dropped in as a file: one document, in the certificate's folder once Suggest has found what it is.
+      const certificate = referencePdf(['PRIMARIA MUNICIPIULUI HUSI', 'CERTIFICAT DE URBANISM', 'Nr. 1234 din 15.03.2026', 'In scopul: construire locuinta P+1', 'Valabil pana la 15.03.2027']);
+      await t.page.setInputFiles('[data-testid=refs-file]', { name: 'Urbanism certificate 1234.pdf', mimeType: 'application/pdf', buffer: certificate });
+      await t.page.waitForSelector('[data-testid=refs-list] tbody tr', { timeout: 15_000 });
+      await t.page.waitForSelector('[data-testid=refs-preview] canvas', { timeout: 20_000 });
+      t.expect((await t.page.locator('[data-testid=refs-outcome]').innerText()).includes('1'), 'the dialog says one document was added');
+      await t.page.locator('[data-testid=refs-suggest]').click();
+      await t.page.waitForSelector('[data-testid=refs-suggestion]', { timeout: 10_000 });
+      const suggested = await t.page.locator('[data-testid=refs-suggestion]').innerText();
+      t.expect(suggested.includes('1234') && suggested.includes('2026-03-15') && suggested.includes('2027-03-15'), `Suggest reads the number and the dates from the text (${suggested.replace(/\s+/g, ' ')})`);
+      await t.shot('reference-suggest', { of: '.dialog', pad: 0 });
+      await t.page.getByRole('button', { name: 'Apply', exact: true }).click();
+      await t.wait(600);
+      t.expect((await t.page.locator('[data-testid=refs-detail] input[aria-label=Number]').inputValue()) === '1234', 'the confirmed number is in the form');
+      // The permits: one received (about to expire), as the engine takes them from a person who has the file.
+      const permit = referencePdf(['INSPECTORATUL PENTRU SITUATII DE URGENTA', 'AVIZ DE SECURITATE LA INCENDIU', 'Nr. 77', `Data: ${dotted(day(-350))}`, `Valabil pana la ${dotted(day(12))}`]);
+      const added = await t.cmd('references.add', { files: [{ name: 'Fire safety permit 77.pdf', data: permit.toString('base64') }], title: 'Fire safety permit', type: 'aviz', issuer: 'ISU', number: '77', date: day(-350), validUntil: day(12), folder: 'permits-fire' });
+      await t.cmd('references.add', { title: 'Land-book extract', type: 'cf', number: '9001' });
+      await t.wait(800);
+      t.expect(await t.page.locator('[data-testid=refs-list] tbody tr').count() === 3, 'the list shows the certificate, the permit and the request');
+      // The certificate's checklist.
+      await t.page.locator('[data-testid=refs-list] tbody tr', { hasText: 'Urbanism certificate 1234' }).click();
+      await t.page.locator('[data-testid=refs-tab-checklist]').click();
+      await t.page.waitForSelector('[data-testid=refs-checklist]', { timeout: 10_000 });
+      for (const key of ['fire', 'water', 'sewerage']) { await t.page.locator(`[data-option=${key}]`).click(); await t.wait(500); }
+      await t.page.locator('[data-item=fire] select[aria-label="Answered by"]').selectOption({ label: 'Fire safety permit' });
+      await t.wait(600);
+      await t.page.locator('[data-item=water] [data-testid=refs-request]').click();
+      await t.wait(900);
+      const state = async (k) => t.page.locator(`[data-item=${k}]`).getAttribute('data-state');
+      t.expect(await state('fire') === 'expiring' || await state('fire') === 'received', 'the permit answers the fire safety item');
+      t.expect(await state('water') === 'requested', 'a requested document stands for the water item');
+      t.expect(await state('sewerage') === 'missing', 'the sewerage item is still missing');
+      await t.shot('reference-checklist', { of: '.dialog', pad: 0 });
+      // The list, with the permit's badge.
+      await t.page.locator('[data-testid=refs-tab-details]').click();
+      await t.page.locator('[data-folder=permits]').first().locator('button.refs-name').click();
+      await t.wait(500);
+      t.expect((await t.page.locator('[data-testid=refs-list] tbody').innerText()).includes('Fire safety permit'), 'the permits folder lists the permit');
+      await t.shot('reference-documents', { of: '.dialog', pad: 0 });
+      await t.page.getByRole('button', { name: 'Done', exact: true }).click();
+      await t.wait(500);
+      t.expect(await t.page.locator('[data-testid=refs-expiring]').count() === 1, 'the status bar counts the permit that expires within 30 days');
+      await t.shot('reference-expiring', { of: 'footer.status', pad: 0 });
+      void added;
+    },
+  },
+  {
+    // The generator reading the reference documents and the issue sending them (docs/plan-cde-references.md §6, stage R5): the urbanism
+    // certificate with its checklist (water answered by a permit, fire safety asked for, the environment still missing), the starter
+    // template "Borderou de avize și acorduri" filled from them (the certificate's number and date, the Permits and agreements table),
+    // then Manage → Issue… with Include reference documents: the certificate ticked by itself, the permits by their folder.
+    id: 'reference-generator',
+    async run(t) {
+      await t.fresh();
+      await t.cmd('project.setInfo', {
+        name: 'Locuință unifamilială P+1E', number: '12/2026', phase: 'DTAC', address: 'Str. Corneliu Codreanu nr. 14, Huși, jud. Vaslui',
+        client: 'Popescu Ion și Maria', designer: 'Ciuntuc BIM Studio SRL', author: 'arh. Ionuț Ciuntuc', checkedBy: 'ing. Ana Pop',
+      });
+      const pdf = (lines) => ({ name: `${lines[1]}.pdf`, data: referencePdf(lines).toString('base64') });
+      const water = (await t.cmd('references.add', {
+        files: [pdf(['APA-CANAL VASLUI', 'AVIZ DE PRINCIPIU', 'Nr. 512 din 02.05.2026'])], title: 'Aviz alimentare cu apă și canalizare', type: 'aviz',
+        issuer: 'Aquavaslui SA', number: '512', date: '2026-05-02', validUntil: '2027-05-02', folder: 'permits-utilities',
+      })).id;
+      const fire = (await t.cmd('references.add', { title: 'Aviz de securitate la incendiu', type: 'aviz', issuer: 'ISU Vaslui', folder: 'permits-fire' })).id;
+      const cu = (await t.cmd('references.add', {
+        files: [pdf(['PRIMARIA MUNICIPIULUI HUSI', 'CERTIFICAT DE URBANISM', 'Nr. 1234 din 15.03.2026'])], title: 'Certificat de urbanism nr. 1234', type: 'cu',
+        issuer: 'Primăria Municipiului Huși', number: '1234', date: '2026-03-15', validUntil: '2099-03-15',
+      })).id;
+      await t.cmd('references.update', { id: cu, requires: [{ key: 'water', document: water }, { key: 'fire', document: fire }, 'environment'] });
+      await t.cmd('document.create', { template: 'borderou-avize' });
+      await t.tool('manage.documents');
+      await t.page.waitForSelector('[data-dialog=documents] .doc-sheet:not(.doc-measure)', { timeout: 90_000 });
+      await t.wait(600);
+      const preview = await t.page.locator('[data-field=doc-preview]').innerText();
+      t.expect(preview.includes('1234') && preview.includes('15.03.2026'), 'the certificate\'s number and date are filled in');
+      t.expect(preview.includes('Alimentare cu apă') && preview.includes('Aquavaslui SA'), 'the permits table lists the checklist with the documents answering it');
+      t.expect(await t.page.locator('[data-field=doc-template-borderou-avize] .tag').count() > 0, 'the starter template is marked indicative');
+      await t.shot('documents-permits', { of: '[data-dialog=documents]', pad: 0 });
+      await t.page.locator('[data-dialog=documents] .dialog-head button[title=Close]').click(); await t.wait(300);
+      // Manage → Issue… with the reference documents: the certificate by itself, the permits by their folder (the one asked for has no file yet).
+      await t.tool('manage.issue');
+      await t.page.waitForSelector('[data-field=issue-references]', { timeout: 10_000 });
+      await t.page.locator('[data-field=issue-references]').check();
+      await t.page.waitForSelector('[data-field=issue-ref-folder-permits]', { timeout: 10_000 });
+      await t.page.locator(`[data-field="issue-ref-${cu}"]`).check();
+      await t.page.locator('[data-field=issue-ref-folder-permits]').check();
+      await t.wait(300);
+      t.expect(await t.page.locator(`[data-field="issue-ref-${water}"]`).isChecked(), 'the permits folder ticks the water permit');
+      t.expect(await t.page.locator(`[data-field="issue-ref-${fire}"]`).isDisabled(), 'the permit asked for has no file: it cannot go');
+      t.expect((await t.page.locator('[data-field=issue-references-list]').innerText()).includes('2'), 'two reference documents go with the issue');
+      await t.page.locator('[data-field=issue-references-list]').scrollIntoViewIfNeeded();
+      await t.shot('issue-references', { of: '.dialog .cde-sheets', pad: 6 });
+      await t.page.locator('.dialog-head button[title=Close]').click(); await t.wait(300);
+    },
+  },
 ];
+
+/** A one-page PDF whose page shows the lines given, in Helvetica, one under the other (text a reader can extract). */
+function referencePdf(lines) {
+  const esc = (s) => s.replace(/[\\()]/g, (c) => `\\${c}`);
+  const stream = `BT /F1 12 Tf 72 790 Td 16 TL\n${lines.map((l) => `(${esc(l)}) Tj T*`).join('\n')}\nET\n`;
+  const objects = [
+    '<< /Type /Catalog /Pages 2 0 R >>',
+    '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+    '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>',
+    '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>',
+    `<< /Length ${Buffer.byteLength(stream, 'latin1')} >>\nstream\n${stream}endstream`,
+  ];
+  let out = '%PDF-1.4\n';
+  const offsets = [];
+  objects.forEach((o, i) => { offsets.push(Buffer.byteLength(out, 'latin1')); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  const xref = Buffer.byteLength(out, 'latin1');
+  out += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n${offsets.map((o) => `${String(o).padStart(10, '0')} 00000 n \n`).join('')}`;
+  out += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+  return Buffer.from(out, 'latin1');
+}
 
 /** A zip of stored entries (name, text), enough for a BCF file: the local headers, the central directory and its end, with CRC-32. */
 export function bcfZip(entries) {

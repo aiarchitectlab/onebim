@@ -5,7 +5,9 @@
  * the command line's bar; the sweep in the inspector (its profile with its preview, its material, the face), and on a wall
  * the sweeps it carries. A sweep of the wall's type (decision 298) says so in the inspector: "From the type", or
  * the fields the wall made its own, with Back to the type and Switch off on this wall; the wall's list offers the type's
- * sweeps switched off on it again. The Wall sweeps schedule adds them all up.
+ * sweeps switched off on it again. The Wall sweeps schedule adds them all up. With several sweeps selected, every change
+ * here goes to all of them, as the inspector's fields do (forum topic 268); with several walls, switching the type's
+ * sweeps on again too.
  */
 
 import { useMemo } from 'react';
@@ -17,6 +19,7 @@ import { notify, select, useUi } from '../../app/store';
 import { execute, useSession } from '../../engine/session';
 import { relatedOf, relatingOf } from '../../engine/model';
 import { LengthField } from '../../shell/cells';
+import { sameKind } from '../../shell/params';
 import { WallRevealIcon, WallSweepIcon } from '../../icons';
 import { MaterialPicker } from '../core/MaterialPicker';
 import { ProfilePicker, ProfilePreview } from '../core/ProfilesDialog';
@@ -48,6 +51,32 @@ function SweepOptions({ mode }: { mode: Mode }) {
   );
 }
 
+/**
+ * The Properties panel while a sweep tool is active: the profile the next one is made with, with its preview, chosen before
+ * the click (the same choice as the command line's bar; forum topic 268).
+ */
+function SweepProps({ mode }: { mode: Mode }) {
+  const nodes = useSession((s) => s.nodes);
+  const prefs = useSweepPrefs();
+  const value = mode === 'cut' ? prefs.revealProfile : prefs.sweepProfile;
+  const shape = (value ? nodes.get(value)?.props.profile : undefined) as unknown as ProfileJson | undefined;
+  return (
+    <div className="pad new-element" data-field="sweep-tool-profile">
+      <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
+        <ProfilePreview shape={shape} size={64} />
+        <div className="grow">
+          <label className="type-pick"><span className="eyebrow">Profile</span>
+            <ProfilePicker use={mode === 'cut' ? 'reveal' : 'sweep'} value={value} testId="sweep-profile-panel"
+              onPick={(id) => useSweepPrefs.setState(mode === 'cut' ? { revealProfile: id } : { sweepProfile: id })} /></label>
+          <p className="small muted">{mode === 'cut' ? 'A reveal: taken out of the wall.' : 'A sweep: added to the wall\'s face.'}</p>
+        </div>
+      </div>
+    </div>
+  );
+}
+const SweepPropsAdd = () => <SweepProps mode="add" />;
+const SweepPropsCut = () => <SweepProps mode="cut" />;
+
 const SweepBar = () => <SweepOptions mode="add" />;
 const RevealBar = () => <SweepOptions mode="cut" />;
 
@@ -65,13 +94,13 @@ function onFace(mode: Mode): ToolDef['complete'] {
 
 /** A sweep on the wall face picked: a cornice, a band, a plinth, a sill. */
 export const wallSweep: ToolDef = {
-  id: 'architecture.wallSweep', label: 'Wall sweep', icon: WallSweepIcon, shortcut: 'WB', options: SweepBar,
+  id: 'architecture.wallSweep', label: 'Wall sweep', icon: WallSweepIcon, shortcut: 'WB', options: SweepBar, properties: SweepPropsAdd,
   gesture: { kind: 'face', types: ['IfcWall'] }, complete: onFace('add'),
 };
 
 /** A reveal in the wall face picked: a groove taken out of the wall's layers. */
 export const wallReveal: ToolDef = {
-  id: 'architecture.wallReveal', label: 'Wall reveal', icon: WallRevealIcon, shortcut: 'RV', options: RevealBar,
+  id: 'architecture.wallReveal', label: 'Wall reveal', icon: WallRevealIcon, shortcut: 'RV', options: RevealBar, properties: SweepPropsCut,
   gesture: { kind: 'face', types: ['IfcWall'] }, complete: onFace('cut'),
 };
 
@@ -96,7 +125,8 @@ export function WallSweepSection({ node }: { node: NodeDto }) {
   const mode: Mode = node.props.mode === 'cut' ? 'cut' : 'add';
   const shape = node.props.profile as unknown as ProfileJson | undefined;
   const material = typeof node.props.material === 'string' ? nodes.get(node.props.material)?.name ?? '' : '';
-  const set = (args: Record<string, unknown>) => void execute('architecture.updateWallSweep', { id: node.id, ...args });
+  // Every sweep selected with it takes the change (forum topic 268: only the last one did).
+  const set = (args: Record<string, unknown>) => void execute('architecture.updateWallSweep', { ids: sameKind(node), ...args });
   return (
     <div className="layers">
       <div className="row" style={{ gap: 8, alignItems: 'flex-start' }}>
@@ -126,15 +156,20 @@ const OWN_LABELS: Record<string, string> = {
 /** A wall type's sweep: whether it is as the type has it or the wall's own in some fields, and the way back. */
 function TypeSweepState({ node }: { node: NodeDto }) {
   const own = Array.isArray(node.props.own) ? (node.props.own as string[]) : [];
+  // The type's sweeps among those selected with it: a wall's own sweep has no type to go back to, nor one to switch off.
+  const typeSweeps = (ownOnly: boolean) => sameKind(node).filter((id) => {
+    const p = useSession.getState().nodes.get(id)?.props;
+    return typeof p?.typeSweep === 'string' && (!ownOnly || (Array.isArray(p.own) && p.own.length > 0));
+  });
   const fields = [...new Set(own.map((k) => OWN_LABELS[k] ?? k))];
   return (
     <div className="row" style={{ gap: 6, flexWrap: 'wrap' }} data-testid="type-sweep-state">
       {own.length === 0
         ? <span className="chip">From the type</span>
         : <span className="chip on" title="These fields are this wall's own: the type's changes leave them"><span>Own:</span> {fields.map((f, i) => <span key={f}>{i > 0 ? ', ' : ''}<span>{f}</span></span>)}</span>}
-      {own.length > 0 && <button type="button" className="btn small" onClick={() => void execute('architecture.updateWallSweep', { id: node.id, reset: true })}><RotateCcw size={13} /> Back to the type</button>}
+      {own.length > 0 && <button type="button" className="btn small" onClick={() => void execute('architecture.updateWallSweep', { ids: typeSweeps(true), reset: true })}><RotateCcw size={13} /> Back to the type</button>}
       <button type="button" className="btn small" title="The type's sweep is left off this wall (as deleting it does); the wall's Sweeps and reveals switch it on again"
-        onClick={() => void execute('architecture.updateWallSweep', { id: node.id, off: true })}><EyeOff size={13} /> Switch off on this wall</button>
+        onClick={() => void execute('architecture.updateWallSweep', { ids: typeSweeps(false), off: true })}><EyeOff size={13} /> Switch off on this wall</button>
     </div>
   );
 }
@@ -156,7 +191,7 @@ export function WallSweepsOnWall({ node }: { node: NodeDto }) {
         ))}
       </ul>
       {off > 0 && (
-        <button type="button" className="btn small" disabled={!node.editable} data-testid="type-sweeps-on" onClick={() => void execute('architecture.restoreWallSweeps', { wallId: node.id })}>
+        <button type="button" className="btn small" disabled={!node.editable} data-testid="type-sweeps-on" onClick={() => void execute('architecture.restoreWallSweeps', { ids: sameKind(node) })}>
           <Eye size={13} /> <span>Switch the type's sweeps on again</span> <span className="muted" data-no-i18n>({off})</span>
         </button>
       )}

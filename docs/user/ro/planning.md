@@ -83,6 +83,8 @@ Deschide din nou generatorul și apasă **Aplică**: programul e refăcut peste 
 
 Un cofraj sau o schelă din **Organizare de șantier** nu are sarcina lui: trăiește după sarcinile a ceea ce servește. Cofrajul se montează când începe placa, grinda sau peretele lui și se scoate după ce au trecut zilele spuse de tipul lui de la terminarea lor (**Decofrat după**, în zile lucrătoare: 21 la plăci și grinzi, 7 la pereți, stâlpi și fundații, dacă tipul nu spune altfel). Schela stă de la prima sarcină pe pereții ei până la ultima, cu finisajele lor. Selectează unul și Proprietățile lui spun când e **Pe șantier** și după ce sarcini **Trăiește după**.
 
+Celelalte lucrări provizorii făcute și desfăcute în aceeași fază, care nu stau pe nimic (parapeții New Jersey, indicatoarele, semnalizatorii unei faze), se planifică la fel ca orice element: le ia regula unei sarcini (după clasă, după **Faze** sau **Demolat în**), **Generează programul…** le așază, iar **Elemente fără sarcină** le arată pe cele pe care nu le are încă nicio sarcină.
+
 ## Gantt-ul
 
 ![Gantt-ul sub vederea 3D, cu o sarcină selectată](shots/planning-gantt.webp)
@@ -274,7 +276,7 @@ Barele arată partea realizată mai închisă. Proprietățile spun de unde vine
 
 ![Marcajele unui perete în proprietățile lui](shots/planning-element-marks.webp)
 
-Pe șantier, de pe telefon: intră în sesiunea partajată a proiectului din browser (**Fișier → Partajează sesiunea…** pe calculatorul care îl are deschis). Un invitat care a intrat doar ca să se uite poate totuși marca elemente și scrie progresul unei sarcini: marcarea e singura modificare deschisă oricărui invitat. Fotografiile și rapoartele pe sarcini sunt pentru ediția premium.
+Pe șantier, de pe telefon: intră în sesiunea partajată a proiectului din browser (**Fișier → Colaborare → Partajează sesiunea…** pe calculatorul care îl are deschis). Un invitat care a intrat doar ca să se uite poate totuși marca elemente și scrie progresul unei sarcini: marcarea e singura modificare deschisă oricărui invitat. Fotografiile și rapoartele pe sarcini sunt pentru ediția premium.
 
 ### Linia de bază
 
@@ -325,6 +327,8 @@ O sarcină mutată își păstrează începutul ca început de nivelare. Legătu
 
 Cu un deviz (**Execuție → Deviz…**), Gantt-ul primește coloana **Cost**: partea din deviz a fiecărei sarcini, din rândurile care îi prețuiesc elementele (a unui rezumat e a sarcinilor lui). Bara de unelte arată **bugetul** (cheltuielile directe ale devizului) și costul **la zi** (costul fiecărei sarcini înmulțit cu procentul ei realizat); Proprietăți arată costul unei sarcini și partea realizată. **Execuție → Costul în timp** desenează curba S și tabelul lunar (vezi [Devizul](cost.md)).
 
+Programul îi dă devizului și timpul cât stă fiecare element pe șantier: de la începutul primei sarcini care îl preia până la finalul ultimeia. Un articol pus pe **× Durată** (sau prețuit într-o unitate de timp, *m × lună*, *buc/zi*, *oră*) își înmulțește cantitatea cu el, în luni, zile lucrătoare, zile calendaristice sau ore lucrătoare ale calendarului de mai jos, calculat din nou ori de câte ori se schimbă o sarcină sau calendarul. Un element din nicio sarcină își păstrează cantitatea, iar rândul lui din deviz spune asta (vezi [Articole prețuite după timpul pe șantier](cost.md#articole-prețuite-după-timpul-pe-șantier)).
+
 ## Calendarul
 
 ![Calendarul de lucru](shots/planning-calendar.webp)
@@ -336,12 +340,12 @@ Cu un deviz (**Execuție → Deviz…**), Gantt-ul primește coloana **Cost**: p
 - **pauza de iarnă** pentru lucrările umede, oprită implicit: de la 15 decembrie la 1 martie, dacă nu alegi alte zile;
 - **excepțiile**: zile libere ale proiectului (un șantier închis) sau zile lucrate care altfel n-ar fi (o sâmbătă).
 
-Duratele și decalajele numără zilele lucrătoare ale acestui calendar.
+Duratele și decalajele numără zilele lucrătoare ale acestui calendar; la fel și articolele devizului prețuite după zile sau ore lucrătoare pe șantier.
 
 ## Schimbul programului
 
 - **Exportă MS Project…** scrie un fișier MS Project XML. Îl deschid MS Project, ProjectLibre și GanttProject, iar Primavera P6 îl importă. Conține sarcinile cu WBS-ul, duratele, datele, constrângerile și rezervele lor, legăturile cu tipurile și decalajele lor și calendarul, cu fiecare sărbătoare ca excepție. **Importă MS Project…** citește un astfel de fișier în locul programului proiectului. Un program scris de Lapin și citit din nou își păstrează id-urile sarcinilor și datele.
-- **Exportă IFC…** (și din **Fișier**) scrie programul în fișierul IFC, împreună cu modelul: un IfcWorkSchedule, IfcTask-urile cu timpii lor, legăturile IfcRelSequence și IfcWorkCalendar. Importul unui fișier IFC care are un program îl aduce și pe acesta.
+- **Exportă IFC…** (și din **Fișier → Exportă**) scrie programul în fișierul IFC, împreună cu modelul: un IfcWorkSchedule, IfcTask-urile cu timpii lor, legăturile IfcRelSequence și IfcWorkCalendar. Importul unui fișier IFC care are un program îl aduce și pe acesta.
 - **Export XLSX** scrie un registru de calcul: tabelul Gantt-ului și zilele libere ale calendarului.
 
 Câmpurile proprii ale lui Lapin pentru care alte programe n-au loc (constrângerea unei sarcini, dacă e umedă, pauza de iarnă) merg în IFC ca seturile de proprietăți `Lapin_Task` și `Lapin_Calendar`. MS Project nu are sarcini umede, deci pauza de iarnă rămâne în Lapin.

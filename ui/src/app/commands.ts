@@ -15,7 +15,7 @@ import { chooseWorkspace, onInterfaceChange, useInterface, WORKSPACE_IDS, WORKSP
 import { effectiveBindings, formatBinding, resolveAlias, resolveKeymap, useKeymap, type Binding, type CommandDef, type Keymap } from './shortcuts';
 import { anchorFor, setAnchor, stepAnchor } from '../platform/anchor';
 import { datumHere } from '../viewport/datum';
-import { findTool, activate, activateSlot, allTools, defaultHotbar, hotbarSlots, ribbonTabs } from '../platform/modules';
+import { findTool, activate, activateSlot, allTools, defaultHotbar, hotbarSlots, ribbonTabs, similarFor } from '../platform/modules';
 import { extraTools, extraToolsRev } from '../platform/extraTools';
 import { tabHandlers } from '../platform/scope';
 import { redo, undo, useSession } from '../engine/session';
@@ -36,6 +36,11 @@ import { useMove3d } from '../viewport/moveIn3d';
 import { cancel as cancelStep } from '../viewport/cad/session';
 import { notify } from './store';
 import { canPlace, findInBrowser, placeOnSheet, viewIdOfTab } from '../shell/browserFind';
+import { BOOKMARK_SLOTS, gotoCameraBookmark, saveCameraBookmark } from './cameraBookmarks';
+import { openOnboarding } from './onboarding';
+import { togglePieMenu } from '../shell/PieMenu';
+import { openBuildReplay } from '../shell/BuildReplay';
+import { playSound, toggleTactileSounds } from './sounds';
 
 /**
  * Undo and redo while a gesture is under way (audit U11): a CAD step is cancelled first; a body drag or a 3D move is not
@@ -63,8 +68,8 @@ const zoom = (f: (h: NonNullable<ReturnType<typeof zoomHost>>) => void) => () =>
 function appCommands(): CommandDef[] {
   const general = 'General', views = 'Views', panels = 'Panels', draw = 'Drawing aids';
   return [
-    { id: 'app.undo', label: 'Undo', category: general, defaults: ['Ctrl+Z'], run: () => { if (gestureFree()) void undo(); } },
-    { id: 'app.redo', label: 'Redo', category: general, defaults: ['Ctrl+Y', 'Ctrl+Shift+Z'], run: () => { if (gestureFree()) void redo(); } },
+    { id: 'app.undo', label: 'Undo', category: general, defaults: ['Ctrl+Z'], run: () => { if (gestureFree()) { playSound('undo'); void undo(); } } },
+    { id: 'app.redo', label: 'Redo', category: general, defaults: ['Ctrl+Y', 'Ctrl+Shift+Z'], run: () => { if (gestureFree()) { playSound('undo'); void redo(); } } },
     { id: 'app.new', label: 'New project', category: general, defaults: ['Ctrl+N'], run: () => void runFileAction('file.new') },
     { id: 'app.open', label: 'Open…', category: general, defaults: ['Ctrl+O'], run: () => void runFileAction('file.open') },
     { id: 'app.save', label: 'Save', category: general, defaults: ['Ctrl+S'], run: () => void runFileAction('file.save') },
@@ -84,7 +89,31 @@ function appCommands(): CommandDef[] {
     { id: 'app.selectAll', label: 'Select all', category: general, defaults: ['Ctrl+A'], run: selectAll },
     // The selection's class and type in the view in front (forum topic 250); the right-click menu's Select similar in this view.
     { id: 'app.selectSimilar', label: 'Select similar in this view', category: general, defaults: ['Ctrl+Shift+A'], run: selectSimilarHere },
+    // Smart eyedropper / Pick Block (docs/plan-ux-game-like.md, P5): activates the authoring tool with the selected element's exact type.
+    { id: 'app.eyedropper', label: 'Pick & create similar', category: general, defaults: ['Alt+I'], run: () => {
+      const id = useUi.getState().selection;
+      const node = id ? useSession.getState().nodes.get(id) : undefined;
+      const fn = node ? similarFor(node) : null;
+      if (fn) fn();
+      else notify('Select an element first, then press Alt+I (or CS) to place another of the same type.');
+    } },
     { id: 'app.palette', label: 'Commands…', category: general, defaults: ['Ctrl+K'], run: dialog('palette') },
+    { id: 'app.pieMenu', label: 'Radial menu', category: general, defaults: ['Alt+Q'], run: togglePieMenu },
+    { id: 'app.missions', label: 'Interactive missions…', category: general, defaults: [], run: () => openOnboarding('role') },
+    { id: 'app.buildReplay', label: 'Build replay (time-lapse)', category: views, defaults: [], run: openBuildReplay },
+    { id: 'app.toggleSounds', label: 'Tactile sounds: on / off', category: general, defaults: [], run: () => { const on = toggleTactileSounds(); notify(on ? 'Tactile sounds enabled.' : 'Tactile sounds muted.'); } },
+    // Camera bookmarks (plan-ux-game-like.md, P7): Alt+1..4 jumps, Alt+Shift+1..4 keeps the view. Alt with a digit is read by
+    // the key's place (chordOf), so it works on any layout, and it is no system's screenshot or tab key; rebindable as any.
+    ...BOOKMARK_SLOTS.map((slot) => ({ id: `app.bookmarkSave.${slot}`, label: `Save camera bookmark ${slot}`, category: views, defaults: [`Alt+Shift+${slot}`], run: () => {
+      saveCameraBookmark(slot);
+      const keys = bindingText(`app.bookmarkGoto.${slot}`).split(', ')[0];
+      notify(keys ? `Camera bookmark ${slot} saved: ${keys} jumps back to it.` : `Camera bookmark ${slot} saved.`);
+    } })),
+    ...BOOKMARK_SLOTS.map((slot) => ({ id: `app.bookmarkGoto.${slot}`, label: `Jump to camera bookmark ${slot}`, category: views, defaults: [`Alt+${slot}`], run: () => {
+      if (gotoCameraBookmark(slot)) return;
+      const keys = bindingText(`app.bookmarkSave.${slot}`).split(', ')[0];
+      notify(keys ? `Camera bookmark ${slot} is empty: ${keys} in 3D keeps the current view there.` : `Camera bookmark ${slot} is empty.`);
+    } })),
     { id: 'app.commandLine', label: 'Command line: take all typing', category: general, defaults: ['Backquote'], run: () => useCad.setState((s) => ({ takeAll: !s.takeAll })) },
     { id: 'app.shortcuts', label: 'Keyboard shortcuts…', category: general, defaults: [], run: dialog('shortcuts') },
     { id: 'app.interface', label: 'Interface…', category: general, defaults: ['Ctrl+.'], run: dialog('interface') },

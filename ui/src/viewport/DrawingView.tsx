@@ -374,9 +374,9 @@ export function DrawingView() {
     viewIds: [id], mode: 'drawing', toScreen, scale: v.scale, disabled: !!cadStep, svg: ref, marks: drawing?.marks,
     raw: (cx, cy) => { const r = ref.current!.getBoundingClientRect(); return toWorld(cx - r.left, cy - r.top); },
     frame: drawing?.frame, viewKind: drawing?.kind, developed: (drawing?.frames?.length ?? 0) > 0,
-    aim: (cx, cy, from) => {
+    aim: (cx, cy, from, _z, along) => {
       const r = ref.current!.getBoundingClientRect();
-      const a = aim(toWorld(cx - r.left, cy - r.top), from, { orthoHeld: false });
+      const a = aim(toWorld(cx - r.left, cy - r.top), from, { orthoHeld: false, along });
       setHover(a);
       liveCursor(a.point);
       return a.point;
@@ -393,7 +393,7 @@ export function DrawingView() {
             <button type="button" className="icon" data-testid="paper-back" title="Back to the sheet: place, move and crop its views there"
               onClick={() => { const to = openSheetOf(id!); if (to) useUi.setState(to); }}><FileText size={14} /><span className="small">Sheet</span></button>
           </>
-        ) : <span className="view-title">{node?.name ?? 'View'} · 1:{drawing?.scale ?? 100}</span>}
+        ) : null}
 {(drawing?.lineworkOrphans?.length ?? 0) > 0 && id && (
           <button type="button" className="chip warn" title="The edges they were on are gone: remove them" onClick={() => void execute('view.lineworkReset', { id: id, orphans: true })}>
             {drawing!.lineworkOrphans!.length} line edit(s) lost their edge · clean

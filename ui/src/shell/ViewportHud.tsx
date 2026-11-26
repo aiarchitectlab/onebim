@@ -17,7 +17,7 @@ import { t } from '../i18n';
 import { activateSlot, findTool, hotbarIds, putInSlot, quickSlot, resetSlots, swapSlots, typeSlot, typesOf, useToolTick } from '../platform/modules';
 import { reach, SLOT_DRAG, TOOL_DRAG, useHotbars } from '../app/hotbar';
 import { openContextMenu } from './ContextMenu';
-import { useState, type DragEvent, type MouseEvent } from 'react';
+import { useEffect, useState, type DragEvent, type MouseEvent } from 'react';
 import { activeStorey, useSession } from '../engine/session';
 import { num } from '../engine/model';
 import { ScopeBar } from './ScopeBar';
@@ -25,6 +25,7 @@ import { DrillCrumbs } from './DrillCrumbs';
 import { formatLevel, lengthText, useStandards } from '../engine/unitsStore';
 import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp } from 'lucide-react';
 import { scopeOf, setQuickToolsHidden, useBars } from '../app/bars';
+import { useXrayPeek } from '../app/xrayPeek';
 
 const level = (e: number) => formatLevel(e);
 
@@ -45,6 +46,45 @@ export function toolHint(tool: string | null): string | null {
   if (g.kind === 'threePoints' && g.arc && space) return `${active.label}: click its start, its end, then a point it passes through · Space: ${space} · Esc cancels`;
   if (g.kind === 'pickThenPoint') return `${active.label}: ${g.hint ?? 'click the element, then a point · Enter takes the first click alone, Esc cancels'}`;
   return null;
+}
+
+const KEY_RE = /\b(Shift|Space|Enter|Esc|Tab|Ctrl|Alt|Backspace)\b/g;
+
+/** Splits a tool hint into plain text and keycap tokens while preserving exact textContent. */
+export function splitHintTokens(text: string): { text: string; key?: string }[] {
+  const out: { text: string; key?: string }[] = [];
+  let last = 0;
+  for (const m of text.matchAll(KEY_RE)) {
+    const idx = m.index ?? 0;
+    if (idx > last) out.push({ text: text.slice(last, idx) });
+    out.push({ text: m[0], key: m[0].toLowerCase() });
+    last = idx + m[0].length;
+  }
+  if (last < text.length) out.push({ text: text.slice(last) });
+  return out;
+}
+
+/** Reactive keycap hint bar: highlights Shift/Ctrl/Alt/Space live while held. */
+function KeycapHint({ text }: { text: string }) {
+  const [held, setHeld] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    const name = (e: KeyboardEvent): string | null =>
+      e.key === 'Shift' ? 'shift' : e.key === 'Control' || e.key === 'Meta' ? 'ctrl' : e.key === 'Alt' ? 'alt' : e.key === ' ' ? 'space' : null;
+    const down = (e: KeyboardEvent) => { const k = name(e); if (k) setHeld((s) => (s.has(k) ? s : new Set([...s, k]))); };
+    const up = (e: KeyboardEvent) => { const k = name(e); if (k) setHeld((s) => { if (!s.has(k)) return s; const n = new Set(s); n.delete(k); return n; }); };
+    const clear = () => setHeld((s) => (s.size ? new Set() : s));
+    window.addEventListener('keydown', down);
+    window.addEventListener('keyup', up);
+    window.addEventListener('blur', clear);
+    return () => { window.removeEventListener('keydown', down); window.removeEventListener('keyup', up); window.removeEventListener('blur', clear); };
+  }, []);
+  return (
+    <div className="hud-hint">
+      {splitHintTokens(text).map((tok, i) => tok.key
+        ? <kbd key={i} className={`hint-key${held.has(tok.key) ? ' on' : ''}`} data-no-i18n>{tok.text}</kbd>
+        : <span key={i}>{tok.text}</span>)}
+    </div>
+  );
 }
 
 /** The HUD's facts: the mode, the level and its elevation, the view, the snap. */
@@ -75,7 +115,8 @@ export function ViewportHud() {
   const facts = useHudFacts();
   const hotbars = useHotbars();
   const workspace = useInterface((s) => s.workspace);
-  const ids = hotbarIds(hotbars, workspace);
+  const byRole = usePrefs((p) => p.roleHotbars);
+  const ids = hotbarIds(hotbars, workspace, byRole);
   // The slots up to the last tool, and one empty after it to drop a tool on.
   const shown = ids.slice(0, Math.min(ids.length, reach(ids) + 1));
   const [over, setOver] = useState<number | null>(null);
@@ -113,8 +154,11 @@ export function ViewportHud() {
   const stepHint = useCad((s) => s.step?.hint ?? null);
   useToolTick((s) => s.n); // Space while a tool is on changes what its hint says (a wall's line)
   const hintText = stepHint ?? toolHint(tool);
+  const xrayPeeking = useXrayPeek((s) => s.active);
+  const keycaps = usePrefs((p) => p.keycapHints);
   return (
     <>
+      {xrayPeeking && <div className="xray-peek-badge" role="status">X-Ray peek · release <kbd data-no-i18n>X</kbd></div>}
       {/* Not over a schedule or a sheet: their toolbars run across the pane's top (reports #65, #170), and a schedule has no mode, level or snap to tell. */}
       {parts.hud === 'over' && !hudHidesOver(facts.view) && (
         <div className="hud-card">
@@ -125,7 +169,8 @@ export function ViewportHud() {
         </div>
       )}
       <ScopeBar />
-      {hintText && parts.prompt === 'banner' && <div className="hud-hint">{hintText}</div>}
+      {/* Keys drawn as keycaps is a Flow extra (Preferences → General); off, the hint reads as it did. */}
+      {hintText && parts.prompt === 'banner' && (keycaps ? <KeycapHint text={hintText} /> : <div className="hud-hint">{hintText}</div>)}
       <DrillCrumbs />
       {parts.quickTools !== 'off' && hidden && (
         <button type="button" className={`hotbar-handle${docked ? ' docked' : ''}`} data-testid="quick-tools-show" title="Show the quick tools" onClick={() => setQuickToolsHidden(scope, false)}>

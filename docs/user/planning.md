@@ -83,6 +83,8 @@ In Properties a generated task says where its duration came from: the quantity, 
 
 A formwork or a scaffold from **Site works** has no task of its own: it lives by the tasks of what it serves. A formwork goes up when its floor, beam or wall starts being built, and is struck when the days set on its type have passed after it is finished (**Struck after**, in working days: 21 for floors and beams, 7 for walls, columns and footings unless the type says otherwise). A scaffold stands from the first task on its walls to the last, their finishes included. Select one and its Properties say when it is **On site** and which tasks it **Lives by**.
 
+Other temporary works built and taken away within one phase, with nothing they stand by (a phase's New Jersey barriers, signs, flaggers), are planned like any element: a task's rule takes them (by class, by **Phases** or **Demolished in**), **Generate schedule…** places them, and **Elements without a task** lists those no task has yet.
+
 ## The Gantt
 
 ![The Gantt under the 3D view, a task selected](shots/planning-gantt.webp)
@@ -274,7 +276,7 @@ The bars show the part done darker. Properties says where a percentage came from
 
 ![A wall's marks in its properties](shots/planning-element-marks.webp)
 
-On site, from a phone: join the project's shared session from the browser (**File → Share session…** on the computer that has it open). A guest who joined only to look may still mark elements and set a task's progress: marking is the only edit open to every guest. Photos and reports on tasks are for the premium edition.
+On site, from a phone: join the project's shared session from the browser (**File → Collaborate → Share session…** on the computer that has it open). A guest who joined only to look may still mark elements and set a task's progress: marking is the only edit open to every guest. Photos and reports on tasks are for the premium edition.
 
 ### The baseline
 
@@ -325,6 +327,8 @@ A task that is moved keeps its start as a levelling start. Its links can still p
 
 With an estimate (**Construction → Estimate…**), the Gantt gets a **Cost** column: each task's share of the estimate, from the lines that price its elements (a summary's is its tasks'). The toolbar shows the **budget** (the estimate's direct costs) and the cost **to date** (each task's cost times its % complete); Properties shows a task's cost and the part done. **Construction → Cost over time** draws the S-curve and the month table (see [Cost estimate](cost.md)).
 
+The schedule also gives the estimate the time each element is on site: from the start of the first task that takes it to the finish of the last. An article set to **× Duration** (or priced in a unit of time, *m × lună*, *buc/zi*, *oră*) multiplies its quantity by it, in months, working days, calendar days or working hours of the calendar below, worked out again whenever a task or the calendar changes. An element in no task keeps its quantity and its estimate line says so (see [Articles priced by the time on site](cost.md#articles-priced-by-the-time-on-site)).
+
 ## The calendar
 
 ![The work calendar](shots/planning-calendar.webp)
@@ -336,12 +340,12 @@ With an estimate (**Construction → Estimate…**), the Gantt gets a **Cost** c
 - the **winter break** for wet works, off by default: from 15 December to 1 March unless you set other days;
 - **exceptions**: days off for the project (a site closed), or days worked that would not be (a Saturday).
 
-Durations and lags count working days of this calendar.
+Durations and lags count working days of this calendar; so do the estimate's articles priced by working days or hours on site.
 
 ## Exchanging the schedule
 
 - **Export MS Project…** writes an MS Project XML file. MS Project, ProjectLibre and GanttProject open it, and Primavera P6 imports it. It holds the tasks with their WBS, durations, dates, constraints and floats, the links with their types and lags, and the calendar with every holiday as an exception. **Import MS Project…** reads such a file in place of the project's schedule. A schedule written by Lapin and read again keeps its tasks' ids and dates.
-- **Export IFC…** (also under **File**) writes the schedule into the IFC file with the model: an IfcWorkSchedule, its IfcTasks with their times, the IfcRelSequence links and the IfcWorkCalendar. Importing an IFC file that has a schedule brings it in too.
+- **Export IFC…** (also under **File → Export**) writes the schedule into the IFC file with the model: an IfcWorkSchedule, its IfcTasks with their times, the IfcRelSequence links and the IfcWorkCalendar. Importing an IFC file that has a schedule brings it in too.
 - **Export XLSX** writes a workbook: the Gantt's table and the calendar's days off.
 
 Lapin's own fields that other programs have no place for (a task's constraint, whether it is wet, the winter break) travel in IFC as the property sets `Lapin_Task` and `Lapin_Calendar`. MS Project has no wet tasks, so the winter break stays in Lapin.

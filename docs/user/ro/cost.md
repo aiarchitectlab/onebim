@@ -32,7 +32,9 @@ Prețurile sunt ale tale: Lapin nu livrează niciun catalog de prețuri sau de n
 
 Schimbă coloanele ghicite greșit, alege rândul pe care e antetul și dacă prețurile sunt în lei sau în euro, apoi apasă **Import**. Lista intră în proiect. Cu **Păstrează și în biblioteca acestui calculator** bifat, rămâne și pe calculator: sub **Pe acest calculator**, **Adaugă în proiect** o aduce în proiectul următor.
 
-**Șablon** salvează un CSV cu coloanele și câteva rânduri cu valori orientative scrise de Lapin, marcate *orientativ*: completează-l cu prețurile tale și importă-l. **Folosește valorile orientative** pune aceste valori în proiect ca listă, ca să încerci devizul înainte să ai prețurile tale. Înlocuiește-le înainte să trimiți un deviz cuiva.
+Tot opțional: **Sursa (furnizorul)**, un **Link** la pagina lui și data la care a fost **Preț verificat la**, păstrate pe fiecare rând.
+
+**Șablon** salvează un CSV cu coloanele și câteva rânduri cu valori orientative scrise de Lapin, marcate *orientativ*: completează-l cu prețurile tale și importă-l. La **Șabloane**, **Adaugă în proiect** pune în proiect o listă gata făcută: **Lapin indicative prices** (valorile orientative ale lui Lapin, ca să încerci devizul înainte să ai prețurile tale) și listele aduse de modulele ediției, de pildă **Bilka – Dedeman (indicative, 24.11.2026)** pentru [panourile de acoperiș](roof-panels.md#cat-costa), fiecare rând cu sursa și data lui. Un șablon intră în proiect doar când ceri și e marcat *orientativ*: înlocuiește-i prețurile înainte să trimiți un deviz cuiva.
 
 ## Articole pe tipuri, reguli pe materiale
 
@@ -43,6 +45,8 @@ Un rând de deviz vine dintr-un **articol**: un cod din lista ta de prețuri. El
 - **Pe tip.** Fiecare element al tipului e prețuit după el. Articolul spune ce măsoară: elementul întreg sau o parte din el (**miezul** unui tip stratificat sau **finisajele** lui) și după ce măsură (după unitatea prețului, volum net sau brut, arie netă sau brută, lungime, bucăți, masă). Poate adăuga un coeficient și pierderile (%).
 - **Pe material (o regulă).** Fiecare strat din acel material, în orice tip, e prețuit după ea: o singură regulă pentru tencuiala de var prețuiește tencuiala tuturor pereților.
 
+O piesă Studio este și ea un tip. Parametrii ei marcați la **Măsurat ca** în tabelul piesei (Lungime, Număr, Arie, Volum) sunt citiți întâi de un articol al acelei măsuri pe piesa întreagă: o piesă de gard cu L = 20 m, prețuită pe metru, dă 20 m (vezi [Piese](studio-parts.md#valorile-piesei-în-extrase-filtre-și-deviz)).
+
 Articolul de pe tip are întâietate. Un strat pe care articolele tipului îl măsoară deja nu mai e prețuit de o regulă. Un articol pe elementul întreg îl prețuiește tot, deci regulile se dau la o parte. Pentru un perete stratificat, dă tipului un articol pe **miez** (zidăria, la volum) și reguli pentru finisaje (tencuiala, la arie). Peretele e atunci prețuit strat cu strat: zidăria la **Pereți**, tencuiala la **Finisaje și izolații**.
 
 **Execuție → Atribuie articole…** listează tipurile proiectului pe care le folosesc elementele și materialele straturilor lor. Fiecare rând pornește cu articolul pe care îl are, sau cu cel ales pentru un tip sau material cu același nume într-un proiect anterior, sau cu cel sugerat de Lapin: un cod scris în numele lui, sau articolul cu cele mai multe cuvinte comune (*zidărie*, *BCA*, *tencuială*, *C25/30*). Pentru un tip stratificat propune miezul. Scrie sau alege un cod, alege partea și măsura, bifează rândurile dorite și apasă **Aplică**: un singur pas de anulat. Alegerile tale sunt ținute minte pe acest calculator pentru proiectele următoare.
@@ -50,6 +54,21 @@ Articolul de pe tip are întâietate. Un strat pe care articolele tipului îl m�
 Tipurile de cofraj și de schelă din organizarea de șantier (tabul **Teren**) aveau deja un cod de articol (decizia 152): el e un articol pe tip, măsurat după unitatea prețului.
 
 Fazele contează: un element care era acolo înainte de lucrări (făcut într-o fază *existentă*) nu se prețuiește. Unul demolat se prețuiește doar prin articolul tipului său a cărui parte e **Demolarea lui (doar când e demolat)**, la capitolul **Demolare**.
+
+### Articole prețuite după timpul pe șantier
+
+Organizarea de șantier și elementele de siguranță se închiriază adesea după cât timp stau pe șantier: un gard pe metru și lună (*m × lună*), un indicator pe bucată și zi, o macara pe oră. Coloana **× Durată** din Atribuie articole înmulțește cantitatea unui articol (bucăți, lungime, arie…) cu cât timp stă elementul lui pe șantier, luat din programul lucrărilor (vezi [Planificarea](planning.md#costul-sarcinilor)):
+
+- **După unitatea prețului** (implicit): timpul din unitatea prețului, dacă are unul. *m × lună*, *m x month*, *cad × mese* sunt o lungime sau bucăți înmulțite cu luni; *buc/zi* zile calendaristice; *buc/zi lucrătoare* zile lucrătoare; *oră* sau *h* ore. O unitate fără timp nu se înmulțește, ca înainte.
+- **Fără durată**: timpul din unitate lăsat deoparte, cantitatea simplă.
+- **Luni pe șantier**: lunile calendaristice întregi de la început, restul ca parte din luna lui (1 martie – 31 mai înseamnă 3 luni).
+- **Zile lucrătoare pe șantier**: zilele lucrătoare ale calendarului proiectului (zilele săptămânii, sărbătorile și excepțiile lui).
+- **Zile calendaristice pe șantier**: toate zilele, cu ambele capete.
+- **Ore lucrătoare pe șantier**: zilele lucrătoare înmulțite cu orele unei zile din calendar.
+
+Un element stă pe șantier de la începutul primei sarcini care îl preia până la finalul ultimeia (sarcinile preiau elemente prin regula lor sau de mână, vezi [Planificarea](planning.md#elementele-modelului-în-sarcini)). Se calculează din nou de fiecare dată când e arătat devizul: muți o sarcină sau schimbi calendarul, și cantitatea urmează. Un gard de 20 m într-o sarcină de trei luni, prețuit *m × lună*, dă 60.
+
+Rândul arată durata folosită după descriere (**× 3 luni**; cea mai mică și cea mai mare când elementele lui diferă), în deviz, în formularele lui (XLSX, PDF), în exportul HTML și în IFC. Un element pe care nu-l preia nicio sarcină își păstrează cantitatea, neînmulțită, iar rândul spune asta (**1 element(e) în nicio sarcină a programului**), ca nimic să nu fie prețuit la zero fără o vorbă. Fără program al lucrărilor, rândul spune că proiectul nu are unul; într-o ediție fără modulul Planificare, un articol prețuit după unitatea lui e prețuit ca înainte, iar unul pus pe o durată spune de ce nu are una.
 
 ## Devizul
 
@@ -113,6 +132,6 @@ Situațiile de lucrări lunare, valoarea câștigată și mai multe linii de baz
 
 ## IFC
 
-**Fișier → Export IFC…** scrie devizul ca **IfcCostSchedule**: capitolele și rândurile ca **IfcCostItem**, cantitatea fiecărui rând și prețurile lui unitare ca patru **IfcCostValue** (Material, Labour, Equipment, Transport), elementele pe care le măsoară fiecare rând atribuite lui (**IfcRelAssignsToControl**), moneda ca **IfcMonetaryUnit** al proiectului. La import, un deviz își păstrează rândurile cum le are fișierul, cu aceleași totaluri. Bifează **Rânduri din model** ca să adaugi rândurile pe care le dă modelul tău.
+**Fișier → Exportă → Exportă IFC, Fragments sau BOS…** scrie devizul ca **IfcCostSchedule**: capitolele și rândurile ca **IfcCostItem**, cantitatea fiecărui rând și prețurile lui unitare ca patru **IfcCostValue** (Material, Labour, Equipment, Transport), elementele pe care le măsoară fiecare rând atribuite lui (**IfcRelAssignsToControl**), moneda ca **IfcMonetaryUnit** al proiectului. La import, un deviz își păstrează rândurile cum le are fișierul, cu aceleași totaluri. Bifează **Rânduri din model** ca să adaugi rândurile pe care le dă modelul tău.
 
-Cu un program al lucrărilor, fiecare rând e atribuit și sarcinilor în care se execută (**IfcRelAssignsToControl** spre **IfcTask**-urile lor). La import, rândurile își păstrează sarcinile, deci curba S revine la fel.
+Cu un program al lucrărilor, fiecare rând e atribuit și sarcinilor în care se execută (**IfcRelAssignsToControl** spre **IfcTask**-urile lor). La import, rândurile își păstrează sarcinile, deci curba S revine la fel. Un rând prețuit după timpul pe șantier își scrie **Time** și **Duration** în **Lapin_CostItem**.

@@ -14,10 +14,11 @@ import { t } from '../../i18n';
 import { formatLength, levelUnit, parseLength, parseLevel } from '../../engine/unitsStore';
 import { paperForNew } from '../../shell/browserFind';
 import { CommitInput } from './FeatureLineSection';
+import { PartBoundary } from '../../shell/PartBoundary';
 import { closeProfile, useProfile } from './profileStore';
 import {
   capabilities, dragPoint, gradeOfSegment, gradeText, heightAtPx, heightRange, hitPoint, hitSegment, makeFrame, niceStep, planCrossMove, planCrossPoint, planCurve,
-  planDelete, planGrade, planInsert, planLock, planMove, polylineOf, segmentsOf, seriesPath, stationAtPx, stationName, sx, sy, ticks, valueAt,
+  planDelete, planGrade, planInsert, planLock, planMove, polylineOf, segmentsOf, seriesPath, readProfile, stationAtPx, stationName, sx, sy, ticks, valueAt, withGround,
   type CrossData, type Frame, type Planned, type ProfileData, type ProfilePoint,
 } from './profile';
 
@@ -456,14 +457,14 @@ function Open({ id }: { id: string }) {
   // The model changes (this line, its terrain): read again; an answer that comes after the next question is dropped.
   useEffect(() => {
     let live = true;
-    void query<ProfileData>('civil.profile', { id }).then((r) => { if (live && useProfile.getState().lineId === id) useProfile.setState({ data: r && Array.isArray(r.points) ? r : null, ...(r ? {} : { message: t('This element has no profile.') }) }); });
+    void query<unknown>('civil.profile', { id }).then((r) => { if (live && useProfile.getState().lineId === id) useProfile.setState({ data: readProfile(r), ...(r ? {} : { message: t('This element has no profile.') }) }); });
     return () => { live = false; };
   }, [id, nodes]);
   useEffect(() => {
     if (stations.length === 0 && !(interval > 0)) { useProfile.setState({ cross: [] }); return; }
     let live = true;
     void query<CrossData[] | CrossData>('civil.crossProfile', { id, width, ...(stations.length ? { stations } : {}), ...(interval > 0 ? { interval } : {}) }).then((r) => {
-      if (live && useProfile.getState().lineId === id) useProfile.setState({ cross: Array.isArray(r) ? r : r ? [r] : [] });
+      if (live && useProfile.getState().lineId === id) useProfile.setState({ cross: (Array.isArray(r) ? r : r ? [r] : []).map(withGround) });
     });
     return () => { live = false; };
   }, [id, nodes, stations, interval, width]);
@@ -508,6 +509,8 @@ function Open({ id }: { id: string }) {
 export function ProfilePanel() {
   const id = useProfile((s) => s.lineId);
   const view = useUi((s) => s.view);
-  // Under a plan or a 3D view; not over a sheet, a drawing or a table.
-  return id && (view === 'plan' || view === '3d') ? <Open id={id} /> : null;
+  // Under a plan or a 3D view; not over a sheet, a drawing or a table. A throw inside stops the panel alone, which Close puts away.
+  return id && (view === 'plan' || view === '3d')
+    ? <PartBoundary part="Profile panel" overlay onClose={closeProfile} resetKey={id}><Open id={id} /></PartBoundary>
+    : null;
 }

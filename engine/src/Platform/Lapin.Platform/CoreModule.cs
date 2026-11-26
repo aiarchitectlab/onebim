@@ -45,7 +45,7 @@ public sealed class CoreModule : ILapinModule
     static readonly HashSet<string> PlatformClasses =
     [
         IfcClass.Project, IfcClass.Site, IfcClass.Building, IfcClass.BuildingStorey,
-        IfcClass.Material, IfcClass.MaterialLayerSet, IfcClass.MaterialLayerSetUsage, Views.Class, Sheets.Class, Links.Class, StoredBodies.SharedClass, IfcSource.RecordClass, Cde.CdeIssues.Class, Cde.Remarks.Remarks.Class, Documents.Documents.Class,
+        IfcClass.Material, IfcClass.MaterialLayerSet, IfcClass.MaterialLayerSetUsage, Views.Class, Sheets.Class, Links.Class, StoredBodies.SharedClass, IfcSource.RecordClass, Cde.CdeIssues.Class, Cde.Remarks.Remarks.Class, Cde.References.References.Class, Documents.Documents.Class,
     ];
 
     public static bool Owns(string ifcClass) => PlatformClasses.Contains(ifcClass) || ifcClass.StartsWith("IfcRel", StringComparison.Ordinal);
@@ -84,11 +84,17 @@ public sealed class CoreModule : ILapinModule
         DimLines.Register(r);
         // The type configurators' preview, drawn as the drawings are (decision 529).
         TypePreviews.Register(r);
+        // The project's notations: each domain's symbols, prefixes and suffixes as templates (decision 864).
+        Notations.Register(r);
+        // Levels relative to ±0.00, as altitudes or both (decision 867), their notation the domain "levels".
+        LevelDatum.Register(r);
         r.Service<IProjectUpgrade>(new StoreyPlans.DefaultPlanUpgrade());
         r.Service<IProjectUpgrade>(new ViewDetail.LevelUpgrade());
         r.Service<IProjectUpgrade>(new MaterialHatchUpgrade());
         r.Service<IProjectUpgrade>(new ViewFilterUpgrade());
         r.Service<IProjectUpgrade>(new ViewStyles.StructureUpgrade());
+        // A project saved before the floors' plan hatches (forum topic 259) keeps its plans as they were.
+        r.Service<IProjectUpgrade>(new ViewStyles.FloorHatchUpgrade());
         // The standards' own layers merged into the project's one list of drafting layers (forum #168, decision 714).
         r.Service<IProjectUpgrade>(new DraftLayers.ListUpgrade());
         // A site plan's north arrow and scale bar as annotations of its own (decision 722, issue #111).
@@ -106,6 +112,8 @@ public sealed class CoreModule : ILapinModule
         GraphicsSets.Register(r);
         ViewFilters.Register(r);
         BrowserSets.Register(r);
+        // Publish sets: named choices of sheets and views exported again in one step (forum topic 225).
+        PublishSets.Register(r);
         ViewLinework.Register(r);
         Location.Register(r);
         DisplayQuality.Register(r);
@@ -122,6 +130,7 @@ public sealed class CoreModule : ILapinModule
         Attachments.Register(r);
         OutlineSplits.Register(r);
         HatchOrigins.Register(r);
+        StructuralUsage.Register(r);
         Components.Register(r);
         // The wholes an element is a part of, for drill-down picking.
         Assemblies.Register(r);
@@ -678,7 +687,8 @@ public static class ElementTransform
             }
         }
         // How each one is carried: a drafted shape (or a bar drawn on the view) as the view's points say, the rest in the model.
-        Placement2D Of(Entity e) => inModel != null && !OnView(e) ? inModel : t;
+        // A component's detail on one of its sides is kept in the component's own frame (docs/components.md): the view's edit taken there, else it stays.
+        Placement2D Of(Entity e) => Components.IsSideDetail(e) ? Components.SideCarry(ctx.Model, e, t, frame) : inModel != null && !OnView(e) ? inModel : t;
         // What is pinned is not moved, turned or mirrored; it is copied, and its copies are not pinned (decision 449).
         if (!copy) Pins.Refuse(all);
         // What a module places in a host (a door in its opening, the opening in its wall) is not moved on its own like the rest.
@@ -815,7 +825,7 @@ public static class Spatial
         var project = Project(edit.Model);
         if (project == null)
         {
-            project = new Entity(IdOf(edit, seed?.Project.Id), IfcClass.Project, seed?.Project.Name ?? "Project", new JsonObject { ["lengthUnit"] = "METRE", [ViewDetail.RevKey] = 1, [MaterialHatchUpgrade.RevKey] = MaterialHatchUpgrade.Rev, [ViewFilterUpgrade.RevKey] = ViewFilterUpgrade.Rev, [ViewStyles.StructureRevKey] = ViewStyles.StructureRev, [MaterialStandards.LookRevKey] = MaterialStandards.LookRev });
+            project = new Entity(IdOf(edit, seed?.Project.Id), IfcClass.Project, seed?.Project.Name ?? "Project", new JsonObject { ["lengthUnit"] = "METRE", [ViewDetail.RevKey] = 1, [MaterialHatchUpgrade.RevKey] = MaterialHatchUpgrade.Rev, [ViewFilterUpgrade.RevKey] = ViewFilterUpgrade.Rev, [ViewStyles.StructureRevKey] = ViewStyles.StructureRev, [ViewStyles.FloorHatchRevKey] = ViewStyles.FloorHatchRev, [MaterialStandards.LookRevKey] = MaterialStandards.LookRev });
             edit.Add(project);
         }
         var site = edit.Model.OfClass(IfcClass.Site).FirstOrDefault();

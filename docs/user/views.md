@@ -123,6 +123,8 @@ With **Alignment** *view* the pattern runs on from one face to the next; with *l
 
 Until you choose one, a material's elevation hatch comes **from the name**, as its section hatch does, and **Manage → Materials** shows which (*from the name (BRICK)*): brick and masonry BRICK, stone STONE, timber BOARDS, metal cladding VERTICAL, roof tiles, shingles and slates HORIZONTAL, tiles TILES, gravel and earth as in sections. Insulation, membranes, plaster, render, paint and concrete get none: insulation's BATT is a section's hatch, never suggested for a surface (chosen by hand, it is drawn). Choose **none** to draw nothing. A jogged, curved or along-an-element section hatches each of its pieces between the piece's ends, and draws their sun shadows the same way. The view style's **Surface hatches** (**View → View settings**, **Manage → View styles**) turns them off for whole views: on in Architectural, off in Structural, MEP and Coordination. Plans keep their own cut and plan hatches. A roof's covering is hatched by its covering material, so a tiled roof shows its courses on the slopes the view sees, and none on those turned away.
 
+Plans hatch the floors they see the same way: the top of a floor below the cut takes its top layer's surface pattern, under the walls and what the plan cuts, on the layer FLOOR-HATCH. The view style's **Floor surface hatches** turns it off for whole views: on in Architectural, off in Structural, MEP and Coordination, and off in every style of a project made before. See [Floors](floors-roofs.md#floors).
+
 ![The south elevation, its facing brick hatched as its name suggests](shots/elevation-surface-hatch.webp)
 
 ![A jogged section hatching the garden wall its last piece sees](shots/section-developed-surface-hatch.webp)
@@ -136,6 +138,14 @@ Until you choose one, a material's elevation hatch comes **from the name**, as i
 Double-click **3D** to open the 3D view. Drag with the left button to orbit around the model. The key plan at the top right shows where you are looking from. **Plan**, **Persp** and **Fit** change the camera. To keep a camera, duplicate the 3D view.
 
 The mouse wheel zooms to the point of the model under the cursor, which stays where it is on the screen; the zoom stops just short of that point and never passes through it. A drag with the left button turns the view round the selected elements' middle, which stays where it is on the screen, so you can look at them from every side; with nothing selected it turns round the point of the model under the cursor where the drag starts, and round the middle of the view if the cursor is over empty space. **View → Zoom to cursor** and **View → Orbit around selection** turn each off (the wheel then zooms to the middle of the view, and the view turns round its middle), and so do the checkboxes in a 3D view's properties. The choice is kept on this computer.
+
+### A 3D mouse (3Dconnexion SpaceMouse)
+
+Lapin does not read 3D mice yet: it has no input for the device's six axes, so it cannot orbit or pan with one. What works today comes from the **3DxWare** driver, which makes the device act as a mouse wheel and a keyboard.
+
+- **Push and pull** reach Lapin as mouse-wheel turns, so they zoom. Lapin limits how far one burst of wheel events can zoom, so a hard push does not throw the view across the model. Tilting, twisting and sliding sideways do nothing in Lapin.
+- **Buttons.** In the 3DxWare settings you can give a button a keystroke. Lapin's keys for the view are: <kbd>+</kbd> and <kbd>-</kbd> (zoom in and out), <kbd>Shift</kbd> <kbd>Z</kbd> (zoom to the selection) and the letters <kbd>ZE</kbd> (frame everything, as the **Fit** button does; they are two typed letters, so the button must send them one after the other and only works while no field or tool is waiting for text). There is no key yet for **Top**, **Front** or an isometric view: choose them with the **PLAN** button or the compass stops of the key plan. Walking is started from a room's right-click menu, **Walk in 3D** (in the walk, <kbd>W</kbd> <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd>, <kbd>Shift</kbd> and <kbd>Space</kbd> are its keys).
+- **Not supported yet:** orbit, pan and tilt from the device, its own buttons, and sensitivity or axis settings. They wait for a tester with a device: if you have a SpaceMouse, tell us on the forum (topic 261) your operating system, the model and the 3DxWare version.
 
 ### X-ray, or a see-through view
 

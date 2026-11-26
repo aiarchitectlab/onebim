@@ -22,7 +22,7 @@ Show, hide or move a tab under **Tabs** in the same dialog and the choice become
 
 ## Three modes
 
-**View → Interface…** (<kbd>Ctrl</kbd> <kbd>.</kbd>) chooses how much stands around the view. Pick one of the three modes at the top of the dialog; the change shows at once.
+**View → Interface…** (<kbd>Ctrl</kbd> <kbd>.</kbd>) chooses how much stands around the view. Pick one of the three modes at the top of the dialog; the change shows at once. Lapin starts in the fourth, **Flow** ([below](#flow-and-its-extras)); the pictures in this guide show Comfortable.
 
 ![The Interface dialog: the three modes, and each part on its own](shots/interface-dialog.webp)
 
@@ -41,13 +41,36 @@ Show, hide or move a tab under **Tabs** in the same dialog and the choice become
 
 ![Focus: the selection in a card](shots/interface-focus.webp)
 
+The ribbon's large tools show their keyboard letters while you hold <kbd>Alt</kbd> alone, as Office's key tips do; their tooltips always have them. **View → Interface → Keys on tools** can show them **Always** instead of **While Alt is held**, the default. In Comfortable, a band wider than the window shows its small tools as icons only, with their names in the tooltips, until the window is wide enough again. The **Group** panel, after **Modify** on the tabs that have it, holds **Create group**, **Make component**, **Make apartment type**, **Add to detail set**, **Ungroup**, **Edit group** and **Remove from group**.
+
 In every mode the top bar keeps **Undo** and **Redo** at its right end: with their names in Comfortable, as two arrows in Compact and Focus (<kbd>Ctrl</kbd> <kbd>Z</kbd> and <kbd>Ctrl</kbd> <kbd>Y</kbd>; their tooltip says what they undo).
 
 Below the modes, each part can be set on its own: the ribbon, the quick tools (or none: the number keys still work), the command line, the HUD, the tool's prompt and fields, the key plan, the panels and the height of the property rows. Changing one part makes the choice **Custom**.
 
 Below the parts, **Tabs**: untick the ribbon tabs you do without (an architect may hide Structure, Simple rebar and MEP, an engineer Architecture and Site). View always stays, since Interface… is there. The tools of a hidden tab are still in Commands… and in the keyboard shortcuts.
 
-Lapin keeps your choice on this computer, for you. The desktop app and the browser keep theirs apart. In the browser, Lapin starts in Compact when the window is less than 800 pixels tall, until you choose.
+Lapin keeps your choice on this computer, for you. The desktop app and the browser keep theirs apart.
+
+## Flow and its extras
+
+Lapin starts in **Flow**: the view first, the ribbon dropping from its tabs, both side panels folded to rails and the quick tools <kbd>1</kbd>–<kbd>9</kbd> floating at the bottom of the view, with the **Flow extras** below turned on. To go back to the classic interface, untick **Flow** on the start screen, under **Workspace**: one click brings back Comfortable and turns the extras off, and ticking it again brings Flow back. The pictures in this guide show the classic interface.
+
+Flow is also the fourth mode of **View → Interface…**: picking it turns the extras on too, and choosing another mode afterwards leaves them as they are. Each extra can be switched on or off by itself in **File → Preferences… → General → Flow extras** (**Turn all on** and **Turn all off** are there too). Lapin keeps your choice.
+
+- **ViewCube in the 3D view**: a small cube at the top right of the 3D view; click a face for Top, Bottom, the four sides, **ISO**, and **PERSP**/**ORTHO** to switch the projection. It stands left of the key plan, or of its button, so both stay within reach.
+- **Selection toolbar over the view**: with something selected and no tool on, a row at the bottom right with Move, Copy, Rotate, Pick & create similar, Isolate, Hide and Delete. Its tooltips show your own keys (Keyboard shortcuts…). Delete does what the <kbd>Delete</kbd> key does.
+- **Model health in the status line**: a pill that counts very short walls, walls or columns on top of one another and elements on no level; click it for the list, and the crosshair beside an entry selects it and zooms to it.
+- **A shortcut tip after the same ribbon tool is clicked three times**: once per tool, a notice with its keys.
+- **Walk and Plan + 3D buttons before the view tabs**: Walk starts walking in 3D (in the active level's first room, else where the 3D view looks); Plan + 3D splits the view into the plan and the 3D view, and a second click closes that split. A split you made yourself is left alone.
+- **Keys shown as keycaps in the tool hint**: Shift, Space, Enter, Esc… drawn as keys, lit while held.
+- **Volume preview while placing in 3D**: walls and floors drawn in 3D show their height as a see-through volume before the click.
+- **Hold X in 3D to look through in X-ray**: hold <kbd>X</kbd> for a moment and the 3D view turns X-ray until you let go; a quick tap of X still goes to the command line (EXPLODE), and the held key types nothing more.
+- **Drag a field's unit to change its value**: drag left or right on the unit after a length or number field (or <kbd>Alt</kbd>-drag in the field); <kbd>Shift</kbd> is finer, <kbd>Ctrl</kbd> coarser, and the value is kept once, as one undo step, when you let go. A field of whole numbers stays whole.
+- **Role cards on the start screen**: Architect, Structural engineer, Roads & site, MEP engineer, Drafting 2D or All disciplines, the mode, the mouse style and **Guided sandbox** (a small started model with **Help → Interactive missions…** for that role, one undo step).
+
+Two more stand on their own, off until chosen there: **Quick tools chosen for the workspace** (each workspace's 1–9 tools picked for that discipline; on when you pick a role card; the slots you filled yourself stay), and **Tactile feedback sounds (snap, place, undo)**; while they are on, a speaker in the status line mutes them.
+
+Whatever the mode, Commands… (<kbd>Ctrl</kbd> <kbd>K</kbd>) holds **Radial menu** (<kbd>Alt</kbd> <kbd>Q</kbd>: the common tools, or the selection's actions, in a ring at the pointer), **Pick & create similar** (<kbd>Alt</kbd> <kbd>I</kbd>: the selected element's tool with its type), **Build replay (time-lapse)** and the camera bookmarks: <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>1</kbd>–<kbd>4</kbd> keeps the 3D view in a bookmark, <kbd>Alt</kbd> <kbd>1</kbd>–<kbd>4</kbd> goes back to it. All of them can be bound to other keys in Keyboard shortcuts….
 
 ## Quick tools
 
@@ -111,7 +134,7 @@ The project browser's **Catalog** tab shows the project's types for each tool th
 
 - click a card to place elements of that type: the tool starts with it;
 - drag a card onto a quick slot to keep the tool with that type there;
-- **Edit types…** opens the dialog where those types are made and changed.
+- **Edit types…**, at the end of the row of kinds, opens the dialog where those types are made and changed; right-click a card for **Edit type…** (the dialog opened on that type) and **Duplicate**.
 
 ![The catalog: the wall types](shots/catalog.webp)
 
@@ -227,6 +250,8 @@ Each view opened has a tab above the view. Drag a tab to put the view somewhere 
 <kbd>Ctrl</kbd> <kbd>Tab</kbd> brings the next tab in front and <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Tab</kbd> the one before (also <kbd>Ctrl</kbd> <kbd>Page Down</kbd> and <kbd>Page Up</kbd>), going round from the last to the first; on a Mac it is the <kbd>Control</kbd> key, since <kbd>⌘</kbd> <kbd>Tab</kbd> belongs to the system. They do nothing while you type in a field. They are commands (**Next view tab**, **Previous view tab**) you can reassign in the shortcuts.
 
 **Tab over overlapping elements.** In a plan, section or elevation, when more than one element lies under the pointer (a wall over a slab over a room), <kbd>Tab</kbd> lights the next one and <kbd>Shift</kbd> <kbd>Tab</kbd> the one before, going round; the status line says which ("2 of 3: Slab Floor 1"), and a click selects the lit one. Move the pointer and it goes back to picking what is under it. With nothing or one element under the pointer, <kbd>Tab</kbd> works while a tool or a command is picking elements too (Move, Copy, Split element, a tool that picks a wall or a slab); while it waits for a point or a typed value, <kbd>Tab</kbd> keeps its other meanings: it folds the panels, and over a grip shared by several elements it goes through them. While you are dragging it is the autohold key (below). **Light the previous element under the pointer** is the command to reassign if you want another key.
+
+**Keeping an end's angle.** While you drag an end grip, hold <kbd>Ctrl</kbd> (<kbd>⌘</kbd> on a Mac) to keep it on the element's own line, and type the change in length (or `=` and the total); see [Walls](walls.md#keep-its-angle-while-you-stretch).
 
 ![Tab lighting the second of two elements under the pointer in a plan](shots/tab-cycle.webp)
 

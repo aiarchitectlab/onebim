@@ -31,6 +31,9 @@ namespace Lapin.Platform;
 /// <item><c>finishHatch</c>: whether a plan hatches the rooms' floor finishes
 /// (a reflected ceiling plan their ceilings') as their types say (decision
 /// 299); on in the Architectural style, off in the others;</item>
+/// <item><c>floorHatch</c>: whether a plan hatches the top faces of the floors it sees below its cut with the surface
+/// pattern of their top layer's material (forum topic 259, <see cref="SurfaceHatches.PlanPensOf"/>); on in a new project's
+/// Architectural style, off in the others and in every style of a project saved before (<see cref="FloorHatchUpgrade"/>);</item>
 /// <item><c>surfaceHatch</c>: whether elevations and sections hatch the faces they
 /// see with their materials' elevation graphics (decision 325,
 /// <see cref="SurfaceHatches"/>); on in the Architectural style, off in the others;</item>
@@ -61,7 +64,7 @@ public static class ViewStyles
     public const string Key = "viewStyles";
     public static readonly string[] LayerModes = ["all", "noFinishes", "core", "coreLoadBearing"];
     const string LayerModesText = "all, noFinishes, core or coreLoadBearing";
-    public static readonly string[] Fields = ["layers", "joins", "overhead", "ifc2d", "voids", "voidSizes", "finishHatch", "surfaceHatch", "entourage", "entourageFill", "detail",
+    public static readonly string[] Fields = ["layers", "joins", "overhead", "ifc2d", "voids", "voidSizes", "finishHatch", "floorHatch", "surfaceHatch", "entourage", "entourageFill", "detail",
         "minHatchSpacing", "smallScaleCut", "materialGraphicsSet", "wallFinishesPlan", "wallFinishesSection", "floorFinishesPlan", "floorFinishesSection", "beyond", "nearDepth", "halftoneOthers", "vegetation"];
 
     /// <summary>What a section or an elevation draws beyond its cut (decision 721): everything, the near part with the rest in the background, or the cut alone.</summary>
@@ -109,7 +112,7 @@ public static class ViewStyles
     public sealed record Style(string Id, string Name, string? Discipline, string Layers, bool Joins, bool Overhead, bool Ifc2d = true, bool Voids = false, bool VoidSizes = true, bool FinishHatch = true, bool SurfaceHatch = true, string Entourage = "outline", string? EntourageFill = null, string? GraphicsSet = null, int Detail = PlanDetail.Lod350,
         bool WallFinishesPlan = true, bool WallFinishesSection = true, bool FloorFinishesPlan = true, bool FloorFinishesSection = true, string? LayersPlan = null, string? LayersSection = null,
         bool FinishElements = true, double MinHatchSpacing = Lapin.Drawing.Hatch.HatchScale.DefaultMinSpacing, SmallScaleCut? SmallScaleCut = null, string? MaterialGraphicsSet = null,
-        string Beyond = "full", double NearDepth = DefaultNearDepth, bool? HalftoneOthers = null, string Vegetation = "coloured")
+        string Beyond = "full", double NearDepth = DefaultNearDepth, bool? HalftoneOthers = null, string Vegetation = "coloured", bool FloorHatch = false)
     {
         /// <summary>
         /// Whether its plans, sections and elevations draw what is not of its discipline halftone (an MEP plan's walls, doors and
@@ -128,7 +131,7 @@ public static class ViewStyles
         public JsonObject ToJson() => WithSet(new()
         {
             ["id"] = Id, ["name"] = Name, ["discipline"] = Discipline, ["layers"] = Layers, ["joins"] = Joins, ["overhead"] = Overhead, ["ifc2d"] = Ifc2d,
-            ["voids"] = Voids, ["voidSizes"] = VoidSizes, ["finishHatch"] = FinishHatch, ["surfaceHatch"] = SurfaceHatch,
+            ["voids"] = Voids, ["voidSizes"] = VoidSizes, ["finishHatch"] = FinishHatch, ["floorHatch"] = FloorHatch, ["surfaceHatch"] = SurfaceHatch,
             ["entourage"] = Entourage, ["entourageFill"] = EntourageFill, ["detail"] = Detail,
             ["wallFinishesPlan"] = WallFinishesPlan, ["wallFinishesSection"] = WallFinishesSection, ["floorFinishesPlan"] = FloorFinishesPlan, ["floorFinishesSection"] = FloorFinishesSection,
             ["minHatchSpacing"] = MinHatchSpacing,
@@ -204,7 +207,9 @@ public static class ViewStyles
             // A style saved before the other disciplines' halftone: as its discipline says (on for MEP).
             Own(o["halftoneOthers"]),
             // A style saved before the vegetation's styles (decision 818): coloured, as before.
-            (string?)o["vegetation"] is { } vm && VegetationModes.Contains(vm) ? vm : "coloured");
+            (string?)o["vegetation"] is { } vm && VegetationModes.Contains(vm) ? vm : "coloured",
+            // A style saved before the floors' plan hatches (forum topic 259) drew none: off (FloorHatchUpgrade writes it so).
+            o["floorHatch"] is JsonValue flv && flv.TryGetValue<bool>(out var flh) && flh);
 
         /// <summary>A hatch spacing threshold (paper mm, 0 or more); null when it is not one.</summary>
         internal static double? Spacing(JsonNode? n) => Json.Number(n) is { } v && v >= 0 && double.IsFinite(v) ? v : null;
@@ -225,7 +230,7 @@ public static class ViewStyles
     /// </summary>
     public static readonly IReadOnlyList<Style> Defaults =
     [
-        new("architectural", "Architectural", "Architecture", "all", true, true, LayersPlan: "noFinishes"),
+        new("architectural", "Architectural", "Architecture", "all", true, true, LayersPlan: "noFinishes", FloorHatch: true),
         new("structural", "Structural", "Structure", "core", true, true, FinishHatch: false, SurfaceHatch: false, Detail: PlanDetail.Lod400),
         new("mep", "MEP", "MEP", "all", true, true, FinishHatch: false, SurfaceHatch: false),
         // For coordination drawings (decision 290): the openings' voids drawn, marked and sized; taken by name, no discipline's.
@@ -280,6 +285,7 @@ public static class ViewStyles
             VoidSizes = o["voidSizes"] is JsonValue sv && sv.TryGetValue<bool>(out var sz) ? sz : s.VoidSizes,
             FinishHatch = o["finishHatch"] is JsonValue fv && fv.TryGetValue<bool>(out var fh) ? fh : s.FinishHatch,
             SurfaceHatch = o["surfaceHatch"] is JsonValue shv && shv.TryGetValue<bool>(out var sh) ? sh : s.SurfaceHatch,
+            FloorHatch = Own(o["floorHatch"]) ?? s.FloorHatch,
             Entourage = (string?)o["entourage"] is { } en && EntourageModes.Contains(en) ? en : s.Entourage,
             EntourageFill = o.ContainsKey("entourageFill") ? FillOf(o["entourageFill"]) : s.EntourageFill,
             Detail = PlanDetail.LodOf(o["detail"]) ?? s.Detail,
@@ -415,31 +421,16 @@ public static class ViewStyles
         return e.Class == "IfcCovering" ? CoveringSub(e.PredefinedType ?? m.RelatingOf(e.Id, IfcClass.RelDefinesByType)?.PredefinedType) : null;
     }
 
-    /// <summary>The classes whose elements bear load or not (IFC's Pset_…Common LoadBearing), which the cores of the load-bearing elements only leave out when they do not.</summary>
-    static readonly HashSet<string> Bearing = [IfcClass.Wall, "IfcWallStandardCase", "IfcCurtainWall", IfcClass.Slab, IfcClass.Roof, IfcClass.Column, IfcClass.Beam, IfcClass.Footing, "IfcPile", "IfcMember", "IfcPlate", "IfcCovering", "LapinRoomFinish", "LapinFinishZone"];
-
-    /// <summary>Those taken as bearing load when nothing says: columns, beams, footings and piles (as the IFC export writes them), floors and roofs.</summary>
-    static readonly HashSet<string> BearingUnlessSaid = [IfcClass.Slab, IfcClass.Roof, IfcClass.Column, IfcClass.Beam, IfcClass.Footing, "IfcPile"];
-
     /// <summary>
     /// Whether the cores of the load-bearing elements only (decision 500) keep an element: one of a class that bears load or
     /// not by IFC's LoadBearing (walls, floors, roofs, columns, beams, members, plates, footings, piles, coverings, a room's
-    /// finishes) when it or its type says it bears load (<see cref="Coordination.Provisions.LoadBearing"/>: Pset_WallCommon.LoadBearing
-    /// for a wall); when neither says, a wall bears load unless IFC calls it or its type a partition (PARTITIONING; decision
-    /// 502: so the preset is of use before every wall is marked), and so do a column, beam, footing, pile, floor or roof; a
-    /// covering or a room's finish never. Any other element (a door, a stair, furniture) is kept.
-    /// The analytical model keeps its own rule (<see cref="Coordination.Provisions.LoadBearing"/>: a wall bears load only when
-    /// it says so; the others are partitions, whose weight it lays on the floors).
+    /// finishes) when it or its type says it bears load (the Structural tick, a Pset_…Common LoadBearing); when neither says,
+    /// a wall bears load unless IFC calls it or its type a partition (PARTITIONING; decision 502: so the preset is of use
+    /// before every wall is marked), and so do a column, beam, footing, pile, floor or roof; a covering or a room's finish
+    /// never. Any other element (a door, a stair, furniture) is kept. The rule is <see cref="StructuralUsage.ForViews"/>; the
+    /// analytical model keeps its own (<see cref="StructuralUsage.ForAnalysis"/>).
     /// </summary>
-    public static bool BearsLoad(IModelView m, Entity e)
-    {
-        if (!Bearing.Contains(e.Class)) return true;
-        if (e.Class is "IfcCovering" or "LapinRoomFinish" or "LapinFinishZone") return false;
-        if (Coordination.Provisions.LoadBearingOrNull(m, e) is { } said) return said;
-        if (e.Class is IfcClass.Wall or "IfcWallStandardCase")
-            return !(e.PredefinedType == "PARTITIONING" || m.RelatingOf(e.Id, IfcClass.RelDefinesByType)?.PredefinedType == "PARTITIONING");
-        return BearingUnlessSaid.Contains(e.Class);
-    }
+    public static bool BearsLoad(IModelView m, Entity e) => StructuralUsage.ForViews(m, e).Effective;
 
     /// <summary>A style as the interface reads it: as saved, with whether it draws the other disciplines halftone (its own choice or its discipline's).</summary>
     static JsonObject WithHalftone(Style s)
@@ -474,6 +465,7 @@ public static class ViewStyles
         if (a["voidSizes"] is JsonValue sv && sv.TryGetValue<bool>(out var sz)) s = s with { VoidSizes = sz };
         if (a["finishHatch"] is JsonValue fv && fv.TryGetValue<bool>(out var fh)) s = s with { FinishHatch = fh };
         if (a["surfaceHatch"] is JsonValue shv && shv.TryGetValue<bool>(out var sh)) s = s with { SurfaceHatch = sh };
+        if (a["floorHatch"] is JsonValue flv && flv.TryGetValue<bool>(out var flh)) s = s with { FloorHatch = flh };
         if (a.ContainsKey("entourage")) s = s with { Entourage = EntourageMode(a["entourage"]) };
         if (a.ContainsKey("entourageFill")) s = s with { EntourageFill = CheckedFill(a["entourageFill"]) };
         if (a.ContainsKey("detail")) s = s with { Detail = PlanDetail.LodOf(a["detail"]) ?? throw new CommandException(PlanDetail.LodProblem) };
@@ -530,6 +522,30 @@ public static class ViewStyles
             if (attrs[Key] is not JsonArray { Count: > 0 } own) attrs[Key] = Write(Defaults.Select(s => s with { FinishElements = false }));
             else foreach (var o in own.OfType<JsonObject>()) o["finishElements"] = false;
             attrs[StructureRevKey] = StructureRev;
+            var up = project.With(attrs: attrs);
+            return (entities.Select(e => e.Id == project.Id ? up : e).ToList(), relations);
+        }
+    }
+
+    /// <summary>The project's mark that its styles say whether their plans hatch the floors seen (forum topic 259); a project made before is upgraded.</summary>
+    public const string FloorHatchRevKey = "floorHatchRev";
+    public const int FloorHatchRev = 1;
+
+    /// <summary>
+    /// A project saved before the floors' plan hatches (forum topic 259) keeps drawing its plans as it did: every style of its own
+    /// says <c>floorHatch</c> false; one without styles of its own gets the defaults it read, so marked. Then the project is marked.
+    /// Registered after <see cref="StructureUpgrade"/>, which may write those styles first.
+    /// </summary>
+    public sealed class FloorHatchUpgrade : IProjectUpgrade
+    {
+        public (IReadOnlyList<Entity> Entities, IReadOnlyList<Relation> Relations) Upgrade(IReadOnlyList<Entity> entities, IReadOnlyList<Relation> relations)
+        {
+            if (entities.FirstOrDefault(e => e.Class == IfcClass.Project) is not { } project) return (entities, relations);
+            if (Json.Number(project.Attrs[FloorHatchRevKey]) is { } r && r >= FloorHatchRev) return (entities, relations);
+            var attrs = project.CloneAttrs();
+            if (attrs[Key] is JsonArray { Count: > 0 } own) foreach (var o in own.OfType<JsonObject>()) o["floorHatch"] = false;
+            else attrs[Key] = Write((MaterialStandards.NewLook(project) ? NewDefaults : Defaults).Select(s => s with { FloorHatch = false }));
+            attrs[FloorHatchRevKey] = FloorHatchRev;
             var up = project.With(attrs: attrs);
             return (entities.Select(e => e.Id == project.Id ? up : e).ToList(), relations);
         }

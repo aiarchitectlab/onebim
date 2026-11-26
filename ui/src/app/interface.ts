@@ -16,7 +16,7 @@
 
 import { create } from 'zustand';
 
-export type InterfacePreset = 'comfortable' | 'compact' | 'focus';
+export type InterfacePreset = 'comfortable' | 'compact' | 'focus' | 'flow';
 
 export interface InterfaceParts {
   /** Large tools with their names, icons only, or a band that opens from its tab. */
@@ -35,12 +35,15 @@ export interface InterfaceParts {
   panels: 'docked' | 'browserRail' | 'bothRail' | 'hidden';
   /** The properties' rows: normal, or dense (22 px). */
   rows: 'normal' | 'dense';
+  /** The large tools' shortcut keys: shown while Alt is held (Office's key tips), or always. */
+  keyTips: 'alt' | 'always';
 }
 
 export const PRESETS: Record<InterfacePreset, InterfaceParts> = {
-  comfortable: { ribbon: 'large', quickTools: 'docked', commandLine: 'own', hud: 'over', prompt: 'banner', keyPlan: 'shown', panels: 'docked', rows: 'normal' },
-  compact: { ribbon: 'icons', quickTools: 'docked', commandLine: 'status', hud: 'status', prompt: 'commandLine', keyPlan: 'button', panels: 'browserRail', rows: 'dense' },
-  focus: { ribbon: 'dropdown', quickTools: 'docked', commandLine: 'status', hud: 'status', prompt: 'commandLine', keyPlan: 'button', panels: 'hidden', rows: 'dense' },
+  comfortable: { ribbon: 'large', quickTools: 'docked', commandLine: 'own', hud: 'over', prompt: 'banner', keyPlan: 'shown', panels: 'docked', rows: 'normal', keyTips: 'alt' },
+  compact: { ribbon: 'icons', quickTools: 'docked', commandLine: 'status', hud: 'status', prompt: 'commandLine', keyPlan: 'button', panels: 'browserRail', rows: 'dense', keyTips: 'alt' },
+  focus: { ribbon: 'dropdown', quickTools: 'docked', commandLine: 'status', hud: 'status', prompt: 'commandLine', keyPlan: 'button', panels: 'hidden', rows: 'dense', keyTips: 'alt' },
+  flow: { ribbon: 'dropdown', quickTools: 'floating', commandLine: 'status', hud: 'over', prompt: 'banner', keyPlan: 'button', panels: 'bothRail', rows: 'normal', keyTips: 'alt' },
 };
 
 /** Each part's choices, in the order the dialog shows them. */
@@ -53,6 +56,7 @@ export const CHOICES: { [K in keyof InterfaceParts]: readonly InterfaceParts[K][
   keyPlan: ['shown', 'button'],
   panels: ['docked', 'browserRail', 'bothRail', 'hidden'],
   rows: ['normal', 'dense'],
+  keyTips: ['alt', 'always'],
 };
 
 /** A workspace: the tabs of a discipline, every tab, or the user's own. */
@@ -148,7 +152,7 @@ export function withTabMoved(s: InterfaceSettings, tab: string, by: -1 | 1, avai
   return { ...s, workspace: 'mine', mine };
 }
 
-/** Where Lapin runs, for the first choice: the web build on a window under 800 px tall starts compact. */
+/** Where Lapin runs (kept for callers; since decision 881 every first start is Flow, whatever the window). */
 export interface InterfaceEnv { web: boolean; height: number }
 
 /** The settings from what was kept (anything unreadable left out), else the default for where Lapin runs. */
@@ -168,8 +172,9 @@ export function initialSettings(stored: unknown, env: InterfaceEnv): InterfaceSe
     if (o.rev !== INTERFACE_REV && parts.quickTools === 'floating') parts.quickTools = 'docked';
     return { preset: presetOf(parts), parts, chosen: true, ...tabs };
   }
-  const preset: InterfacePreset = env.web && env.height < 800 ? 'compact' : 'comfortable';
-  return { preset, parts: { ...PRESETS[preset] }, chosen: false, ...tabs };
+  // Until the user chooses, Lapin starts in Flow (decision 881); the start screen's Flow switch goes back to Comfortable.
+  void env;
+  return { preset: 'flow', parts: { ...PRESETS.flow }, chosen: false, ...tabs };
 }
 
 const KEY = 'lapin.interface';

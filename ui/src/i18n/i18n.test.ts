@@ -8,6 +8,9 @@ import { PL, PL_PATTERNS } from './pl';
 import { PT, PT_PATTERNS } from './pt';
 import { LANGUAGES, translate, type Lang, type Language } from './index';
 import { LO, LO_PATTERNS } from './lo';
+import { EL, EL_PATTERNS } from './el';
+import { SV, SV_PATTERNS } from './sv';
+import { TH, TH_PATTERNS } from './th';
 import { RO, RO_PATTERNS } from './ro';
 import { loadAllLanguages, loadLanguage } from './index';
 
@@ -59,7 +62,7 @@ describe('the Spanish interface', () => {
 
 describe('the languages', () => {
   it('are offered each named in itself, English first', () => {
-    expect(LANGUAGES.map((l) => l.name)).toEqual(['English', 'ภาษาไทย', 'Română', 'Español', 'Deutsch', 'Français', 'Dansk', 'Italiano', 'Polski', 'Português', 'ພາສາລາວ', '简体中文']);
+    expect(LANGUAGES.map((l) => l.name)).toEqual(['English', 'Română', 'Español', 'Deutsch', 'Français', 'Dansk', 'Italiano', 'Polski', 'Português', 'ພາສາລາວ', '简体中文', 'Ελληνικά', 'Svenska', 'ไทย']);
   });
 
   it('English is the interface as written', () => {
@@ -191,6 +194,22 @@ describe('the languages', () => {
     '2 task(s) moved; the schedule finishes on 2026-11-10 (4 working days later). Asking for more than a resource has, not moved: Placă etaj 2.',
     'Formwork as a resource: 3 formwork(s) on 2 task(s).',
     '12 / 48 lights, 4 with shadows',
+    // Game-like UX (docs/plan-ux-game-like.md).
+    'Tip: press WA to start Wall instantly.',
+    'The sandbox model could not be made: The project has no storey.',
+    '3 model health issues: click to inspect',
+    '4 issues',
+    'Very short wall (20 mm)',
+    'Save camera bookmark 2',
+    'Jump to camera bookmark 3',
+    'Camera bookmark 1 saved: Alt+1 jumps back to it.',
+    'Camera bookmark 1 saved.',
+    'Camera bookmark 4 is empty: Alt+Shift+4 in 3D keeps the current view there.',
+    'Camera bookmark 4 is empty.',
+    // Cost articles priced by the time on site (R7).
+    '2 element(s) in no task of the schedule: their quantity is not multiplied by the duration.',
+    '× 3 months',
+    '× 1.5–3 working days',
   ];
   const first = (patterns: [RegExp, unknown][], s: string) => patterns.findIndex(([re]) => re.test(s));
 
@@ -204,7 +223,7 @@ describe('the languages', () => {
   });
 
   // German, French, Danish, Italian, Polish, Portuguese and Lao: the same phrases and patterns as Romanian and Spanish.
-  const others: [Lang, string, Language['dict'], Language['patterns']][] = [['de', 'German', DE, DE_PATTERNS], ['fr', 'French', FR, FR_PATTERNS], ['da', 'Danish', DA, DA_PATTERNS], ['it', 'Italian', IT, IT_PATTERNS], ['pl', 'Polish', PL, PL_PATTERNS], ['pt', 'Portuguese', PT, PT_PATTERNS], ['lo', 'Lao', LO, LO_PATTERNS]];
+  const others: [Lang, string, Language['dict'], Language['patterns']][] = [['de', 'German', DE, DE_PATTERNS], ['fr', 'French', FR, FR_PATTERNS], ['da', 'Danish', DA, DA_PATTERNS], ['it', 'Italian', IT, IT_PATTERNS], ['pl', 'Polish', PL, PL_PATTERNS], ['pt', 'Portuguese', PT, PT_PATTERNS], ['lo', 'Lao', LO, LO_PATTERNS], ['el', 'Greek', EL, EL_PATTERNS], ['sv', 'Swedish', SV, SV_PATTERNS], ['th', 'Thai', TH, TH_PATTERNS]];
   const ends = (s: string) => s.trim().match(/[…:.?]$/)?.[0] ?? '';
   for (const [lang, name, dict, patterns] of others) {
     it(`${name} has every phrase Romanian has, and no other, each ending as the English does`, () => {
@@ -227,6 +246,12 @@ describe('the languages', () => {
       expect(translate(' Floor plans ', lang)).toMatch(/^ \S.*\S $/);
     });
   }
+
+  it('says the game-like UX notices in Romanian, a tool\'s name translated too', () => {
+    expect(translate('Tip: press WA to start Wall instantly.', 'ro')).toBe('Sfat: apasă WA ca să pornești Perete instant.');
+    expect(translate('Camera bookmark 2 saved: Alt+2 jumps back to it.', 'ro')).toBe('Poziția de cameră 2 salvată: Alt+2 revine la ea.');
+    expect(translate('4 issues', 'ro')).toBe('4 probleme');
+  });
 
   it('put a pattern into Spanish with its numbers and names', () => {
     expect(translate('Fold the project browser (B)', 'es')).toBe('Plegar el navegador de proyectos (B)');
@@ -329,7 +354,7 @@ describe('a word with two meanings', () => {
 describe('a view\'s level of development (decision 404)', () => {
   it('names each level and what it adds in every language, the style\'s level too', async () => {
     const { LOD_HELP, LODS } = await import('../modules/core/viewStyles');
-    for (const lang of ['ro', 'es', 'de', 'fr', 'da', 'it', 'pl', 'pt', 'lo', 'zh'] as Lang[]) {
+    for (const lang of ['ro', 'es', 'de', 'fr', 'da', 'it', 'pl', 'pt', 'lo', 'zh', 'el', 'sv', 'th'] as Lang[]) {
       expect(translate(LOD_HELP, lang)).not.toBeNull();
       for (const [, label] of LODS) expect(translate(label, lang)).not.toBeNull();
     }
@@ -345,7 +370,7 @@ describe('the Script panel’s messages (decision 489, stage 3)', () => {
     '„walls.py” came with the project „house.lapin”.',
   ];
   it('are translated in Romanian, German and Chinese', () => {
-    for (const lang of ['ro', 'de', 'zh'] as Lang[]) {
+    for (const lang of ['ro', 'de', 'zh', 'el', 'sv', 'th'] as Lang[]) {
       for (const s of samples) expect(translate(s, lang), `${lang}: ${s}`).not.toBeNull();
     }
     expect(translate('Done in 0.12 s: one undo step.', 'ro')).toContain('0.12');

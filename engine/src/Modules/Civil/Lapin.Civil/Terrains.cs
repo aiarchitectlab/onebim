@@ -77,6 +77,25 @@ public static class Terrains
 
     static readonly ConditionalWeakTable<Entity, Terrain> Cache = new();
 
+    /// <summary>
+    /// A survey brought into a project whose altitude is still 0 (decision 867, the user's answer 5): the terrain's datum, the
+    /// surveyed height of ±0.00, becomes the project's altitude (the base point's elevation), in the import's own step; the note
+    /// that says so, or null when the project keeps its own (it has one, or the datum is 0).
+    /// </summary>
+    public static string? AdoptAltitude(ICommandContext ctx, double datum)
+    {
+        if (Math.Abs(datum) < 1e-9 || !double.IsFinite(datum) || Math.Abs(Location.Base(ctx.Model).Elevation) > 1e-12) return null;
+        if (Spatial.Project(ctx.Model) is not { } project) return null;
+        var attrs = project.CloneAttrs();
+        var loc = (attrs["location"] as JsonObject)?.DeepClone() as JsonObject ?? new JsonObject();
+        var b = loc["base"] as JsonObject ?? new JsonObject();
+        b["elevation"] = datum;
+        loc["base"] = b.DeepClone();
+        attrs["location"] = loc;
+        ctx.Replace(project.With(attrs: attrs));
+        return $"The project's ±0.00 is now at the terrain's datum, altitude {datum.ToString("0.00", System.Globalization.CultureInfo.InvariantCulture)} (Manage → Location).";
+    }
+
     /// <summary>The terrain in model heights (z − datum).</summary>
     public static Terrain Of(Entity e) => Cache.GetValue(e, x => Built(x, sculpted: true));
 
@@ -297,6 +316,18 @@ public static class Terrains
     }
 
     public static IReadOnlyList<Vec2> Spots(Entity e) => Contour(e, "spots");
+
+    /// <summary>
+    /// The spot levels with the datum each says of its own (decision 867's leftover): <c>[x, y]</c>, or <c>[x, y, datum]</c>
+    /// (relative, absolute or both) over the view's; null when it says none. The malformed left out, as <see cref="Spots"/>.
+    /// </summary>
+    public static IReadOnlyList<(Vec2 At, string? Datum)> SpotLevels(Entity e) =>
+        [.. ((e.Attrs["spots"] as JsonArray)?.OfType<JsonArray>() ?? [])
+            .Select(a => (At: Args.TryPoint(a), Datum: a.Count > 2 && a[2] is JsonValue v && v.TryGetValue<string>(out var d) ? LevelDatum.ModeOf(d) : null))
+            .Where(x => x.At.HasValue).Select(x => (x.At!.Value, x.Datum))];
+
+    /// <summary>A spot level as stored: <c>[x, y]</c>, its datum third when it says one.</summary>
+    public static JsonArray SpotJson(Vec2 at, string? datum) => LevelDatum.ModeOf(datum) is { } d ? new JsonArray(at.X, at.Y, d) : new JsonArray(at.X, at.Y);
 
     /// <summary>A terrain's breaklines: polylines of surveyed points [[x, y, z], …].</summary>
     public static List<IReadOnlyList<Vec3>> Breaklines(Entity e) =>
@@ -679,6 +710,33 @@ public static class Terrains
         return g;
     }
 
+    /// <summary>
+    /// The contours every interval (the major ones every <c>majorEvery</c>), clipped outside <paramref name="padAreas"/>; with an
+    /// <paramref name="altitude"/> (an absolute view's, decision 867) at round altitudes: model z + altitude a multiple of the
+    /// interval, the major ones of the major interval. 0: at round model heights, as every relative view draws them.
+    /// </summary>
+    public static IEnumerable<PlanItem> ContourItems(Entity e, Terrain t, IReadOnlyList<(IReadOnlyList<Vec2> Outer, IReadOnlyList<IReadOnlyList<Vec2>> Holes)> padAreas, double altitude = 0)
+    {
+        var interval = DrawnInterval(e, t);
+        var major = Math.Max(1, (int)Math.Round(e.NumOrNull("majorEvery") ?? Defaults.MajorEvery));
+        if (!(interval > 0)) yield break;
+        var shift = ContourShift(altitude, interval);
+        foreach (var z in shift == 0 ? t.Levels(interval) : t.Levels(interval, shift))
+        {
+            var k = (altitude == 0 ? z : z + altitude) / interval / major;
+            var kind = Math.Abs(k - Math.Round(k)) < 1e-6 ? "contourMajor" : "contour";
+            foreach (var line in ChainedContours(t, z, padAreas)) yield return new PlanItem(kind, false, line);
+        }
+    }
+
+    /// <summary>How far below round model heights the contours every <paramref name="step"/> fall for round altitudes: the altitude's fraction of the step (0 when it is a whole number of steps).</summary>
+    public static double ContourShift(double altitude, double step)
+    {
+        if (!(step > 0) || !double.IsFinite(altitude)) return 0;
+        var r = altitude - Math.Floor(altitude / step) * step;
+        return r < 1e-9 || step - r < 1e-9 ? 0 : r;
+    }
+
     /// <summary>Chained contour polylines at elevation <paramref name="z"/>, clipped outside <paramref name="pads"/>.</summary>
     public static List<List<Vec2>> ChainedContours(Terrain t, double z, IEnumerable<(IReadOnlyList<Vec2> Outer, IReadOnlyList<IReadOnlyList<Vec2>> Holes)> pads) =>
         Chain(t.Contour(z).SelectMany(s => Outside(s.A, s.B, pads)).ToList());
@@ -686,17 +744,9 @@ public static class Terrains
     /// <summary>The plan: contours (the major ones heavier) outside the platforms, the terrain's edge, the platforms' outlines.</summary>
     static List<PlanItem> Plan(Entity e, Terrain t, List<(IReadOnlyList<Vec2> Outline, double Z, IReadOnlyList<IReadOnlyList<Vec2>> Holes)> pads, List<Entity> ditches, List<List<Vec2>>? covered = null)
     {
-        var items = new List<PlanItem>();
-        var interval = DrawnInterval(e, t);
-        var major = Math.Max(1, (int)Math.Round(e.NumOrNull("majorEvery") ?? Defaults.MajorEvery));
         // The contours stop at the platforms and at the hardscapes cut into it (T4), which draw their own outlines.
         var padAreas = pads.Select(x => (x.Outline, x.Holes)).Concat((covered ?? []).Select(a => ((IReadOnlyList<Vec2>)a, (IReadOnlyList<IReadOnlyList<Vec2>>)[]))).ToList();
-        if (interval > 0)
-            foreach (var z in t.Levels(interval))
-            {
-                var kind = Math.Abs(z / interval / major - Math.Round(z / interval / major)) < 1e-6 ? "contourMajor" : "contour";
-                foreach (var line in ChainedContours(t, z, padAreas)) items.Add(new PlanItem(kind, false, line));
-            }
+        var items = ContourItems(e, t, padAreas).ToList();
         foreach (var (a, b) in t.Boundary())
             items.Add(new PlanItem("terrainEdge", false, [new Vec2(t.Tin.Points[a].X, t.Tin.Points[a].Y), new Vec2(t.Tin.Points[b].X, t.Tin.Points[b].Y)]));
         foreach (var (outline, _, holes) in pads) { items.Add(new PlanItem("heavy", true, outline)); items.AddRange(holes.Select(h => new PlanItem("heavy", true, h))); }

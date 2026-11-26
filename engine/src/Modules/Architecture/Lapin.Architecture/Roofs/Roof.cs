@@ -51,6 +51,9 @@ public static class Roof
         return (w * unit, d * unit);
     }
 
+    /// <summary>A section as laid: on edge as written (width across, depth up), or flat, turned 90° (the two swapped).</summary>
+    public static (double W, double D) Laid((double W, double D) section, bool flat) => flat ? (section.D, section.W) : section;
+
     /// <summary>
     /// A roof read from the model: its outline, its rules, the height of its
     /// wall plates' underside (the storey's top + the eave offset). Its planes
@@ -77,11 +80,15 @@ public static class Roof
         /// <summary>The covering chosen, as thick as the roof says (<c>coveringThickness</c>, a foreign roof's, decision 334), else the catalogue's.</summary>
         public RoofCatalog.Covering Covering => RoofCatalog.CoveringOf(Roof.Str("covering")) is var c && Roof.NumOrNull("coveringThickness") is { } t && t > 0.001 ? c with { Thickness = t } : c;
         public (double W, double D) Rafter => Section(Roof.Str("rafterSection"), (0.08, 0.16));
-        /// <summary>Configurable sections for wall plates, ridge beams, purlins, and collar ties (defaulting to the standard sections).</summary>
-        public (double W, double D) WallPlateSection => Section(Roof.Str("plateSection"), WallPlate);
-        public (double W, double D) RidgeBeamSection => Section(Roof.Str("ridgeSection"), RidgeBeam);
-        public (double W, double D) PurlinSection => Section(Roof.Str("purlinSection"), Purlin);
-        public (double W, double D) CollarSection => Section(Roof.Str("collarSection"), Rafter);
+        /// <summary>
+        /// Configurable sections for wall plates, ridge beams, purlins, and collar ties (defaulting to the standard sections), each
+        /// as it is laid: on edge, or flat when the roof says so (<c>plateFlat</c>, <c>ridgeFlat</c>, <c>purlinFlat</c>,
+        /// <c>collarFlat</c>; forum round 26.11.2026, R1), its width and depth then swapped for every use of it.
+        /// </summary>
+        public (double W, double D) WallPlateSection => Laid(Section(Roof.Str("plateSection"), WallPlate), Roof.Bool("plateFlat"));
+        public (double W, double D) RidgeBeamSection => Laid(Section(Roof.Str("ridgeSection"), RidgeBeam), Roof.Bool("ridgeFlat"));
+        public (double W, double D) PurlinSection => Laid(Section(Roof.Str("purlinSection"), Purlin), Roof.Bool("purlinFlat"));
+        public (double W, double D) CollarSection => Laid(Section(Roof.Str("collarSection"), Rafter), Roof.Bool("collarFlat"));
         /// <summary>The planes' height over the wall line: on the plates when framed.</summary>
         public double BaseZ => PlateZ + (Framed ? WallPlateSection.D : 0);
         /// <summary>A roof without framing: its deck's thickness (decision 329), the roof's own, else 16 cm.</summary>
@@ -355,7 +362,27 @@ public static class Roof
         "copper" => "#b87333", "zinc_titanium" => "#8c9399", "painted" => "#3c4247", _ => "#a9b0b6",
     };
 
+    /// <summary>
+    /// The roof's body: <see cref="Whole"/>, less where it meets another roof (<see cref="RoofJunctions"/>, decision 847), which
+    /// takes the boolean library; without services (what the roof cuts walls with) it is whole.
+    /// </summary>
     public static ElementGeometry? Geometry(Entity roof, IModelView m, IServices? services = null)
+    {
+        var g = Whole(roof, m, services);
+        if (g == null || g.Parts.Count == 0 || services == null || Resolve(roof, m) is not { } r) return g;
+        var shape = r.Flat ? null : Solve(r).Shape;
+        var cuts = RoofJunctions.Cuts(r, shape, m);
+        if (cuts.Count == 0) return g;
+        var plan = g.Plan == null ? null : RoofJunctions.Plan(g.Plan, r, shape, cuts);
+        if (services.Get<ISolidBooleans>() is not { } booleans)
+            return g with { Plan = plan, Diagnostics = [.. g.Diagnostics ?? [], "Where it meets another roof it needs the boolean library (manifold), missing here."] };
+        var diags = new List<string>();
+        var parts = RoofJunctions.Apply(g.Parts, cuts, booleans, diags);
+        return g with { Parts = parts, Plan = plan, Diagnostics = diags.Count > 0 ? [.. g.Diagnostics ?? [], .. diags] : g.Diagnostics };
+    }
+
+    /// <summary>The roof's body by itself, as if no other roof were near.</summary>
+    static ElementGeometry? Whole(Entity roof, IModelView m, IServices? services)
     {
         var diags = new List<string>();
         var r = Resolve(roof, m);
@@ -481,8 +508,8 @@ public static class Roof
             if (element != null) continue;
             var g = gutters[gi];
             var outlet = Drainage.OutletAt(g, station, runs[gi], spec);
-            var chain = Drainage.Chain(outlet, g.Out, Drainage.DefaultRoute(Drainage.OutFromWall(r, g, spec)), ground, false, Drainage.DefaultDiameter / 2);
-            var pipe = Drainage.PipeSolids(chain, Drainage.DefaultDiameter / 2, "downpipe");
+            var chain = Drainage.Chain(outlet, g.Out, Drainage.DefaultRoute(Drainage.OutFromWall(r, g, spec)), ground, false, Drainage.PipeDiameterOf(roof) / 2);
+            var pipe = Drainage.PipeSolids(chain, Drainage.PipeDiameterOf(roof) / 2, "downpipe");
             if (pipe.Count > 0) parts.Add(Drainage.PipePart("Downpipe", metal, Openings.Combine(pipe, "downpipe"), $"downpipe:{++auto}", chain));
             var foot = chain[^1].Xy;
             plan.Add(new PlanItem("symbol", true, Enumerable.Range(0, 12).Select(k => foot + new Vec2(Math.Cos(k * Math.PI / 6), Math.Sin(k * Math.PI / 6)) * 0.05).ToArray()));
@@ -550,7 +577,8 @@ public static class Roof
         if (r == null) yield break;
         if (r.Flat)
         {
-            var flat = Math.Abs(Polygon2.SignedArea(EaveOutline(r)));
+            // Less what another roof takes away where they meet (decision 847).
+            var flat = Math.Max(0, Math.Abs(Polygon2.SignedArea(EaveOutline(r))) - RoofJunctions.Cuts(r, null, m).Sum(c => c.ProjectedArea));
             yield return new QuantitySet("Qto_RoofBaseQuantities", [new("GrossArea", flat, "AREA", "Covering")]);
             if (r.HasLayers) { foreach (var ls in LayerQuantities(r, m, flat, flat, geometry)) yield return ls; }
             else
@@ -564,11 +592,14 @@ public static class Roof
         if (shape == null) yield break;
         // The true sloped area less its openings, and the lines that get their own flashing, caps and gutters.
         var holes = RoofOpenings.Place(roof, shape, m, []);
+        // The areas and lines less what another roof takes away where they meet (decision 847), as the body is built.
+        var cuts = RoofJunctions.Cuts(r, shape, m);
+        var gross = Math.Max(0, shape.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length) - cuts.Sum(c => c.Area));
         var q = new List<Quantity>
         {
-            new("GrossArea", shape.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length), "AREA", r.HasLayers ? "Roof area" : $"Covering ({r.Covering.Id})"),
-            new("NetArea", shape.Planes.Sum(p => VecMath.NewellNormal(p.Points).Length) - holes.Sum(h => VecMath.NewellNormal(h.Hole.ToList()).Length), "AREA", r.HasLayers ? "Roof area, net" : "Covering, net"),
-            new("ProjectedArea", shape.Planes.Sum(p => Math.Abs(Polygon2.SignedArea(p.Points.Select(x => x.Xy).ToList()))), "AREA", "In plan"),
+            new("GrossArea", gross, "AREA", r.HasLayers ? "Roof area" : $"Covering ({r.Covering.Id})"),
+            new("NetArea", Math.Max(0, gross - holes.Sum(h => VecMath.NewellNormal(h.Hole.ToList()).Length)), "AREA", r.HasLayers ? "Roof area, net" : "Covering, net"),
+            new("ProjectedArea", Math.Max(0, shape.Planes.Sum(p => Math.Abs(Polygon2.SignedArea(p.Points.Select(x => x.Xy).ToList()))) - cuts.Sum(c => c.ProjectedArea)), "AREA", "In plan"),
         };
         foreach (var (kind, name, label) in new[]
         {
@@ -576,7 +607,7 @@ public static class Roof
             (LineKind.Eave, "EaveLength", "Eaves"), (LineKind.Verge, "VergeLength", "Verges (gables)"), (LineKind.Break, "BreakLength", "Mansard break"),
         })
         {
-            var len = shape.Lines.Where(l => l.Kind == kind).Sum(l => l.Length);
+            var len = shape.Lines.Where(l => l.Kind == kind).Sum(l => l.Length * RoofJunctions.ShareKept(r, shape, cuts, l.A.Xy, l.B.Xy));
             if (len > 1e-6) q.Add(new(name, len, "LENGTH", label));
         }
         yield return new QuantitySet("Qto_RoofBaseQuantities", q);
@@ -621,7 +652,7 @@ public static class Roof
                 if (built != null && k < built.Count && built[k] is { } len) return len;
                 var g = gutters[x.Gutter];
                 var outlet = Drainage.OutletAt(g, x.Station, all.Where(y => y.Gutter == x.Gutter).Select(y => y.Station).ToList(), spec);
-                return Drainage.LengthOf(Drainage.Chain(outlet, g.Out, Drainage.DefaultRoute(Drainage.OutFromWall(r, g, spec)), ground, false, Drainage.DefaultDiameter / 2));
+                return Drainage.LengthOf(Drainage.Chain(outlet, g.Out, Drainage.DefaultRoute(Drainage.OutFromWall(r, g, spec)), ground, false, Drainage.PipeDiameterOf(roof) / 2));
             }).ToList();
             var q2 = new List<Quantity>
             {
@@ -632,7 +663,7 @@ public static class Roof
                 var ends = gutters.Sum(x => (x.CapStart ? 1 : 0) + (x.CapEnd ? 1 : 0));
                 if (ends > 0) q2.Add(new("GutterEndCount", ends, "COUNT", "Gutter end caps"));
             }
-            if (autos.Count > 0) { q2.Add(new("DownpipeCount", autos.Count, "COUNT", "Downpipes")); q2.Add(new("DownpipeLength", autos.Sum(), "LENGTH", "Downpipe Ø100")); }
+            if (autos.Count > 0) { q2.Add(new("DownpipeCount", autos.Count, "COUNT", "Downpipes")); q2.Add(new("DownpipeLength", autos.Sum(), "LENGTH", $"Downpipe Ø{Math.Round(Drainage.PipeDiameterOf(roof) * 1000)}")); }
             yield return new QuantitySet("Lapin_RoofDrainageQuantities", q2, "drainage", "Gutters and downpipes");
         }
         var rows = RoofParts.SnowGuards(r, shape, holes);

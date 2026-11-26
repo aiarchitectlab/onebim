@@ -18,7 +18,7 @@ import { confirmAction } from '../../shell/prompts';
 import { backdropClose } from '../../shell/Dialog';
 import { setDisplay, useDisplay } from '../../app/display';
 import { Fragment, useEffect, useState } from 'react';
-import { Copy, Plus, RotateCcw, Trash2, X } from 'lucide-react';
+import { Copy, Pencil, Plus, RotateCcw, Trash2, X } from 'lucide-react';
 import { useUi } from '../../app/store';
 import { execute, query, useSession } from '../../engine/session';
 import { DisciplinePicker } from './DisciplinePicker';
@@ -28,6 +28,7 @@ import { useMaterialGraphicsSets } from './materialGraphicsSets';
 import { BeyondFields, BeyondStyleCells } from './ViewDepth';
 import { materialSetChoice, materialSetPatch, ENTOURAGE_FILLS, parseMinSpacing, ENTOURAGE_MODES, FINISH_FIELDS, LOD_HELP, LODS, STRUCTURE_MODES, structureLabel, styleStructure, useViewStyles, VEGETATION_HELP, VEGETATION_MODES, type EntourageMode, type LayerMode, type VegetationMode, type ViewStyle } from './viewStyles';
 import { frontView } from '../../viewport/frontView';
+import { VIEW_LEVEL_MODES, viewDatumChoice, viewDatumPatch } from '../../shell/levelDatum';
 import { storeys } from '../../engine/model';
 import type { NodeDto } from '../../engine/protocol';
 import { PlanStoreysEditor } from './PlanStoreys';
@@ -81,7 +82,9 @@ function ViewSettingsEditor({ view }: { view: NodeDto }) {
   const section = view.props.kind === 'section';
   const Reset = ({ field }: { field: string }) => own(field)
     ? <button type="button" className="icon mini" title="Back to the style's" onClick={() => set({ [field]: null })}><RotateCcw size={11} /></button>
-    : <span className="muted small"> style</span>;
+    : <span className="by-style" title="The value comes from the view's style">by style</span>;
+  /** A pencil beside a dropdown, for the dialog that edits what it lists (Edit styles…, Edit sets…). */
+  const Edit = ({ label, dialog }: { label: string; dialog: string }) => <button type="button" className="icon mini" title={label} aria-label={label} onClick={() => useUi.setState({ dialog })}><Pencil size={12} /></button>;
   return (
     <div className="view-settings">
       <dl className="fields">
@@ -93,7 +96,7 @@ function ViewSettingsEditor({ view }: { view: NodeDto }) {
             <option value="">by the discipline: {state.style.name}</option>
             {styles.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
           </select>
-          <button type="button" className="link small" onClick={() => useUi.setState({ dialog: 'viewStyles' })}>Edit styles…</button>
+          <Edit label="Edit styles…" dialog="viewStyles" />
         </dd>
         <dt title={LOD_HELP}>Level of development</dt>
         <dd>
@@ -117,8 +120,17 @@ function ViewSettingsEditor({ view }: { view: NodeDto }) {
             <option value="none">none: the materials' own</option>
             {matSets.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
           </select><Reset field="materialGraphicsSet" />
-          <button type="button" className="link small" onClick={() => useUi.setState({ dialog: 'materialGraphicsSets' })}>Edit sets…</button>
+          <Edit label="Edit sets…" dialog="materialGraphicsSets" />
         </dd>
+        {!threeD && <>
+          <dt title="How the view writes its levels: relative to ±0.00, as altitudes or both; the project's (Manage → Location) unless it says its own">Levels</dt>
+          <dd>
+            <select data-testid="view-level-datum" value={viewDatumChoice(view.props.levelDatum)} onChange={(e) => void execute('view.levelDatum', viewDatumPatch({ id: view.id }, e.target.value))}>
+              <option value="">as the project's</option>
+              {VIEW_LEVEL_MODES.map(([k, label]) => <option key={k} value={k}>{label}</option>)}
+            </select>
+          </dd>
+        </>}
         <dt title={VEGETATION_HELP}>Vegetation</dt>
         <dd>
           <select data-testid="view-vegetation" value={state.resolved.vegetation ?? 'coloured'} onChange={(e) => set({ vegetation: e.target.value })}>
@@ -185,6 +197,8 @@ function ViewSettingsEditor({ view }: { view: NodeDto }) {
             <dd><input type="checkbox" data-testid="view-halftone-others" checked={state.resolved.halftonesOthers === true} onChange={(e) => set({ halftoneOthers: e.target.checked })} /><Reset field="halftoneOthers" /></dd>
             <dt title="Plans hatch the rooms' floor finishes as their types say (a plan seen from below, their ceilings)">Floor finish hatches</dt>
             <dd><input type="checkbox" data-testid="view-finish-hatch" checked={state.resolved.finishHatch !== false} onChange={(e) => set({ finishHatch: e.target.checked })} /><Reset field="finishHatch" /></dd>
+            <dt title="Plans hatch the top of the floors they see below their cut with the surface pattern of the floor's top layer material (Manage → Materials, Elevation), under the walls; a room's floor finish draws its own hatch over it">Floor surface hatches</dt>
+            <dd><input type="checkbox" data-testid="view-floor-hatch" checked={state.resolved.floorHatch === true} onChange={(e) => set({ floorHatch: e.target.checked })} /><Reset field="floorHatch" /></dd>
             <dt title="From above: a plan. From below: a reflected ceiling plan, what lies above the cut up to the range's top (soffits, beams, formwork), drawn the way the plan lies">Seen from</dt>
             <dd>
               <select value={view.props.look === 'up' ? 'up' : 'down'} onChange={(e) => void execute('view.setRange', { id: view.id, look: e.target.value })}>
@@ -292,7 +306,7 @@ export function ViewStylesDialog() {
         <header className="dialog-head"><span className="panel-title">View styles</span><button type="button" className="icon" onClick={close} title="Close"><X size={15} /></button></header>
         <div className="dialog-body">
           <table className="layer-table view-styles">
-            <thead><tr><th>Name</th><th title="The views of this discipline take this style unless they name another">Discipline</th><th title={LOD_HELP}>Level of development</th><th title="Partial structure display of the style's plans: which layers of walls, floors and roofs they draw">Structure in plans</th><th title="Partial structure display of the style's sections and elevations">Structure in sections</th><th title="Partial structure display of the style's 3D views and other views">Structure in 3D</th><th title="The partial structure display leaves out the rooms' finishes, the skirtings and the finish coverings with the finish layers; a project made before draws them until this is ticked">Finish elements</th><th title="One material goes on from element to element without a line">Join materials</th><th title="Plans draw what lies above their cut">Overhead</th><th title="Its views draw what is not of their discipline grey (an MEP plan's architecture); on by default for the MEP discipline">Other disciplines halftone</th><th title="Plans draw the 2D an IFC file gave its elements instead of their cut">IFC 2D symbols</th><th title="Plans, sections and elevations draw the openings' voids, crossed, with their marks">Opening voids</th><th title="Under each void's mark its width × height (a round one's diameter) and a wall opening's bottom level">Void sizes</th><th title="Plans hatch the rooms' floor finishes as their types say (a plan seen from below, their ceilings)">Floor finish hatches</th><th title="Elevations and sections hatch the faces they see with their materials' elevation hatch (Manage → Materials), where nothing nearer hides them">Surface hatches</th>{FINISH_FIELDS.map((f) => <th key={f.key} title={f.title}>{f.column}</th>)}<th title="How people, cars and plants draw in plans, elevations and sections: outlines (simple symbols and silhouettes), abstract (circles and boxes), detailed (every line of their symbols and bodies) or not at all; their bodies stay in 3D">Entourage in 2D</th><th title="The fill of the silhouettes elevations and sections draw for people, cars and plants">Silhouette fill</th><th title={VEGETATION_HELP}>Vegetation</th><th title="Hatch lines closer together than this on paper are not drawn: the area shows as an outline with a plain fill. 0 draws every line.">Min. hatch spacing (mm)</th><th title="What cut elements draw from a small scale on: as their materials say, plain solid, an outline only, or the core layer alone">Small-scale cut</th><th title="What the style's sections and elevations draw beyond their cut: everything up to their depth, the near part with the rest in a grey background pen, or only the cut">Beyond the cut</th><th title="With Cut + near: how far from the cut elements draw in full before the background">Near depth</th><th title="The Visibility / Graphics set its views take when they have none of their own, as a view template">Graphics set</th><th title="How the materials draw in the style's views: a material graphics set (Manage → Material graphics sets), or the materials' own graphics">Material graphics</th><th /></tr></thead>
+            <thead><tr><th>Name</th><th title="The views of this discipline take this style unless they name another">Discipline</th><th title={LOD_HELP}>Level of development</th><th title="Partial structure display of the style's plans: which layers of walls, floors and roofs they draw">Structure in plans</th><th title="Partial structure display of the style's sections and elevations">Structure in sections</th><th title="Partial structure display of the style's 3D views and other views">Structure in 3D</th><th title="The partial structure display leaves out the rooms' finishes, the skirtings and the finish coverings with the finish layers; a project made before draws them until this is ticked">Finish elements</th><th title="One material goes on from element to element without a line">Join materials</th><th title="Plans draw what lies above their cut">Overhead</th><th title="Its views draw what is not of their discipline grey (an MEP plan's architecture); on by default for the MEP discipline">Other disciplines halftone</th><th title="Plans draw the 2D an IFC file gave its elements instead of their cut">IFC 2D symbols</th><th title="Plans, sections and elevations draw the openings' voids, crossed, with their marks">Opening voids</th><th title="Under each void's mark its width × height (a round one's diameter) and a wall opening's bottom level">Void sizes</th><th title="Plans hatch the rooms' floor finishes as their types say (a plan seen from below, their ceilings)">Floor finish hatches</th><th title="Plans hatch the top of the floors they see below their cut with the surface pattern of the floor's top layer material (Manage → Materials, Elevation), under the walls; a room's floor finish draws its own hatch over it">Floor surface hatches</th><th title="Elevations and sections hatch the faces they see with their materials' elevation hatch (Manage → Materials), where nothing nearer hides them">Surface hatches</th>{FINISH_FIELDS.map((f) => <th key={f.key} title={f.title}>{f.column}</th>)}<th title="How people, cars and plants draw in plans, elevations and sections: outlines (simple symbols and silhouettes), abstract (circles and boxes), detailed (every line of their symbols and bodies) or not at all; their bodies stay in 3D">Entourage in 2D</th><th title="The fill of the silhouettes elevations and sections draw for people, cars and plants">Silhouette fill</th><th title={VEGETATION_HELP}>Vegetation</th><th title="Hatch lines closer together than this on paper are not drawn: the area shows as an outline with a plain fill. 0 draws every line.">Min. hatch spacing (mm)</th><th title="What cut elements draw from a small scale on: as their materials say, plain solid, an outline only, or the core layer alone">Small-scale cut</th><th title="What the style's sections and elevations draw beyond their cut: everything up to their depth, the near part with the rest in a grey background pen, or only the cut">Beyond the cut</th><th title="With Cut + near: how far from the cut elements draw in full before the background">Near depth</th><th title="The Visibility / Graphics set its views take when they have none of their own, as a view template">Graphics set</th><th title="How the materials draw in the style's views: a material graphics set (Manage → Material graphics sets), or the materials' own graphics">Material graphics</th><th /></tr></thead>
             <tbody>
               {styles.map((s) => (
                 <tr key={s.id}>
@@ -310,6 +324,7 @@ export function ViewStylesDialog() {
                   <td><input type="checkbox" checked={s.voids === true} onChange={(e) => update(s.id, { voids: e.target.checked })} /></td>
                   <td><input type="checkbox" checked={s.voidSizes !== false} disabled={!s.voids} onChange={(e) => update(s.id, { voidSizes: e.target.checked })} /></td>
                   <td><input type="checkbox" checked={s.finishHatch !== false} onChange={(e) => update(s.id, { finishHatch: e.target.checked })} /></td>
+                  <td><input type="checkbox" data-testid="style-floor-hatch" checked={s.floorHatch === true} onChange={(e) => update(s.id, { floorHatch: e.target.checked })} /></td>
                   <td><input type="checkbox" checked={s.surfaceHatch !== false} onChange={(e) => update(s.id, { surfaceHatch: e.target.checked })} /></td>
                   {FINISH_FIELDS.map((f) => <td key={f.key}><input type="checkbox" data-testid={`style-${f.key}`} checked={s[f.key] !== false} onChange={(e) => update(s.id, { [f.key]: e.target.checked })} /></td>)}
                   <td><select value={s.entourage ?? 'outline'} onChange={(e) => update(s.id, { entourage: e.target.value as EntourageMode })}>{ENTOURAGE_MODES.map(([k, l]) => <option key={k} value={k}>{l}</option>)}</select></td>

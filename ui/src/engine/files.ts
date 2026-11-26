@@ -17,7 +17,8 @@ import { projectTypesFile } from '../modules/core/projectTypes';
 import { emptyPane, notify, notifyProblem, select, useUi } from '../app/store';
 import { usePrefs } from '../app/prefs';
 import { applyNewProjectStandard } from './newProjectStandard';
-import { fitAfterImport, poseKey } from '../viewport/camera';
+import { fitAfterImport, poseKey, useCamera } from '../viewport/camera';
+import { rememberThumb } from './recentThumbs';
 import { flushUserSettings } from '../app/userSettings';
 import { useCde } from './cdeServer';
 
@@ -222,7 +223,7 @@ export function enter(): void {
   select(null);
   // Another project: what the CDE start screen said of the last one (opened read-only, cloned, not saved to the server) goes.
   const cde = useCde.getState();
-  if (cde.opened || cde.cloned || cde.unpushed || cde.linked) useCde.setState({ opened: null, cloned: null, unpushed: null, linked: false });
+  if (cde.opened || cde.cloned || cde.unpushed || cde.linked || cde.reference) useCde.setState({ opened: null, cloned: null, unpushed: null, linked: false, reference: null });
   forget3d();
   const plan = emptyPane('plan');
   useUi.setState({ screen: 'workspace', storeyId: null, tool: null, panes: [plan], pane: 0, ...plan });
@@ -360,6 +361,8 @@ export async function saveProject(as = false): Promise<boolean> {
   try {
     const saved = await engine.call('project.save', { path }, { timeoutMs: LONG_TIMEOUT_MS });
     remember(path);
+    // The 3D view's small picture for the start screen's recent list; it never holds up or fails the save.
+    rememberThumb(path, () => useCamera.getState().api?.snapshot?.(320));
     notify(`Saved ${projectTitle(path)}.`);
     reportWarnings(saved);
     return true;

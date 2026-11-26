@@ -49,6 +49,8 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
     /// <summary>The session path the versions belong to: another path (a recovered project's) has them read from its file.</summary>
     string? _versionsOf;
     PackageIssues _issues = PackageIssues.Empty();
+    /// <summary>The files the project's reference documents keep (docs/plan-cde-references.md §3.5): read and written with the issues' files.</summary>
+    PackageIssues _references = PackageIssues.EmptyReferences();
     /// <summary>The session path the issues' files were read from (null: a project not saved yet, its issues' files in memory).</summary>
     string? _issuesOf;
     PackageForeign _foreign = PackageForeign.None;
@@ -119,13 +121,13 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
     }
 
     /// <summary>What a save leaves: the versions, issued files and other tools' entries found in the package just written from now on.</summary>
-    void After(string name, Func<PackageVersions> reread, PackageVersions versions, PackageIssues issues, IReadOnlyDictionary<string, long> written, PackageForeign foreign, PackageWriteReport? report, Func<Stream>? reopen = null)
+    void After(string name, Func<PackageVersions> reread, PackageVersions versions, (PackageIssues Issues, PackageIssues References) stores, IReadOnlyDictionary<string, long> written, PackageForeign foreign, PackageWriteReport? report, Func<Stream>? reopen = null)
     {
         // The history's blobs are in the file just written from now on (docs/spec-lapin-remote.md §6.4), what it held in memory written there.
         var history = reopen != null && foreign.History.Any ? foreign.History.From(reopen) : foreign.History;
         KeepForeign(name, (foreign.Unreadable != null ? PackageForeign.None : foreign).WithHistory(history));
         Keep(name, versions.Unreadable != null ? reread() : versions);
-        KeepIssues(name, issues);
+        KeepIssues(name, stores.Issues, stores.References);
         LastWarnings = report?.Warnings ?? [];
         foreach (var w in LastWarnings) Console.Error.WriteLine($"[engine] save: {w}");
     }
@@ -153,7 +155,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var diff = session.Load(content.Entities, content.Relations, name, content.Classes);
         Adopt(null, null);
         Keep(name, PackageVersions.Of(bytes));
-        KeepIssues(name, PackageIssues.Of(bytes));
+        KeepIssues(name, PackageIssues.Of(bytes), PackageIssues.ReferencesOf(bytes));
         KeepForeign(name, PackageForeign.Of(bytes));
         return diff;
     }
@@ -172,7 +174,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         _page = null;
         var diff = session.Saved(name);
         Adopt(null, null);
-        After(name, () => PackageVersions.Of(bytes), versions.From(bytes), issues.Store.From(bytes, report.Issues), report.Issues, foreign, report, () => new MemoryStream(bytes, writable: false));
+        After(name, () => PackageVersions.Of(bytes), versions.From(bytes), (issues.Store.From(bytes, report.Issues), issues.References!.Store.From(bytes, report.References)), report.Issues, foreign, report, () => new MemoryStream(bytes, writable: false));
         return (bytes, diff);
     }
 
@@ -200,7 +202,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var diff = session.Load(content.Entities, content.Relations, null, content.Classes);
         Adopt(null, null);
         _page = (PackageVersions.Of(bytes), PackageForeign.Of(bytes));
-        KeepIssues(null, PackageIssues.Of(bytes));
+        KeepIssues(null, PackageIssues.Of(bytes), PackageIssues.ReferencesOf(bytes));
         LastPage = Path.GetFileName(name);
         return diff;
     }
@@ -222,7 +224,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var source = session.Path == path ? Take(path) : path;
         if (session.Path != path) Adopt(null, null);
         Keep(path, PackageVersions.Of(source));
-        KeepIssues(path, PackageIssues.Of(source));
+        KeepIssues(path, PackageIssues.Of(source), PackageIssues.ReferencesOf(source));
         KeepForeign(path, PackageForeign.Of(source));
         return diff;
     }
@@ -241,7 +243,8 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var saved = session.Path ?? target;
         var source = Take(saved);
         var written = report?.Issues ?? Written(issues);
-        After(saved, () => PackageVersions.Of(source), versions.From(source), issues.Store.From(source, written), written, foreign, report, () => File.OpenRead(source));
+        var writtenReferences = report?.References ?? Written(issues.References!);
+        After(saved, () => PackageVersions.Of(source), versions.From(source), (issues.Store.From(source, written), issues.References!.Store.From(source, writtenReferences)), written, foreign, report, () => File.OpenRead(source));
         return diff;
     }
 
@@ -253,6 +256,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
     {
         _page = null;
         _issues = PackageIssues.Empty();
+        _references = PackageIssues.EmptyReferences();
         _issuesOf = null;
         _foreign = PackageForeign.None;
         _foreignOf = null;
@@ -284,14 +288,37 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
     /// </summary>
     public PackageIssues Issues(Session session)
     {
-        if (session.Path is { } path) { if (_issuesOf != path) KeepIssues(path, PackageIssues.Of(Source(path))); }
-        else if (_issuesOf != null) Reset();
+        Stores(session);
         return _issues;
     }
 
-    void KeepIssues(string? path, PackageIssues issues)
+    /// <summary>The reference documents' bytes as the session's commands keep and read them: this project's store, whichever it is at the time.</summary>
+    public Lapin.Platform.Cde.References.IReferenceFiles ReferenceFilesOf(Session session) => new ReferenceStore(() => References(session));
+
+    sealed class ReferenceStore(Func<PackageIssues> store) : Lapin.Platform.Cde.References.IReferenceFiles
+    {
+        public string Put(byte[] bytes) => store().Put(bytes);
+        public bool Has(string sha256) => store().Has(sha256);
+        public byte[] Get(string sha256) => store().Get(sha256);
+    }
+
+    /// <summary>The files the open project's reference documents keep, as <see cref="Issues"/> holds the issues' (docs/plan-cde-references.md §3.5).</summary>
+    public PackageIssues References(Session session)
+    {
+        Stores(session);
+        return _references;
+    }
+
+    void Stores(Session session)
+    {
+        if (session.Path is { } path) { if (_issuesOf != path) { var source = Source(path); KeepIssues(path, PackageIssues.Of(source), PackageIssues.ReferencesOf(source)); } }
+        else if (_issuesOf != null) Reset();
+    }
+
+    void KeepIssues(string? path, PackageIssues issues, PackageIssues references)
     {
         _issues = issues;
+        _references = references;
         _issuesOf = path;
     }
 
@@ -303,7 +330,12 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var index = keep.Count > 0
             ? System.Text.Encoding.UTF8.GetBytes(Lapin.Platform.Cde.CdeIssues.Index(session.Model).ToJsonString(new JsonSerializerOptions { WriteIndented = true }))
             : null;
-        return new IssueFiles(store, keep, index);
+        var references = References(session);
+        var held = Lapin.Platform.Cde.References.References.HeldHashes(session.Model);
+        var refIndex = Lapin.Platform.Cde.References.References.Any(session.Model)
+            ? System.Text.Encoding.UTF8.GetBytes(Lapin.Platform.Cde.References.References.Index(session.Model).ToJsonString(new JsonSerializerOptions { WriteIndented = true }))
+            : null;
+        return new IssueFiles(store, keep, index) { References = new IssueFiles(references, held, refIndex) };
     }
 
     // ------------------------------------------------------------ versions
@@ -373,7 +405,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
             _page = null;
             var diff = session.Saved(name);
             Adopt(null, null);
-            After(name, () => PackageVersions.Of(bytes), versions.From(bytes), issues.Store.From(bytes, r.Issues), r.Issues, foreign, r, () => new MemoryStream(bytes, writable: false));
+            After(name, () => PackageVersions.Of(bytes), versions.From(bytes), (issues.Store.From(bytes, r.Issues), issues.References!.Store.From(bytes, r.References)), r.Issues, foreign, r, () => new MemoryStream(bytes, writable: false));
             Warn(result);
             result["name"] = name;
             result["data"] = Convert.ToBase64String(bytes);
@@ -383,7 +415,7 @@ public sealed partial class ProjectFiles(Func<Session, string, Diff> open, Actio
         var report = LapinPackage.Write(path, build, versions, issues, foreign);
         var saved = session.Saved(path);
         var source = Take(path);
-        After(path, () => PackageVersions.Of(source), versions.From(source), issues.Store.From(source, report.Issues), report.Issues, foreign, report, () => File.OpenRead(source));
+        After(path, () => PackageVersions.Of(source), versions.From(source), (issues.Store.From(source, report.Issues), issues.References!.Store.From(source, report.References)), report.Issues, foreign, report, () => File.OpenRead(source));
         Warn(result);
         result["path"] = path;
         return (result, saved);
@@ -528,6 +560,9 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
 {
     public Session Session => session;
 
+    /// <summary>The session's reference documents keep their bytes in the project's file, through <paramref name="files"/> (docs/plan-cde-references.md §3.5).</summary>
+    readonly Lapin.Platform.Cde.References.IReferenceFiles _referenceFiles = session.ReferenceFiles = files.ReferenceFilesOf(session);
+
     /// <summary>Frames written by the generated contracts alone, as a trimmed engine writes them (for tests).</summary>
     public bool ContractsOnly { get; init; }
 
@@ -581,6 +616,19 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
         var info = new FileInfo(path);
         if (!info.Exists) throw new CommandException($"There is no file at {path}.");
         return (File.ReadAllBytes(path), info.Name, path, $"{path}:{info.Length}:{info.LastWriteTimeUtc.Ticks}");
+    }
+
+    /// <summary>
+    /// An IFC to survey or import (<see cref="IfcBytes"/>), an .ifczip read from its first .ifc entry (a consultant's model on a CDE
+    /// server often comes zipped, docs/plan-cde-references.md R7), given as bytes. Only these two calls unzip, and only bytes (a file by path
+    /// is read again by its path, for a link's reload and the journal): the other formats read this way (meshes) may be zips of their own.
+    /// </summary>
+    (byte[] Bytes, string Name, string? Path, string Key) IfcModelBytes(JsonObject p)
+    {
+        var (bytes, name, path, key) = IfcBytes(p);
+        if (path != null || !name.EndsWith(".ifczip", StringComparison.OrdinalIgnoreCase)) return (bytes, name, path, key);
+        try { return (IfcOptimize.Unzipped(bytes), name, path, key); }
+        catch (Exception e) when (e is InvalidDataException or IOException) { throw new CommandException($"{name} is not an .ifczip Lapin reads: {e.Message}"); }
     }
 
     /// <summary>A start screen template's levels (decision 261): each a name, an elevation and a height in metres; null when none or one is unreadable.</summary>
@@ -744,7 +792,7 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
     public const int MaxQuantityIds = 5000;
 
     /// <summary>The library files a firm's folder may hold (docs/plan-user-extensibility.md §4.2), by extension.</summary>
-    public static readonly string[] LibraryKinds = ["lapinsymbols", "lapintypes", "lapinstandards", "lapinrules", "lapinbarshapes", "lapinparams", "lapinmapping", "lapinfamily", "lapinpart", "lapinlib", "lapintitleblock", "lapinprofiles", "lapinprices", "lapinschedule", "lapinaliases", "pat", "lin"];
+    public static readonly string[] LibraryKinds = ["lapinsymbols", "lapintypes", "lapinstandards", "lapinrules", "lapinbarshapes", "lapinparams", "lapinmapping", "lapinfamily", "lapinpart", "lapinlib", "lapintitleblock", "lapinprofiles", "lapinprices", "lapinschedule", "lapinaliases", "lapinpanels", "pat", "lin"];
 
     /// <summary>
     /// Bytes written into a folder of their own in the temporary folder, to be opened from there (a version in another
@@ -780,7 +828,7 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
         {
             case "session.info" or "session.catalogue" or "doc.snapshot" or "doc.query" or "quantities.of" or "quantities.many" or "view.caps" or "view.fine" or "pointcloud.tiles" or "pointcloud.splats"
                 or "project.versions" or "project.compareVersions"
-                or "export.pdf" or "export.dxf" or "project.exportIfc" or "project.exportStep" or "project.exportMesh" or "project.exportSurvey" or "project.exportHtml" or "project.htmlPlan":
+                or "export.pdf" or "export.dxf" or "export.publish" or "project.exportIfc" or "project.exportStep" or "project.exportMesh" or "project.exportSurvey" or "project.exportHtml" or "project.htmlPlan":
                 return null;
             case "doc.execute":
                 // A project's scripts are the host's (docs/plan-python-scripting.md §7): a guest never puts one in, alone or in a batch.
@@ -813,15 +861,18 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
     /// (<c>marks.renumber</c>, decision 583: it renames marks other people's sheets show), as renumbering a category's marks does
     /// (<c>markRules.renumber</c>, decision 737), and receiving from Speckle (<c>speckle.receive</c>, docs/plan-speckle.md, S2:
     /// it downloads with the host's account), and renumbering the material keys (<c>material.renumberKeys</c>, forum topic 255: it
-    /// changes the keys other people's sheets show).
+    /// changes the keys other people's sheets show), and deleting a reference document outright (<c>references.delete</c>,
+    /// docs/plan-cde-references.md §3.4: an owner's; a guest withdraws or supersedes one instead).
     /// </summary>
-    public static readonly string[] HostOnlyCommands = ["scripting.", "graphs.", "marks.renumber", "markRules.renumber", "speckle.", "material.renumberKeys"];
+    public static readonly string[] HostOnlyCommands = ["scripting.", "graphs.", "marks.renumber", "markRules.renumber", "speckle.", "material.renumberKeys", "references.delete"];
 
     /// <summary>
     /// The namespaces of queries no guest asks: a project's graphs (their evaluation runs the host's commands on a copy of the
-    /// model), and the Speckle connector's (docs/plan-speckle.md): its account is the host's, signed in with the host's token.
+    /// model), the Speckle connector's (docs/plan-speckle.md): its account is the host's, signed in with the host's token, and
+    /// the scan of the project folder for reference documents (<c>references.scan</c>): it reads the host's disk. The other
+    /// <c>references.*</c> queries (list, get, file, text, suggest, checklist, folders, types) are open to every guest through <c>doc.query</c>.
     /// </summary>
-    public static readonly string[] HostOnlyQueries = ["graphs.", "speckle."];
+    public static readonly string[] HostOnlyQueries = ["graphs.", "speckle.", "references.scan"];
 
     /// <summary>Whether a <c>doc.execute</c> names a host-only command, itself or as a step of its batch.</summary>
     static bool HostOnly(JsonObject p)
@@ -1244,7 +1295,9 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
                     // `spaceBrep` (issue #28): spaces as faceted B-rep instead of extrusions.
                     p["spaceBrep"] is JsonValue sbv && sbv.TryGetValue<bool>(out var spaceBrep) && spaceBrep,
                     // `advancedBrep` (docs/plan-studio-freeform.md §9): bodies known exactly (Studio's) as IfcAdvancedBrep on their exact surfaces.
-                    p["advancedBrep"] is JsonValue abv && abv.TryGetValue<bool>(out var advanced) && advanced);
+                    p["advancedBrep"] is JsonValue abv && abv.TryGetValue<bool>(out var advanced) && advanced,
+                    // `derivedLoadBearing` (docs/plan-structural-usage.md): Pset_…Common.LoadBearing also where only the rule says it.
+                    p["derivedLoadBearing"] is JsonValue dlv && dlv.TryGetValue<bool>(out var derived) && derived);
                 if ((string?)p["path"] is { Length: > 0 } ifcPath) return (IfcExport.Write(session, RefuseOverRead(HostFiles.Check(ifcPath)), options).ToJson(), null);
                 // The file made once, of its size: a hall of 33 bays is 150 MB of IFC (report #156).
                 var (ifc, _) = IfcExport.Bytes(session, "project.ifc", options);
@@ -1317,7 +1370,7 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
             case "project.ifcSurvey":
             {
                 // What a file holds, for the user to choose from before it is imported: read and indexed here, kept for the import that follows.
-                var (bytes, name, _, key) = IfcBytes(p);
+                var (bytes, name, _, key) = IfcModelBytes(p);
                 ReportProgress("Indexing the file", 0, 0);
                 var file = StepFile.Read(bytes);
                 _surveyed = (key, bytes, file, Hashes.Sha256Hex(bytes));
@@ -1339,7 +1392,7 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
                 var mode = Rules(new IfcImportOptions(modeName is "link" or "editable" ? "auto" : modeName, kinds, storeys, plan2d, only2d, Group: group, Editable: modeName == "editable"), p["rules"] as JsonObject);
                 // By path (the desktop), or its bytes, base64 in `data` (the browser); the file as the survey read it, when it is the same.
                 ReportProgress("Reading the file", 0, 0);
-                var (bytes, name, path, key) = IfcBytes(p);
+                var (bytes, name, path, key) = IfcModelBytes(p);
                 (string Key, byte[] Bytes, StepFile File, string Hash)? surveyed = _surveyed is { } sv && sv.Key == key ? sv : null;
                 _surveyed = null;
                 StepFile file;
@@ -1490,6 +1543,25 @@ public sealed partial class EngineDispatcher(Session session, ProjectFiles files
                     : Views.Find(session.Model, id) is { } view ? Views.Dxf(session.Reader, view, (string?)p["coords"] ?? "internal")
                     : throw new CommandException("There is no such sheet or view.");
                 return (Deliver(bytes, "drawing.dxf"), null);
+            }
+            // A publish set's files (forum topic 225), or the sheets and views given: written into a folder (the desktop), else one file
+            // when only one is made and `zip` is not asked, else all of them as one zip, delivered as any export is.
+            case "export.publish":
+            {
+                var (sheets, views, formats, name, missing) = PublishSets.Request(session.Model, p);
+                var outs = PublishSets.Files(session.Reader, sheets, views, formats, name);
+                if ((string?)p["folder"] is { Length: > 0 } into)
+                {
+                    var folder = HostFiles.Check(into);
+                    Directory.CreateDirectory(folder);
+                    foreach (var o in outs) Lapin.Platform.AtomicFile.Write(RefuseOverRead(Path.Combine(folder, o.Name)), o.Bytes);
+                    return (new JsonObject { ["folder"] = folder, ["written"] = new JsonArray([.. outs.Select(o => (JsonNode)o.Name)]), ["missing"] = missing }, null);
+                }
+                var one = outs.Count == 1 && p["zip"]?.GetValue<bool>() != true;
+                var delivered = one ? Deliver(outs[0].Bytes, outs[0].Name) : Deliver(PublishSets.Zip(outs), PublishSets.FileStem(name) + ".zip");
+                delivered["files"] = new JsonArray([.. outs.Select(o => (JsonNode)o.Name)]);
+                delivered["missing"] = missing;
+                return (delivered, null);
             }
             // Bytes the interface made (a schedule's CSV or XLSX, exported types) written where the desktop's save dialog says (report #66).
             case "file.write":

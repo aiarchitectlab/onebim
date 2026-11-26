@@ -18,13 +18,14 @@ import { useSession } from '../../engine/session';
 import { enter, isDesktop, pickPath, projectTitle } from '../../engine/files';
 import { pickFolder } from './cde/cde';
 import {
-  authorFor, changePassword, historyLog, historyStatus, remoteCall, serverOf, setAuthorName, authorName, signedIn, signIn, signOut, syncIssues, writingCall,
+  authorFor, changePassword, historyLog, historyStatus, remoteCall, serverOf, setAuthorName, authorName, signedIn, signIn, signOut, syncIssuesAndDocuments, writingCall,
   type CommitInfo, type HistoryStatus,
 } from '../../engine/remote';
 import { when } from './format';
 import { useCde } from '../../engine/cdeServer';
 import { account } from '../../engine/atrium';
 import { ActivityList, RulesEditor, openAdmin } from './CdeAdmin';
+import { AccessTokensButton, AccessTokensSection, useTokensOffered } from './AccessTokensEntry';
 import { PublishingPanel } from './CdePublish';
 
 type Kind = 'folder' | 'server';
@@ -176,7 +177,7 @@ function ServerProject({ server, project, name, busy, run }: { server: string; p
   return (
     <section className="remote-server">
       <div className="version-save">
-        <button type="button" disabled={busy} data-remote="sync-issues" onClick={() => void run(() => syncIssues(server))} title="The remarks synced with the server's issues: theirs brought here (one undo step), yours sent"><MessageSquare size={13} /> Sync issues</button>
+        <button type="button" disabled={busy} data-remote="sync-issues" onClick={() => void run(() => syncIssuesAndDocuments(server))} title="The remarks synced with the server's issues and the reference documents with its documents: theirs brought here (one undo step), yours sent"><MessageSquare size={13} /> Sync issues and documents</button>
         <button type="button" onClick={() => useUi.setState({ dialog: 'remarks' })} title="Manage → Model remarks…">Model remarks…</button>
         <span className="grow" />
         {isAdmin && <button type="button" data-remote="admin" onClick={() => openAdmin(server)} title="The server's accounts and new projects"><ShieldCheck size={13} /> Administration…</button>}
@@ -213,6 +214,8 @@ function Account({ server, signedIn: inNow, onChange }: { server: string; signed
     } catch (e) { notify(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   };
   const [changing, setChanging] = useState(false);
+  const [tokens, setTokens] = useState(false);
+  const tokensOffered = useTokensOffered(inNow ? server : null);
   if (inNow) {
     return (
       <>
@@ -220,8 +223,10 @@ function Account({ server, signedIn: inNow, onChange }: { server: string; signed
           <span className="muted">Signed in as</span> <span data-no-i18n>{authorFor(server).name}</span>
           <button type="button" onClick={() => void signOut(server).then(onChange)}><LogOut size={13} /> Sign out</button>
           {!changing && <button type="button" onClick={() => setChanging(true)} title="A new password for this account on the server"><KeyRound size={13} /> Change password…</button>}
+          {tokensOffered && <AccessTokensButton className="" open={tokens} onToggle={() => setTokens(!tokens)} />}
         </div>
         {changing && <ChangePassword server={server} onDone={() => { setChanging(false); onChange(); }} />}
+        {tokens && <AccessTokensSection server={server} />}
       </>
     );
   }
@@ -380,8 +385,8 @@ export function SaveToServerDialog() {
         return;
       }
       notify('Saved to the server.');
-      // The issues go along (W3): the remarks synced with the server's.
-      if (server) await syncIssues(server, true);
+      // The issues and the reference documents go along (W3, R4): synced with the server's.
+      if (server) await syncIssuesAndDocuments(server, true);
       close();
     } catch (e) { notify(e instanceof Error ? e.message : String(e)); } finally { setBusy(false); }
   };

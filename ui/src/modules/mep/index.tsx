@@ -27,6 +27,7 @@ import { setMep, useMep } from './prefs';
 import { LevelCells, RunLevelOptions, endLegs, levelInfo, levelLetters, systemDefaults, trackLegs, type LevelSource } from './DrawLevel';
 import { redrawLegs, runHeights, squared, useDrawLevel, type Level } from './levels';
 import { useLive } from '../../viewport/liveInput';
+import { alongOfChain, keepLine } from '../../viewport/gripKit';
 import { OpenEndsOverlay } from './openEnds';
 import { usePlaceRole } from './placeRole';
 import { activate, findTool } from '../../platform/modules';
@@ -487,6 +488,7 @@ function runGrips(node: NodeDto): Grip[] {
   const grips: Grip[] = pts.map((q, i) => ({
     key: `v${i}`, kind: 'vertex', at: q, title: 'Drag the handle · Ctrl-click takes it out',
     step: (p) => save(pts.map((x, k) => (k === i ? p : x))),
+    ...keepLine(alongOfChain(pts, i)),
     remove: pts.length > 2 ? () => save(pts.filter((_, k) => k !== i)) : undefined,
   }));
   for (let i = 0; i + 1 < pts.length; i++) {
@@ -509,6 +511,7 @@ function carrierGrips(node: NodeDto): Grip[] {
   const grips: Grip[] = pts.map((q, i) => ({
     key: `v${i}`, kind: 'vertex', at: q, title: 'Drag the handle · Ctrl-click takes it out',
     step: (p) => save(pts.map((x, k) => (k === i ? p : x))),
+    ...keepLine(alongOfChain(pts, i)),
     remove: pts.length > 2 ? () => save(pts.filter((_, k) => k !== i)) : undefined,
   }));
   for (let i = 0; i + 1 < pts.length; i++) {
@@ -535,7 +538,7 @@ const mep: LapinModule = {
   name: 'MEP',
   summary: 'Heating, water, drainage, ventilation, electrical, gas and fire protection systems drawn as schematics on the plan.',
   tabs: [{
-    id: 'mep', label: 'MEP', order: 45, include: ['modify'],
+    id: 'mep', label: 'MEP', order: 45, include: ['modify', 'groups'],
     // Fewer groups than the tools (audit S14): the tools used most stay buttons, the rest gathered under pulldowns; each keeps
     // its id, letters and place in My tools.
     groups: [

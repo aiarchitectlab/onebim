@@ -621,8 +621,10 @@ public static class Views
                 foreach (var p in g.Parts)
                     if (!bySymbol && Measure.Bounds(p.Solid) is { } b && b.Max.Z > SitePlans.Underground && ViewStyles.Draws(m, style, e.Id, p.Key, bandCache) && PartShown(e, p.Key) && Detailed(e, p))
                         parts.Add(new DrawPart(p.Solid, e.Id, e.Class, p.Key, MaterialOf(e, p), CutInPlan: true) { Smooth = smooth });
+                // What a module draws of it by the view (a terrain's contours at round altitudes in an absolute view, decision 867).
+                var sitePlan = bySymbol && inView.Count > 0 && inView.FirstOrDefault(x => x.Handles(e)) is { } siteIn ? siteIn.PlanIn(m, view, e, g.Plan!) : g.Plan;
                 if (bySymbol)
-                    foreach (var item0 in g.Plan!)
+                    foreach (var item0 in sitePlan!)
                     {
                         if (!item0.At(detail) || !item0.In(entourage)) continue;
                         var item = item0.OnPaper(paperScale);
@@ -742,6 +744,9 @@ public static class Views
                     break;
             }
     }
+
+    /// <summary>How a view draws (its frame, its depth), without drawing it; null when it cannot.</summary>
+    public static ViewSpec? SpecOf(IQueryContext q, Entity view) => Spec(q.Model, view, Gather(q, view).Parts, q.Services).Spec;
 
     /// <summary>The view's generated drawing (cut areas and lines, before materials and pens), or why there is none.</summary>
     public static (ViewDrawing? Drawing, ViewSpec? Spec, string? Problem) Generate(IQueryContext q, Entity view)
@@ -989,6 +994,8 @@ public static class Views
         var flat = spec.Kind != "3d";
         var faced = flat && !spec.CutOnly;
         var surfaces = faced ? SurfaceHatches.PensOf(m, view, scenes, drawnParts, Background(drawing, spec, penOptions), new Dictionary<string, string?>()) : [];
+        // A plan's floors seen from above hatched by their top layer's surface pattern (forum topic 259), under everything it draws.
+        if (faced && spec.Kind == "plan" && laid == null) surfaces.AddRange(SurfaceHatches.PlanPensOf(m, view, spec, drawing, drawnParts, penOptions));
         // The sun's shadows on what the view sees (ViewShadows), filled under everything it draws: over the surfaces' fills, under their hatches.
         var shadows = faced ? ViewShadows.PenOf(m, view, scenes) : null;
         pens.InsertRange(0, [.. surfaces.Where(p => p.Layer == SurfaceHatches.FillLayer), .. shadows != null ? [shadows] : Array.Empty<Pen>(), .. surfaces.Where(p => p.Layer != SurfaceHatches.FillLayer)]);
@@ -998,7 +1005,7 @@ public static class Views
 
         // Annotations: the views' own marks, then each module's (grids, dimensions, texts), over the drawing.
         // Each component instance's details (forum #224) drawn as this view's own when it is a plan of their storey that shows their set.
-        var marked = Components.DetailsIn(m, view, graphics);
+        var marked = Components.DetailsIn(m, view, graphics, spec, q.Services);
         // What the drawing shows of its materials (forum topic 255): its cuts', and on a section or an elevation the faces it sees.
         var seenSurfaces = faced && spec.Kind != "plan" ? new SeenSurfaces(drawing, scenes, drawnParts, view.Id) : SeenSurfaces.CutsOnly(drawing, view.Id);
         var ctx = new ViewContext(marked, view, spec.Kind, spec.Frame, scale, DraftingResources.Book(m), drawing, q.Geometry) { Services = q.Services, Query = ReferenceEquals(marked, m) ? q : new OverlayQuery(q, marked), Seen = seenSurfaces };
@@ -1354,7 +1361,8 @@ public static class Views
             // The other sections' markers where their planes cut this view (decision 223).
             foreach (var trace in SectionMarkers.Traces(c)) yield return trace;
             var (x0, x1) = (bounds.Min.X - 1.0 * k, bounds.Max.X + 1.5 * k);
-            // The levels across a drawing whose up is the model's (not on a level or a leaning work plane).
+            // The levels across a drawing whose up is the model's (not on a level or a leaning work plane), as the view's datum writes them.
+            var datum = LevelDatum.Of(c);
             foreach (var storey in Math.Abs(c.Frame.Up.Z) > 0.999 ? Spatial.Storeys(m) : [])
             {
                 var z = storey.Num("elevation");
@@ -1374,12 +1382,15 @@ public static class Views
                 if (SymbolSlots.SymbolFor(m, "levelHead", storey) is { } levelSymbol)
                 {
                     var levelName = storey.Name;
-                    var levelText = Standards.FormatLevel(z, c.Book);
+                    var levelText = datum.Text(z, c.Book);
                     SymbolSlots.Draw(c, mk, levelSymbol, apex, new Vec2(0, 1), false, size / DefaultLevelMarkSize, "LEVEL", ink, key => key switch
                     {
                         "level.name" or "attr.name" => (true, levelName),
                         "level.elevation" or "attr.level" => (true, levelText),
                         "level.z" => (true, z.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture)),
+                        "level.altitude" => (true, datum.AltitudeOf(z, c.Book)),
+                        "level.relative" => (true, datum.LevelOf(z, c.Book)),
+                        "level.tie" => (true, datum.Tie(c.Book)),
                         _ => (false, null),
                     });
                     yield return mk;
@@ -1392,7 +1403,7 @@ public static class Views
                     case "half": mk.Fills.Add(([new[] { apex, left, mid }], ink)); mk.Polyline([apex, left, right], true, "LEVEL", Pens.Default.Seen, ink); mk.Line(apex, mid, "LEVEL", Pens.Default.Seen, ink); break;
                     default: mk.Polyline([apex, left, right], true, "LEVEL", Pens.Default.Seen, ink); break;
                 }
-                mk.Text(new PenText(new Vec2(x1 + w + 1.0 * c.Mm, y + t * 0.2), $"{storey.Name} {Standards.FormatLevel(z, c.Book, plusAtZero: true)}", text.Height, Anchor: "start", Font: text.Font), "#555555");
+                mk.Text(new PenText(new Vec2(x1 + w + 1.0 * c.Mm, y + t * 0.2), $"{storey.Name} {datum.Text(z, c.Book, plusAtZero: true)}", text.Height, Anchor: "start", Font: text.Font), "#555555");
                 yield return mk;
             }
         }

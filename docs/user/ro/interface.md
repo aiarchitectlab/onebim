@@ -22,7 +22,7 @@ Arată, ascunde sau mută un tab la **Tabs**, în același dialog, și alegerea 
 
 ## Trei moduri
 
-**Vedere → Interfață…** (<kbd>Ctrl</kbd> <kbd>.</kbd>) alege cât de multe stau în jurul vederii. Alege unul dintre cele trei moduri din capul dialogului; schimbarea se vede imediat.
+**Vedere → Interfață…** (<kbd>Ctrl</kbd> <kbd>.</kbd>) alege cât de multe stau în jurul vederii. Alege unul dintre cele trei moduri din capul dialogului; schimbarea se vede imediat. Lapin pornește în al patrulea, **Flow** ([mai jos](#flow-si-extrasele-lui)); imaginile din acest ghid arată modul Confortabil.
 
 ![Dialogul Interfață: cele trei moduri și fiecare parte în parte](shots/interface-dialog.webp)
 
@@ -41,13 +41,36 @@ Arată, ascunde sau mută un tab la **Tabs**, în același dialog, și alegerea 
 
 ![Concentrare: selecția într-o fișă](shots/interface-focus.webp)
 
+Uneltele mari ale panglicii își arată literele de la tastatură cât ții apăsat <kbd>Alt</kbd> singur, ca indicațiile de taste din Office; indicațiile lor (tooltip) le au mereu. **View → Interface → Taste pe unelte** le poate arăta **Mereu**, în loc de **Cât ții apăsat Alt**, cum e implicit. În Confortabil, o bandă mai lată decât fereastra arată uneltele mici doar ca pictograme, cu numele în indicații, până când fereastra e din nou destul de lată. Panoul **Grup**, după **Modifică** pe taburile care îl au, ține **Creează grup**, **Fă componentă**, **Fă tip de apartament**, **Adaugă în setul de detalii**, **Degrupează**, **Editează grupul** și **Scoate din grup**.
+
 În orice mod, bara de sus păstrează **Anulează** și **Refă** la capătul din dreapta: cu numele lor în Confortabil, ca două săgeți în Compact și Concentrare (<kbd>Ctrl</kbd> <kbd>Z</kbd> și <kbd>Ctrl</kbd> <kbd>Y</kbd>; indicația lor spune ce anulează).
 
 Sub moduri, fiecare parte se poate alege separat: ribbonul, uneltele rapide (sau deloc: tastele cu cifre merg în continuare), linia de comandă, HUD-ul, mesajul și câmpurile uneltei, planul-cheie, panourile și înălțimea rândurilor de proprietăți. Când schimbi o parte, alegerea devine **Personalizat**.
 
 Sub părți, **Taburi**: debifează taburile din ribbon de care nu ai nevoie (un arhitect poate ascunde Structure, Armare simplă și MEP, un inginer Architecture și Site). View rămâne mereu, pentru că acolo e Interfață…. Uneltele unui tab ascuns rămân în Comenzi… și în scurtăturile de la tastatură.
 
-Lapin îți păstrează alegerea pe acest calculator, pentru tine. Aplicația desktop și browserul o țin separat. În browser, Lapin pornește în Compact când fereastra are sub 800 de pixeli înălțime, până alegi tu.
+Lapin îți păstrează alegerea pe acest calculator, pentru tine. Aplicația desktop și browserul o țin separat.
+
+## Flow și extrasele lui
+
+Lapin pornește în **Flow**: vederea pe primul loc, ribbonul care coboară din taburi, ambele panouri laterale pliate în bare și uneltele rapide <kbd>1</kbd>–<kbd>9</kbd> plutind jos, peste vedere, cu **Extra Flow** de mai jos pornite. Ca să revii la interfața clasică, debifează **Flow** pe ecranul de start, sub **Spațiu de lucru**: un clic readuce modul Confortabil și oprește extrasele, iar dacă bifezi din nou revine Flow. Imaginile din acest ghid arată interfața clasică.
+
+Flow este și al patrulea mod din **View → Interfață…**: alegerea lui pornește și extrasele, iar dacă alegi apoi alt mod, ele rămân cum erau. Fiecare extra se pornește sau se oprește separat din **File → Preferințe… → General → Extra Flow** (tot acolo sunt **Pornește-le pe toate** și **Oprește-le pe toate**). Lapin îți păstrează alegerea.
+
+- **ViewCube în vederea 3D**: un cub mic în dreapta sus a vederii 3D; clic pe o față pentru Sus, Jos, cele patru laturi, **ISO**, iar **PERSP**/**ORTHO** schimbă proiecția. Stă la stânga planului-cheie sau a butonului lui, ca amândouă să rămână la îndemână.
+- **Bară de selecție deasupra vederii**: când e ceva selectat și nicio unealtă pornită, un rând în dreapta jos cu Mută, Copiază, Rotește, Preia și creează similar, Izolează, Ascunde și Șterge. Indicațiile arată tastele tale (Scurtături de tastatură…). Șterge face ce face tasta <kbd>Delete</kbd>.
+- **Starea modelului în linia de stare**: o etichetă care numără pereții foarte scurți, pereții sau stâlpii suprapuși și elementele fără nivel; clic pe ea pentru listă, iar ținta de lângă un rând îl selectează și face zoom la el.
+- **Un sfat de scurtătură după ce aceeași unealtă din panglică a fost apăsată de trei ori**: o singură dată pe unealtă, un mesaj cu tastele ei.
+- **Butoanele Plimbare și Plan + 3D înaintea filelor de vedere**: Plimbare pornește plimbarea în 3D (în prima încăpere a nivelului activ, altfel unde privește vederea 3D); Plan + 3D împarte vederea în plan și 3D, iar al doilea clic închide împărțirea. O împărțire făcută de tine rămâne neatinsă.
+- **Taste afișate ca butoane de tastatură în indiciul uneltei**: Shift, Space, Enter, Esc… desenate ca taste, aprinse cât le ții apăsate.
+- **Previzualizarea volumului la plasarea în 3D**: pereții și plăcile desenate în 3D își arată înălțimea ca un volum transparent înainte de clic.
+- **Ține apăsat X în 3D ca să privești prin obiecte în raze X**: ține <kbd>X</kbd> o clipă și vederea 3D trece în raze X până îl eliberezi; o apăsare scurtă pe X merge în continuare la linia de comandă (EXPLODE), iar tasta ținută nu mai scrie nimic.
+- **Trage unitatea unui câmp ca să-i schimbi valoarea**: trage la stânga sau la dreapta pe unitatea de după un câmp de lungime sau de număr (sau <kbd>Alt</kbd> și trage în câmp); <kbd>Shift</kbd> e mai fin, <kbd>Ctrl</kbd> mai grosier, iar valoarea se păstrează o dată, ca un singur pas de anulare, când eliberezi. Un câmp cu numere întregi rămâne întreg.
+- **Cărți de rol pe ecranul de start**: Arhitect, Inginer structurist, Drumuri și teren, Inginer instalații, Desen 2D sau Toate disciplinele, modul, stilul mouse-ului și **Sandbox ghidat** (un model mic, început, cu **Ajutor → Misiuni interactive…** pentru acel rol, un singur pas de anulare).
+
+Încă două stau separat, oprite până le alegi acolo: **Unelte rapide alese pentru spațiul de lucru** (uneltele 1–9 ale fiecărui spațiu de lucru, alese pentru disciplina lui; pornite când alegi o carte de rol; sloturile umplute de tine rămân), și **Sunete tactile de feedback (snap, plasare, undo)**; cât sunt pornite, un difuzor în linia de stare le oprește.
+
+În orice mod, Comenzi… (<kbd>Ctrl</kbd> <kbd>K</kbd>) are **Meniu radial** (<kbd>Alt</kbd> <kbd>Q</kbd>: uneltele obișnuite sau acțiunile selecției, într-un cerc la cursor), **Preia și creează similar** (<kbd>Alt</kbd> <kbd>I</kbd>: unealta elementului selectat, cu tipul lui), **Reluare construcție (time-lapse)** și pozițiile de cameră: <kbd>Alt</kbd> <kbd>Shift</kbd> <kbd>1</kbd>–<kbd>4</kbd> păstrează vederea 3D ca poziție, <kbd>Alt</kbd> <kbd>1</kbd>–<kbd>4</kbd> revine la ea. Toate se pot lega de alte taste din Scurtături de tastatură….
 
 ## Uneltele rapide
 
@@ -109,7 +132,7 @@ Fila **Catalog** din browserul proiectului arată tipurile proiectului pentru fi
 
 - un clic pe o carte pune elemente de acel tip: unealta pornește cu el;
 - trage o carte pe un loc rapid ca să păstrezi acolo unealta cu acel tip;
-- **Editează tipurile…** deschide dialogul în care se fac și se schimbă tipurile.
+- **Editează tipurile…**, la capătul rândului de feluri, deschide dialogul în care se fac și se schimbă tipurile; clic dreapta pe o carte dă **Editează tipul…** (dialogul deschis pe acel tip) și **Duplică**.
 
 ![Catalogul: tipurile de pereți](shots/catalog.webp)
 
@@ -225,6 +248,8 @@ Fiecare vedere deschisă are un tab deasupra ei. Trage un tab ca să muți veder
 <kbd>Ctrl</kbd> <kbd>Tab</kbd> aduce în față tab-ul următor, iar <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>Tab</kbd> pe cel dinainte (și <kbd>Ctrl</kbd> <kbd>Page Down</kbd> și <kbd>Page Up</kbd>), trecând de la ultimul la primul; pe Mac e tasta <kbd>Control</kbd>, fiindcă <kbd>⌘</kbd> <kbd>Tab</kbd> e a sistemului. Nu fac nimic cât scrii într-un câmp. Sunt comenzi (**Next view tab**, **Previous view tab**) pe care le poți realoca în scurtături.
 
 **Tab peste elemente suprapuse.** Într-un plan, o secțiune sau o fațadă, când sub cursor se află mai mult de un element (un perete peste o placă peste o încăpere), <kbd>Tab</kbd> luminează următorul, iar <kbd>Shift</kbd> <kbd>Tab</kbd> pe cel dinainte, în cerc; linia de stare spune care ("2 din 3: Placă Etaj 1"), iar un clic selectează elementul luminat. Mută cursorul și revine la alegerea a ceea ce e sub el. Cu niciun element sau unul singur sub cursor, <kbd>Tab</kbd> funcționează și cât o unealtă sau o comandă alege elemente (Mută, Copiază, Împarte elementul, o unealtă care alege un perete sau o placă); cât așteaptă un punct sau o valoare tastată, <kbd>Tab</kbd> își păstrează celelalte sensuri: pliază panourile, iar peste un mâner comun mai multor elemente trece prin ele. Cât tragi, este tasta de menținere automată (mai jos). **Light the previous element under the pointer** este comanda de realocat dacă vrei altă tastă.
+
+**Păstrarea unghiului unui capăt.** Cât tragi de un mâner de capăt, ține apăsat <kbd>Ctrl</kbd> (<kbd>⌘</kbd> pe Mac) ca să-l ții pe dreapta proprie a elementului, și scrie schimbarea de lungime (sau `=` și lungimea totală); vezi [Pereți](walls.md).
 
 ![Tab luminând al doilea din două elemente aflate sub cursor într-un plan](shots/tab-cycle.webp)
 

@@ -92,6 +92,8 @@ Dă clic pe un element ca să-l selectezi; <kbd>Shift</kbd>-clic adaugă la sele
 
 ## Copiere și mutare
 
+Capătul unei linii desenate, tras cu <kbd>Ctrl</kbd> (<kbd>⌘</kbd> pe Mac) apăsat, rămâne pe unghiul propriu al liniei, ca la capătul unui perete ([Pereți](walls.md)).
+
 Ca să copiezi, selectează elementul și scrie <kbd>CO</kbd>. Dă clic pe un punct de bază, apoi pe un al doilea punct. Lapin copiază mai departe până apeși <kbd>Enter</kbd> sau <kbd>Esc</kbd>. **Mută** (<kbd>M</kbd>) merge la fel.
 
 Cât muți sau copiezi, un marcaj rămâne pe punctul de bază și o linie întreruptă merge de la el până la mouse, iar un contur estompat a ceea ce muți rămâne unde era până dai clic sau apeși <kbd>Esc</kbd>. Linia și marcajul își schimbă culoarea după snap: verde pe un punct prins, albastru când ortho sau urmărirea polară țin direcția, culoarea de accent pe o linie de urmărire, gri când e liber. Lângă mouse, Lapin arată cât ai mutat: Δx, Δy, distanța și unghiul, în unitățile proiectului. Poți scrie acolo distanța și unghiul, ca atunci când desenezi. În interfața Compact, valorile acestea sunt în linia de stare. La fel se vede și când tragi de un grip, și când tragi chiar de un element selectat, de la punctul unde ai apăsat; apasă <kbd>Esc</kbd> înainte să-i dai drumul și elementul rămâne unde era.
@@ -112,7 +114,7 @@ O axă se mută, se copiază, se rotește și se oglindește singură sau împre
 
 ### În secțiuni și fațade
 
-**Mută** (<kbd>M</kbd>), **Copiază** (<kbd>CO</kbd>) și tragerea unui element selectat merg și într-o secțiune sau o fațadă, în planul vederii. De-a lungul vederii, elementul se mută în plan de-a lungul liniei secțiunii; în sus sau în jos, urcă sau coboară cu decalajul lui față de nivel (decalajul bazei unui perete sau stâlp, decalajul de sus al unei grinzi, decalajul unei plăci). Cât tragi, **Decalaj față de nivel** din proprietăți îl urmează. O ușă sau o fereastră alunecă în continuare de-a lungul peretelui ei, iar liniile desenate pe vedere se mută în vedere. **Oglindește** ia acolo o linie verticală și oglindește elementele față de planul care trece prin ea, perpendicular pe vedere. Elementele nu se **Rotesc** într-o secțiune sau o fațadă, pentru că s-ar răsturna: rotește-le într-un plan sau în 3D. Liniile desenate se rotesc și se oglindesc oricum. Un element fixat rămâne unde e.
+**Mută** (<kbd>M</kbd>), **Copiază** (<kbd>CO</kbd>) și tragerea unui element selectat merg și într-o secțiune sau o fațadă, în planul vederii. De-a lungul vederii, elementul se mută în plan de-a lungul liniei secțiunii; în sus sau în jos, urcă sau coboară cu decalajul lui față de nivel (decalajul bazei unui perete sau stâlp, decalajul de sus al unei grinzi, decalajul unei plăci). Cât tragi, **Decalaj față de nivel** din proprietăți (la o grindă, **Decalaj sus (de la nivelul de deasupra)**) îl urmează. O ușă sau o fereastră alunecă în continuare de-a lungul peretelui ei, iar liniile desenate pe vedere se mută în vedere. **Oglindește** ia acolo o linie verticală și oglindește elementele față de planul care trece prin ea, perpendicular pe vedere. Elementele nu se **Rotesc** într-o secțiune sau o fațadă, pentru că s-ar răsturna: rotește-le într-un plan sau în 3D. Liniile desenate se rotesc și se oglindesc oricum. Un element fixat rămâne unde e.
 
 ![O grindă trasă în sus în fațada de sud: fantoma ei unde era, deplasarea lângă mouse și decalajul față de nivel urmând-o în proprietăți](shots/section-drag.webp)
 
@@ -144,7 +146,7 @@ Orice lungime cerută de linia de comandă e în unitatea proiectului, iar mesaj
 
 ### Calchiat peste un PDF sau o imagine
 
-**Fișier → Importă PDF sau imagine…** sau **Desen → PDF sau imagine** aduce un desen peste care să calchiezi: un plan scanat, o fotografie a unei fațade, un PDF de la alt birou. Intră în planul, secțiunea sau fațada din față, sub desenul ei.
+**Fișier → Importă → Importă PDF sau imagine…** sau **Desen → PDF sau imagine** aduce un desen peste care să calchiezi: un plan scanat, o fotografie a unei fațade, un PDF de la alt birou. Intră în planul, secțiunea sau fațada din față, sub desenul ei.
 
 - **Un PDF**: alege **Pagina** și scara la care a fost făcut desenul lui (**Desenat la 1:**). Un milimetru de hârtie măsoară atunci atâția milimetri aici, așa că un plan la 1:100 intră la mărimea lui reală. Liniile paginii intră ca desen de care te poți prinde, pe care îl poți modifica și calchia, iar imaginile ei (o scanare din PDF) ca imagini sub ele. Oricare poate fi lăsată deoparte. Pagina intră ca un singur grup numit după fișier, așa că **Mută**, **Rotire** și **Scalează** o iau întreagă; dublu clic pe ea ca să lucrezi pe părțile ei.
 - **O imagine** (PNG sau JPEG): dă-i **Lățimea**; înălțimea urmează pixelii ei. Nu trebuie să fie exactă: pasul următor o fixează.
@@ -185,7 +187,7 @@ Tabul **Adnotări** are cotele, textele, axele, cotele de nivel și etichetele. 
 
 ![Proprietățile unui text: stilul, alinierea, unghiul și lățimea](shots/text-properties.webp)
 
-O **Notă cu indicator** (Adnotări → Text) e un text cu săgeată: dă clic unde arată săgeata, apoi unde stă textul, și scrie-l. Un **Nor de revizie** (Desen → Umplutură sau REVCLOUD) desenează un dreptunghi sau un poligon din arce; **Nor de revizie** din proprietățile unei polilinii închise sau ale unui cerc o face nor sau o readuce la loc. O **Scară grafică** (Adnotări → Planșe) se desenează la scara vederii. O **Săgeată a nordului** (Adnotări → Planșe) se pune cu un clic pe mijlocul ei, pe un plan sau pe hârtia unei planșe; pe planșă arată cum așază fereastra vederii planul, și un plan rotit. Pe o vedere, săgeata nordului și scara grafică stau *de la sine* (săgeata în dreapta sus a desenului, scara sub colțul lui din stânga jos, urmând desenul) până le muți cu mânerul; **Pune-l înapoi de la sine** din proprietăți le readuce. Săgeata are o **Mărime** (mm, implicit 14) și un **Simbol de marcaj**; scara, un **Aspect**, o **Lungime**, **Diviziuni** și o **Scară**. Merg pe orice vedere și pe planșe, unde li se adaugă o legendă a vederilor și câmpuri vii în texte (vezi Planșe).
+O **Notă cu indicator** (Adnotări → Text) e un text cu săgeată: dă clic unde arată săgeata, apoi unde stă textul, și scrie-l. Un **Nor de revizie** (Desen → Desenează sau REVCLOUD) desenează un dreptunghi sau un poligon din arce; **Nor de revizie** din proprietățile unei polilinii închise sau ale unui cerc o face nor sau o readuce la loc. O **Scară grafică** (Adnotări → Planșe) se desenează la scara vederii. O **Săgeată a nordului** (Adnotări → Planșe) se pune cu un clic pe mijlocul ei, pe un plan sau pe hârtia unei planșe; pe planșă arată cum așază fereastra vederii planul, și un plan rotit. Pe o vedere, săgeata nordului și scara grafică stau *de la sine* (săgeata în dreapta sus a desenului, scara sub colțul lui din stânga jos, urmând desenul) până le muți cu mânerul; **Pune-l înapoi de la sine** din proprietăți le readuce. Săgeata are o **Mărime** (mm, implicit 14) și un **Simbol de marcaj**; scara, un **Aspect**, o **Lungime**, **Diviziuni** și o **Scară**. Merg pe orice vedere și pe planșe, unde li se adaugă o legendă a vederilor și câmpuri vii în texte (vezi Planșe).
 
 ### Unealta Cote
 

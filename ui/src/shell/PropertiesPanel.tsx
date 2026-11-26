@@ -37,6 +37,7 @@ import { filterSets, importedSets } from './ifcProperties';
 import { MaterialPicker } from '../modules/core/MaterialPicker';
 import { hiddenHere, useShownHere } from '../viewport/cad/shown';
 import { ElementMarkField, hasMark, TypeMarkField } from '../modules/core/MarkField';
+import { PartBoundary } from './PartBoundary';
 
 /** An input that commits on Enter or when it loses focus, not on every key. */
 function Commit({ value, onCommit, suffix, className }: { value: string; onCommit: (v: string) => void; suffix?: string; className?: string }) {
@@ -254,7 +255,7 @@ function FrontViewPanel() {
     const view3d = view3dNode(nodes);
     return (
       <aside className="panel props" aria-label="Properties">
-        <div className="panel-head"><span className="eyebrow">3D view · in front</span><span className="panel-title" data-no-i18n>3D</span></div>
+        <div className="panel-head"><span className="eyebrow">3D view</span><span className="panel-title" data-no-i18n>3D</span></div>
         {propertySections('LapinView').filter((s) => s.id === 'viewSettings').map((s) => <Group key={s.id} id={s.id} label={s.label}><s.component node={view3d} /></Group>)}
       </aside>
     );
@@ -263,7 +264,7 @@ function FrontViewPanel() {
     const own = [...nodes.values()].find((n) => n.type === 'LapinView' && n.props.kind === 'plan' && n.props.storeyId === storey.id);
     return (
       <aside className="panel props" aria-label="Properties">
-        <div className="panel-head"><span className="eyebrow">Floor plan · in front</span><span className="panel-title">{storey.name}</span></div>
+        <div className="panel-head"><span className="eyebrow">Floor plan</span><span className="panel-title">{storey.name}</span></div>
         <p className="muted small pad">{own ? 'This plan is the level\'s default one; its own views are in the project browser.' : 'This level\'s plan draws with the defaults (Architecture, cut at 1.20 m). Give it a view of its own to set its discipline, style, range and the storeys it shows.'}</p>
         {!own && <div className="pad"><button type="button" className="btn" onClick={() => void frontView()}>Make its own view</button></div>}
       </aside>
@@ -316,7 +317,7 @@ function ElementPanel({ node, inFront }: { node: NodeDto; inFront?: boolean }) {
     <aside className="panel props" aria-label="Properties" ref={body} onKeyDown={panelKeys} onFocus={panelFocus}>
       <div className="props-resize" onPointerDown={startResize} title="Drag to widen the panel" />
       <div className="panel-head">
-        <span className="eyebrow"><span data-i18n-ctx="class">{cls?.label ?? node.type}</span>{inFront ? ' · in front' : selectedCount > 1 ? ` · ${selectedCount} selected` : ''}</span>
+        <span className="eyebrow"><span data-i18n-ctx="class">{cls?.label ?? node.type}</span>{selectedCount > 1 ? ` · ${selectedCount} selected` : ''}</span>
         {node.editable
           ? <Commit className="panel-title-input" value={node.name} onCommit={(name) => void execute('element.rename', { id: node.id, name })} />
           : <span className="panel-title">{node.name}</span>}
@@ -328,7 +329,7 @@ function ElementPanel({ node, inFront }: { node: NodeDto; inFront?: boolean }) {
       {!node.editable && <p className="muted small pad">This element belongs to a module this edition does not have: it is shown and kept, not edited.</p>}
       {node.props.scriptOwned === true && <p className="muted small pad props-script-owned" data-testid="script-owned"><Code2 size={12} /> <span>Made by a script:</span> <b>{String(node.props.owner ?? '')}</b><br /><span>Its shape is changed in the script; here it moves, turns, copies and is cut like any element.</span></p>}
       {sections.map((s) => (
-        <Group key={s.id} id={s.id} label={s.label}><s.component node={node} /></Group>
+        <Group key={s.id} id={s.id} label={s.label}><PartBoundary part={`Properties: ${s.label}`} compact resetKey={node.id}><s.component node={node} /></PartBoundary></Group>
       ))}
       {node.editable && storey && node.type !== 'IfcBuildingStorey' && (
         <Group id="placement" label="Placement">

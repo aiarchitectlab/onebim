@@ -212,6 +212,9 @@ async function takePictures() {
         page.on('dialog', (d) => void d.accept());
         // Exports and saves ask for a file name first (decision 509): no native picker here, and the Save as box (in any language: its input holds a name with an extension) answered with OK, so the download follows.
         await page.addInitScript(() => {
+          // The guide's pictures show the classic interface: Comfortable and the Flow extras off (Flow is the default), unless a scene switches them.
+          try { if (!localStorage.getItem('lapin.prefs')) localStorage.setItem('lapin.prefs', JSON.stringify({ flowChosen: true })); } catch { /* kept */ }
+          try { if (!localStorage.getItem('lapin.interface')) localStorage.setItem('lapin.interface', JSON.stringify({ preset: 'comfortable', parts: { ribbon: 'large', quickTools: 'docked', commandLine: 'own', hud: 'over', prompt: 'banner', keyPlan: 'shown', panels: 'docked', rows: 'normal', keyTips: 'alt' }, chosen: true, workspace: 'all', mine: null, hiddenTabs: [], rev: 2 })); } catch { /* kept */ }
           try { Object.defineProperty(window, 'showSaveFilePicker', { value: undefined, configurable: true, writable: true }); } catch { /* kept */ }
           setInterval(() => {
             const box = document.querySelector('.ask-box');
@@ -342,6 +345,11 @@ function tools(page, url, folder, lang) {
       }
       await page.getByRole('button', { name, exact }).first().click({ timeout: 10_000 });
       await t.wait(opts.wait ?? 400);
+    },
+    /** Opens a submenu of the File menu (Import, Export, Collaborate), which the menu was opened on. */
+    async sub(name) {
+      await page.locator(`[data-menu-sub="${name}"]`).click();
+      await t.wait(200);
     },
     /** A ribbon tool by its id (architecture.wall, manage.materials…), as its button starts it. */
     async tool(id) {

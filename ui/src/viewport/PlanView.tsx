@@ -88,6 +88,9 @@ import { arcOf, axisLine, riseThrough } from './arc';
 import { PICKED, arrivingDir, circleOutline, ellipseOutline, loopOf, pickOutline, rectangleOutline, tangentRise, useOutlineShape } from './outlineShape';
 import { useLang } from '../i18n';
 import { others, reportPresence, useShare } from '../engine/share';
+import { useInterface } from '../app/interface';
+import { missionTargets, useOnboarding } from '../app/onboarding';
+import { equalSpacingMagnets, storeyAnchorPoints } from './smartMagnets';
 
 /** The radius of the arc from a to b through p (Infinity: in line). */
 function radiusOf(a: Vec2, b: Vec2, p: Vec2): number {
@@ -440,10 +443,10 @@ export function PlanView() {
    */
   const alongGrid = (host: NodeDto, at: Vec2): Vec2 => { const arc = arcOf(host.props); return arc ? placeAlong(arc, at, gridSnapStep(view.scale), useCad.getState().aim) : at; };
 
-  const snapAt = useCallback((clientX: number, clientY: number, from?: Vec2): Aimed => {
+  const snapAt = useCallback((clientX: number, clientY: number, from?: Vec2, along?: { from: Vec2; dir: Vec2; locked: boolean }): Aimed => {
     const rect = svgRef.current!.getBoundingClientRect();
     const raw = toWorld(clientX - rect.left, clientY - rect.top);
-    const a = aim(raw, from ?? null, { grid: gridSnapStep(view.scale), orthoHeld: ortho });
+    const a = aim(raw, from ?? null, { grid: gridSnapStep(view.scale), orthoHeld: ortho, along });
     useCad.setState({ cursor: a.point, aim: a });
     liveCursor(a.point);
     return a;
@@ -648,7 +651,7 @@ export function PlanView() {
   // Direct editing: the selection's axes, outlines and grips (none while a tool or a command is busy).
   const editor = useGripEditor({
     viewIds: [ownPlan, storey ? `plan:${storey.id}` : null], mode: 'plan', storeyId: storey?.id, toScreen, scale: view.scale,
-    aim: (cx, cy, from) => { const s = snapAt(cx, cy, from); setHover(s); return s.point; },
+    aim: (cx, cy, from, _z, along) => { const s = snapAt(cx, cy, from, along); setHover(s); return s.point; },
     raw: (cx, cy) => { const r = svgRef.current!.getBoundingClientRect(); return toWorld(cx - r.left, cy - r.top); },
     disabled: !!tool?.gesture || !!cadStep, svg: svgRef, marks: drawing?.marks,
   });
@@ -1122,11 +1125,19 @@ export function PlanView() {
   useEffect(() => () => setDrawnPath(null), []);
 
   const marker = hover && (tool?.gesture || editor.dragging || cadStep?.want === 'point' || cadStep?.snap || dragTrace) ? toScreen(hover.point) : null;
+  const obOpen = useOnboarding((s) => s.open && s.sandbox);
+  const workspace = useInterface((s) => s.workspace);
+  const ghostTargets = obOpen ? missionTargets(workspace) : [];
+  const precisionTools = usePrefs((p) => p.precisionTools);
+  const magnets = useMemo(() => {
+    if (!precisionTools || !hover || !tool?.gesture || !storey) return [];
+    const anchors = storeyAnchorPoints(nodes.values(), storey.id);
+    return equalSpacingMagnets(hover.point, anchors);
+  }, [precisionTools, hover, tool?.gesture, storey, nodes]);
 
   return (
     <div className="view-pane">
       <div className="view-toolbar">
-        <span className="view-title">{siteView ? <>Site · <span data-no-i18n>{siteView.name}</span></> : <>Plan · {storey?.name ?? '—'}</>}</span>
 {(drawing?.lineworkOrphans?.length ?? 0) > 0 && ownPlan && (
           <button type="button" className="chip warn" title="The edges they were on are gone: remove them" onClick={() => void execute('view.lineworkReset', { id: ownPlan, orphans: true })}>
             {drawing!.lineworkOrphans!.length} line edit(s) lost their edge · clean
@@ -1252,6 +1263,34 @@ export function PlanView() {
         {pts.map((p, i) => { const s = toScreen(p); return <circle key={i} cx={s.x} cy={s.y} r={3} className="plan-vertex" />; })}
         {editor.render}
         <PlanOverlays toScreen={toScreen} toWorld={toWorld} scale={view.scale} rotation={rot} view={{ id: ownPlan ?? null, storeyId: storey?.id ?? null }} />
+        {ghostTargets.map((gt) => {
+          const sa = toScreen(gt.a);
+          if (gt.kind === 'point' || !gt.b) {
+            return (
+              <g key={gt.id} className="mission-ghost" aria-hidden="true">
+                <circle cx={sa.x} cy={sa.y} r={10} />
+                <text x={sa.x + 14} y={sa.y + 4}>{gt.label}</text>
+              </g>
+            );
+          }
+          const sb = toScreen(gt.b);
+          return (
+            <g key={gt.id} className="mission-ghost" aria-hidden="true">
+              <line x1={sa.x} y1={sa.y} x2={sb.x} y2={sb.y} />
+              <text x={(sa.x + sb.x) / 2} y={(sa.y + sb.y) / 2 - 8} textAnchor="middle">{gt.label}</text>
+            </g>
+          );
+        })}
+        {magnets.map((mg, i) => {
+          const sa = toScreen(mg.a), sm = toScreen(mg.mid), sb = toScreen(mg.b);
+          return (
+            <g key={`mag-${i}`} className="smart-magnet" aria-hidden="true">
+              <line x1={sa.x} y1={sa.y} x2={sb.x} y2={sb.y} />
+              <text x={(sa.x + sm.x) / 2} y={(sa.y + sm.y) / 2 - 6} textAnchor="middle">=</text>
+              <text x={(sm.x + sb.x) / 2} y={(sm.y + sb.y) / 2 - 6} textAnchor="middle">=</text>
+            </g>
+          );
+        })}
         {preview}
         {refPt && pts.length > 0 && <DatumMark at={toScreen(refPt)} />}
         <Crosshair at={marker ?? (hover ? toScreen(hover.point) : null)} width={size.w} height={size.h} />

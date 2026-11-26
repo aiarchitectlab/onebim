@@ -54,7 +54,11 @@ jobs:
           CI: 'true'
       # The tests run on Linux in CI (ci.yml); two of them read files with Unix line endings and fail on Windows.
       # PowerShell, so the zips are unpacked by Windows' own tar (Git Bash's GNU tar reads C:\ as a host).
-      - run: pnpm build:product ${{ env.PRODUCT }}
+      # A release (v0.2.0) gives its number to the app and its files (0.2.0); a plain run keeps 0.1.<commit count>.
+      - run: |
+          $release = '${{ inputs.release || (startsWith(github.ref, 'refs/tags/v') && github.ref_name || '') }}'
+          if ($release -match '^v?(\d+\.\d+\.\d+)$') { $env:LAPIN_VERSION = $Matches[1] }
+          pnpm build:product ${{ env.PRODUCT }}
         shell: pwsh
       - uses: actions/upload-artifact@v4
         with:
@@ -63,6 +67,17 @@ jobs:
             build/${{ env.PRODUCT }}/bundle/nsis/*-setup.exe
             build/${{ env.PRODUCT }}/bundle/nsis/*-portable.zip
           if-no-files-found: error
+      # Built again for a release that has files already (another version number): those are taken off first.
+      - name: Take off the release's old files
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release || github.ref_name }}
+        run: |
+          $new = Get-ChildItem build/${{ env.PRODUCT }}/bundle/nsis -File | Where-Object { $_.Name -like '*-setup.exe' -or $_.Name -like '*-portable.zip' } | ForEach-Object Name
+          $old = gh release view $env:TAG -R ${{ github.repository }} --json assets -q '.assets[].name' 2>$null
+          foreach ($a in $old) { if ($a -and $new -notcontains $a) { gh release delete-asset $env:TAG $a -R ${{ github.repository }} -y } }
       - name: Attach to the release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.release != ''
         uses: softprops/action-gh-release@v2
